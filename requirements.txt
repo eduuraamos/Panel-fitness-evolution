@@ -1,0 +1,1 @@
+# No external dependencies required for the DB script (uses builtin sqlite3)
