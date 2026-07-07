@@ -141,7 +141,79 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def read_json(self):
+        length = int(self.headers.get('Content-Length', 0))
+        if length == 0:
+            return None
+        raw = self.rfile.read(length)
+        try:
+            return json.loads(raw.decode('utf-8'))
+        except Exception:
+            return None
+
+    def send_json(self, obj, status=200):
+        body = json.dumps(obj, ensure_ascii=False).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        # JSON API: create food or category
+        ctype = self.headers.get('Content-Type', '')
+        if path == '/api/foods' and 'application/json' in ctype:
+            payload = self.read_json() or {}
+            name = payload.get('name')
+            if not name:
+                return self.send_json({'error': 'name is required'}, status=400)
+            cat = payload.get('category_id')
+            try:
+                calories = float(payload.get('calories') or 0)
+            except Exception:
+                calories = 0
+            try:
+                protein = float(payload.get('protein') or 0)
+            except Exception:
+                protein = 0
+            try:
+                carbs = float(payload.get('carbs') or 0)
+            except Exception:
+                carbs = 0
+            try:
+                fats = float(payload.get('fats') or 0)
+            except Exception:
+                fats = 0
+            serving = payload.get('serving_size')
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO foods(name, category_id, calories, protein, carbs, fats, serving_size) VALUES(?,?,?,?,?,?,?)",
+                (name, cat, calories, protein, carbs, fats, serving),
+            )
+            fid = cur.lastrowid
+            conn.commit()
+            conn.close()
+            row = get_foods()[-1]
+            keys = ['id','name','category','calories','protein','carbs','fats','serving_size']
+            return self.send_json(dict(zip(keys, row)), status=201)
+
+        if path == '/api/categories' and 'application/json' in ctype:
+            payload = self.read_json() or {}
+            name = payload.get('name')
+            if not name:
+                return self.send_json({'error': 'name is required'}, status=400)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("INSERT OR IGNORE INTO categories(name) VALUES(?)", (name,))
+            conn.commit()
+            conn.close()
+            return self.send_json({'status': 'created'}, status=201)
+
+        # fall back to form-based handlers
         length = int(self.headers.get('Content-Length', 0))
         data = self.rfile.read(length).decode('utf-8')
         params = urllib.parse.parse_qs(data)
