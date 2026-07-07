@@ -159,6 +159,97 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_PUT(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        ctype = self.headers.get('Content-Type', '')
+        if 'application/json' not in ctype:
+            self.send_json({'error': 'Content-Type must be application/json'}, status=415)
+            return
+
+        payload = self.read_json() or {}
+
+        # Update food: /api/foods/<id>
+        if path.startswith('/api/foods/'):
+            try:
+                fid = int(path.split('/')[-1])
+            except Exception:
+                return self.send_json({'error': 'invalid id'}, status=400)
+
+            allowed = ['name', 'category_id', 'calories', 'protein', 'carbs', 'fats', 'serving_size']
+            sets = []
+            vals = []
+            for k in allowed:
+                if k in payload:
+                    sets.append(f"{k} = ?")
+                    vals.append(payload.get(k))
+            if not sets:
+                return self.send_json({'error': 'no fields to update'}, status=400)
+
+            vals.append(fid)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(f"UPDATE foods SET {', '.join(sets)} WHERE id = ?", tuple(vals))
+            conn.commit()
+            conn.close()
+            # return updated row
+            rows = [r for r in get_foods() if r[0] == fid]
+            if not rows:
+                return self.send_json({'error': 'not found'}, status=404)
+            keys = ['id','name','category','calories','protein','carbs','fats','serving_size']
+            return self.send_json(dict(zip(keys, rows[0])))
+
+        # Update category: /api/categories/<id>
+        if path.startswith('/api/categories/'):
+            try:
+                cid = int(path.split('/')[-1])
+            except Exception:
+                return self.send_json({'error': 'invalid id'}, status=400)
+            name = payload.get('name')
+            if not name:
+                return self.send_json({'error': 'name required'}, status=400)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("UPDATE categories SET name = ? WHERE id = ?", (name, cid))
+            conn.commit()
+            conn.close()
+            return self.send_json({'status': 'updated'})
+
+        self.send_json({'error': 'not found'}, status=404)
+
+    def do_DELETE(self):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+
+        # Delete food
+        if path.startswith('/api/foods/'):
+            try:
+                fid = int(path.split('/')[-1])
+            except Exception:
+                return self.send_json({'error': 'invalid id'}, status=400)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM foods WHERE id = ?", (fid,))
+            conn.commit()
+            conn.close()
+            return self.send_json({'status': 'deleted'})
+
+        # Delete category
+        if path.startswith('/api/categories/'):
+            try:
+                cid = int(path.split('/')[-1])
+            except Exception:
+                return self.send_json({'error': 'invalid id'}, status=400)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("UPDATE foods SET category_id = NULL WHERE category_id = ?", (cid,))
+            cur.execute("DELETE FROM categories WHERE id = ?", (cid,))
+            conn.commit()
+            conn.close()
+            return self.send_json({'status': 'deleted'})
+
+        self.send_json({'error': 'not found'}, status=404)
+
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
