@@ -5,6 +5,7 @@ import sqlite3
 import html
 import socket
 import urllib.parse
+import json
 
 
 DB_PATH = "data/foods.db"
@@ -34,7 +35,35 @@ def get_categories():
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path not in ("/", "/index.html", "/add"):
+        parsed = urllib.parse.urlparse(self.path)
+        path = parsed.path
+        q = urllib.parse.parse_qs(parsed.query)
+
+        # API endpoints
+        if path == '/api/foods':
+            foods = get_foods()
+            keys = ['id','name','category','calories','protein','carbs','fats','serving_size']
+            data = [dict(zip(keys, r)) for r in foods]
+            body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/api/categories':
+            cats = get_categories()
+            data = [{'id': c[0], 'name': c[1]} for c in cats]
+            body = json.dumps(data, ensure_ascii=False).encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path not in ("/", "/index.html", "/add"):
             self.send_response(404)
             self.end_headers()
             self.wfile.write(b"Not found")
@@ -42,6 +71,9 @@ class Handler(BaseHTTPRequestHandler):
 
         foods = get_foods()
         categories = get_categories()
+        msg = ''
+        if 'msg' in q:
+            msg = q.get('msg', [''])[0]
         html_rows = []
         for r in foods:
             id_, name, category, cal, prot, carbs, fats, serving = r
@@ -64,7 +96,8 @@ class Handler(BaseHTTPRequestHandler):
           </style>
         </head>
         <body>
-                    <h1>Alimentos</h1>
+                      <h1>Alimentos</h1>
+                      {f'<div style="padding:8px;border:1px solid #cfc;margin-bottom:12px;background:#f6fff6">{html.escape(msg)}</div>' if msg else ''}
                     <h2>Añadir alimento</h2>
                     <form method="post" action="/add" style="margin-bottom:20px">
                         <input name="name" placeholder="Nombre" required />
@@ -156,9 +189,9 @@ class Handler(BaseHTTPRequestHandler):
             conn.commit()
             conn.close()
 
-            # Redirect back to main page
+            # Redirect back to main page with success message
             self.send_response(303)
-            self.send_header('Location', '/')
+            self.send_header('Location', '/?msg=' + urllib.parse.quote('Alimento añadido'))
             self.end_headers()
             return
 
@@ -166,14 +199,14 @@ class Handler(BaseHTTPRequestHandler):
             # reuse helper
             self.do_POST_add_category(params)
             self.send_response(303)
-            self.send_header('Location', '/')
+            self.send_header('Location', '/?msg=' + urllib.parse.quote('Categoría creada'))
             self.end_headers()
             return
 
         if self.path == '/delete_category':
             self.do_POST_delete_category(params)
             self.send_response(303)
-            self.send_header('Location', '/')
+            self.send_header('Location', '/?msg=' + urllib.parse.quote('Categoría borrada'))
             self.end_headers()
             return
 
