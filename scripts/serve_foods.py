@@ -22,8 +22,12 @@ from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
-DB_PATH = os.path.join(BASE_DIR, "data", "foods.db")
 STATIC_DIR = "static"
+DATA_DIR = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data"))
+DB_PATH = os.path.join(DATA_DIR, "foods.db")
+STATIC_BASE_DIR = os.path.join(os.path.dirname(__file__), STATIC_DIR)
+UPLOADS_DIR = os.environ.get("UPLOADS_DIR", os.path.join(DATA_DIR, "uploads"))
+UPLOADS_FOODS_DIR = os.path.join(UPLOADS_DIR, "foods")
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8005"))
 
@@ -129,12 +133,10 @@ def refresh_food_search_row(cur, food_id):
         pass
 
 
-    def ensure_brand_column():
+def ensure_brand_column():
     global _schema_checked
     if _schema_checked:
         return
-    print("DB_PATH:", DB_PATH)
-print("EXISTS:", os.path.exists(DB_PATH))
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(foods)")
@@ -1205,7 +1207,7 @@ def save_food_photo_data_url(photo_data_url):
         return None
     if not content:
         return None
-    upload_dir = os.path.join(os.path.dirname(__file__), STATIC_DIR, 'uploads', 'foods')
+    upload_dir = UPLOADS_FOODS_DIR
     os.makedirs(upload_dir, exist_ok=True)
     filename = f"food_{uuid.uuid4().hex}.{ext}"
     file_path = os.path.join(upload_dir, filename)
@@ -1950,7 +1952,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(403)
                 self.end_headers()
                 return
-            full_path = os.path.join(os.path.dirname(__file__), STATIC_DIR, safe_path)
+
+            path_parts = safe_path.split('/')
+            if path_parts and path_parts[0] == 'uploads':
+                upload_rel = '/'.join(path_parts[1:])
+                uploads_root_abs = os.path.abspath(UPLOADS_DIR)
+                full_path = os.path.abspath(os.path.normpath(os.path.join(uploads_root_abs, upload_rel)))
+                if not full_path.startswith(uploads_root_abs + os.sep):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+            else:
+                full_path = os.path.join(STATIC_BASE_DIR, safe_path)
+
             if not os.path.isfile(full_path):
                 self.send_response(404)
                 self.end_headers()
@@ -5659,9 +5673,9 @@ def run():
     ensure_payment_plans_table()
     ensure_client_history_tables()
     ensure_diet_builder_tables()
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    static_dir = os.path.join(os.path.dirname(__file__), STATIC_DIR)
-    os.makedirs(static_dir, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(STATIC_BASE_DIR, exist_ok=True)
+    os.makedirs(UPLOADS_FOODS_DIR, exist_ok=True)
     port = PORT
     server = HTTPServer((HOST, port), Handler)
     print(f"Servidor iniciado en http://{HOST}:{port} — Ctrl-C para detener")

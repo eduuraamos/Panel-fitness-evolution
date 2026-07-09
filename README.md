@@ -22,7 +22,7 @@ La aplicación se puede subir a un hosting Python como Render o PythonAnywhere.
 2. Entra en Render: https://render.com
 3. Crea un `New +` -> `Blueprint`.
 4. Selecciona tu repositorio.
-5. Render detectará automáticamente `render.yaml` y creará el servicio web.
+5. Render detectará automáticamente `render.yaml` y creará el servicio web con disco persistente.
 6. Pulsa `Apply` para desplegar.
 7. Al terminar, Render te dará una URL pública tipo:
 	`https://nutrition-app.onrender.com`
@@ -31,13 +31,17 @@ Con eso ya tienes el sitio online.
 
 ### Importante sobre datos (SQLite)
 
-Si usas plan `free`, el sistema de archivos es efímero y los datos pueden perderse al redeploy/restart.
+Con el `render.yaml` actual, la app usa:
 
-Para mantener datos de forma persistente:
+1. `DATA_DIR=/var/data`
+2. `UPLOADS_DIR=/var/data/uploads`
 
-1. Cambia a un plan que permita disco persistente.
-2. Añade un disco al servicio en Render (`Disks`).
-3. Usa ese disco para guardar la base de datos SQLite y los uploads.
+Esto permite persistencia real para:
+
+1. Base de datos SQLite (`foods.db`)
+2. Fotos subidas (`/static/uploads/foods/...`)
+
+Nota: para usar disco persistente en Render necesitas un plan con soporte de discos (por eso el blueprint está en `starter`).
 
 ### Opción alternativa: PythonAnywhere
 
@@ -52,9 +56,9 @@ Si quieres, te preparo también la versión para Railway o Fly.io con un solo co
 
 Notas importantes:
 
-1. La base de datos SQLite vive en `data/foods.db`.
-2. Las fotos de alimentos se guardan en `scripts/static/uploads/foods/`.
-3. Para no perder datos, usa un hosting con almacenamiento persistente o haz copias de seguridad.
+1. En local, la base de datos vive en `data/foods.db`.
+2. En Render, la base y uploads van al disco persistente (`/var/data`).
+3. Las fotos siguen sirviéndose por URL web bajo `/static/uploads/foods/...`.
 
 Archivos de despliegue incluidos:
 

@@ -2,11 +2,19 @@ services:
   - type: web
     name: nutrition-app
     env: python
-    plan: free
+    plan: starter
     region: frankfurt
     buildCommand: pip install -r requirements.txt
     startCommand: python3 scripts/serve_foods.py
     healthCheckPath: /
+    disks:
+      - name: nutrition-data
+        mountPath: /var/data
+        sizeGB: 1
     envVars:
       - key: PORT
         value: "10000"
+      - key: DATA_DIR
+        value: /var/data
+      - key: UPLOADS_DIR
+        value: /var/data/uploads
