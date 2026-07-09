@@ -1,1 +1,2 @@
-# No external dependencies required for the DB script (uses builtin sqlite3)
+# Dependencies for server/PDF export
+reportlab>=5.0.0

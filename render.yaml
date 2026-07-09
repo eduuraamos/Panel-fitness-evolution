@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: nutrition-app
+    env: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 scripts/serve_foods.py
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: "10000"
