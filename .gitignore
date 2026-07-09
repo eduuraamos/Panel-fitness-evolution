@@ -1,4 +1,6 @@
 venv/
 .venv/
 __pycache__/
-data/*.db
+# data/*.db
+!data/foods.db
+
