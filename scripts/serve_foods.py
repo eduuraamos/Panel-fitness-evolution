@@ -129,10 +129,12 @@ def refresh_food_search_row(cur, food_id):
         pass
 
 
-def ensure_brand_column():
+    def ensure_brand_column():
     global _schema_checked
     if _schema_checked:
         return
+    print("DB_PATH:", DB_PATH)
+print("EXISTS:", os.path.exists(DB_PATH))
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(foods)")
