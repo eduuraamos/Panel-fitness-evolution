@@ -1962,6 +1962,16 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_response(403)
                     self.end_headers()
                     return
+
+                # Backward compatibility: old images may still be bundled under scripts/static/uploads.
+                if not os.path.isfile(full_path):
+                    legacy_uploads_abs = os.path.abspath(os.path.join(STATIC_BASE_DIR, 'uploads'))
+                    legacy_path = os.path.abspath(os.path.normpath(os.path.join(legacy_uploads_abs, upload_rel)))
+                    if not legacy_path.startswith(legacy_uploads_abs + os.sep):
+                        self.send_response(403)
+                        self.end_headers()
+                        return
+                    full_path = legacy_path
             else:
                 full_path = os.path.join(STATIC_BASE_DIR, safe_path)
 
