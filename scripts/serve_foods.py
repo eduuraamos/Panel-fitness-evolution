@@ -15,11 +15,15 @@ import urllib.parse
 import json
 import unicodedata
 import io
+import time
+import hmac
+import hashlib
 from difflib import SequenceMatcher
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
+from reportlab.lib.utils import ImageReader
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 STATIC_DIR = "static"
@@ -30,6 +34,9 @@ UPLOADS_DIR = os.environ.get("UPLOADS_DIR", os.path.join(DATA_DIR, "uploads"))
 UPLOADS_FOODS_DIR = os.path.join(UPLOADS_DIR, "foods")
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8005"))
+CLIENT_PORTAL_SECRET = os.environ.get("CLIENT_PORTAL_SECRET", "nutrition-app-client-portal")
+CLIENT_PORTAL_COOKIE = "client_portal_session"
+CLIENT_PORTAL_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
 
 # migrations
 _schema_checked = False
@@ -38,6 +45,19 @@ DEFAULT_FOOD_CATEGORIES = [
     'Carnes', 'Pescados', 'Huevos', 'Lácteos', 'Arroz', 'Pasta', 'Patata/Batata',
     'Frutas', 'Verduras', 'Legumbres', 'Frutos secos', 'Aceites', 'Grasas saludables',
     'Salsas', 'Embutidos', 'Bebidas', 'Dulces', 'Suplementos'
+]
+
+DEFAULT_DIET_INSTRUCTIONS_TEMPLATE = (
+    "Hidratacion: bebe al menos 2 litros de agua al dia.\n"
+    "Horarios: intenta mantener horarios regulares y evita saltarte comidas.\n"
+    "Coccion: prioriza plancha, horno, vapor o airfryer, reduciendo fritos.\n"
+    "Adherencia: si un alimento no te encaja, usa una opcion similar y manten cantidades.\n"
+    "Constancia: revisa sensaciones, energia y digestion para ajustar con tu entrenador."
+)
+
+SPANISH_MONTHS = [
+    'ENERO', 'FEBRERO', 'MARZO', 'ABRIL', 'MAYO', 'JUNIO',
+    'JULIO', 'AGOSTO', 'SEPTIEMBRE', 'OCTUBRE', 'NOVIEMBRE', 'DICIEMBRE'
 ]
 
 
@@ -61,6 +81,19 @@ def parse_numeric_input(value, default=0.0):
         return float(m.group(0))
     except Exception:
         return float(default)
+
+
+def parse_gluten_input(value):
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text == '':
+        return None
+    if text in ('1', 'true', 'yes', 'si', 'con'):
+        return 1
+    if text in ('0', 'false', 'no', 'sin'):
+        return 0
+    return None
 
 
 def query_terms(query):
@@ -191,6 +224,12 @@ def ensure_brand_column():
             conn.commit()
         except Exception:
             pass
+    if 'has_gluten' not in cols:
+        try:
+            cur.execute("ALTER TABLE foods ADD COLUMN has_gluten INTEGER")
+            conn.commit()
+        except Exception:
+            pass
 
     cur.execute(
         """
@@ -270,8 +309,14 @@ def ensure_exercises_table():
     if 'exercise_category_id' not in cols:
         cur.execute("ALTER TABLE exercises ADD COLUMN exercise_category_id INTEGER")
         conn.commit()
+    if 'exercise_category_id_2' not in cols:
+        cur.execute("ALTER TABLE exercises ADD COLUMN exercise_category_id_2 INTEGER")
+        conn.commit()
     if 'video_url' not in cols:
         cur.execute("ALTER TABLE exercises ADD COLUMN video_url TEXT")
+        conn.commit()
+    if 'machine_url' not in cols:
+        cur.execute("ALTER TABLE exercises ADD COLUMN machine_url TEXT")
         conn.commit()
     conn.close()
 
@@ -305,8 +350,82 @@ def ensure_routines_table():
     )
     """
     )
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS routine_days (
+        id INTEGER PRIMARY KEY,
+        routine_id INTEGER NOT NULL,
+        day_index INTEGER NOT NULL,
+        day_name TEXT NOT NULL,
+        day_type TEXT NOT NULL DEFAULT 'train',
+        UNIQUE(routine_id, day_index),
+        FOREIGN KEY(routine_id) REFERENCES routines(id)
+    )
+    """
+    )
+    conn.commit()
+
+    cur.execute("PRAGMA table_info(routines)")
+    routine_cols = [r[1] for r in cur.fetchall()]
+    if 'is_template' not in routine_cols:
+        cur.execute("ALTER TABLE routines ADD COLUMN is_template INTEGER DEFAULT 1")
+        cur.execute("UPDATE routines SET is_template = 1 WHERE is_template IS NULL")
+        conn.commit()
+    if 'client_name' not in routine_cols:
+        cur.execute("ALTER TABLE routines ADD COLUMN client_name TEXT")
+        conn.commit()
+
+    cur.execute("PRAGMA table_info(routine_items)")
+    routine_item_cols = [r[1] for r in cur.fetchall()]
+    if 'day_index' not in routine_item_cols:
+        cur.execute("ALTER TABLE routine_items ADD COLUMN day_index INTEGER")
+        conn.commit()
+
+    default_days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
+    for idx, day_name in enumerate(default_days):
+        cur.execute(
+            "UPDATE routine_items SET day_index = ? WHERE day_index IS NULL AND day_name = ?",
+            (idx, day_name),
+        )
     conn.commit()
     conn.close()
+
+
+def get_default_routine_days():
+    return [
+        (0, 'Lunes', 'train'),
+        (1, 'Martes', 'train'),
+        (2, 'Miércoles', 'train'),
+        (3, 'Jueves', 'train'),
+        (4, 'Viernes', 'train'),
+        (5, 'Sábado', 'rest'),
+        (6, 'Domingo', 'rest'),
+    ]
+
+
+def ensure_routine_days_for_routine(routine_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    for day_index, day_name, day_type in get_default_routine_days():
+        cur.execute(
+            "INSERT OR IGNORE INTO routine_days(routine_id, day_index, day_name, day_type) VALUES(?,?,?,?)",
+            (routine_id, day_index, day_name, day_type),
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_routine_days(routine_id):
+    ensure_routine_days_for_routine(routine_id)
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT day_index, day_name, day_type FROM routine_days WHERE routine_id = ? ORDER BY day_index",
+        (routine_id,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
 
 
 def ensure_diets_table():
@@ -318,6 +437,7 @@ def ensure_diets_table():
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         description TEXT,
+        client_instructions TEXT,
         is_template INTEGER DEFAULT 1,
         client_diet_name TEXT,
         client_weight_kg REAL DEFAULT 0,
@@ -357,6 +477,8 @@ def ensure_diets_table():
         cur.execute("ALTER TABLE diets ADD COLUMN client_height_cm REAL DEFAULT 0")
     if 'client_age' not in diet_cols:
         cur.execute("ALTER TABLE diets ADD COLUMN client_age INTEGER DEFAULT 0")
+    if 'client_instructions' not in diet_cols:
+        cur.execute("ALTER TABLE diets ADD COLUMN client_instructions TEXT")
     cur.execute("PRAGMA table_info(diet_items)")
     cols = [r[1] for r in cur.fetchall()]
     if 'day_of_week' not in cols:
@@ -365,6 +487,52 @@ def ensure_diets_table():
         cur.execute("ALTER TABLE diet_items ADD COLUMN meal_time TEXT")
     conn.commit()
     conn.close()
+
+
+def ensure_app_settings_table():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT
+    )
+    """
+    )
+    cur.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value) VALUES(?, ?)",
+        ('diet_instructions_template', DEFAULT_DIET_INSTRUCTIONS_TEMPLATE),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_app_setting(key, default_value=''):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT value FROM app_settings WHERE key = ?", (key,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return default_value
+    return row[0] if row[0] is not None else default_value
+
+
+def set_app_setting(key, value):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO app_settings(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_diet_instructions_template():
+    value = get_app_setting('diet_instructions_template', DEFAULT_DIET_INSTRUCTIONS_TEMPLATE)
+    return (value or '').strip() or DEFAULT_DIET_INSTRUCTIONS_TEMPLATE
 
 
 def ensure_clients_table():
@@ -376,6 +544,7 @@ def ensure_clients_table():
         id INTEGER PRIMARY KEY,
         name TEXT NOT NULL,
         phone TEXT,
+        email TEXT,
         birthdate TEXT,
         height_cm REAL DEFAULT 0,
         weight_kg REAL DEFAULT 0,
@@ -399,6 +568,18 @@ def ensure_clients_table():
         cur.execute("ALTER TABLE clients ADD COLUMN plan_amount REAL DEFAULT 0")
     if 'plan_notes' not in cols:
         cur.execute("ALTER TABLE clients ADD COLUMN plan_notes TEXT")
+    if 'email' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN email TEXT")
+    if 'client_access_code' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN client_access_code TEXT")
+    if 'client_password_hash' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN client_password_hash TEXT")
+    if 'daily_steps_goal' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN daily_steps_goal INTEGER DEFAULT 0")
+    cur.execute(
+        "UPDATE clients SET client_access_code = ('C' || CAST(id AS TEXT)) WHERE COALESCE(TRIM(client_access_code), '') = ''"
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_email ON clients(email)")
     conn.commit()
     conn.close()
 
@@ -465,8 +646,480 @@ def ensure_client_history_tables():
     cols = [r[1] for r in cur.fetchall()]
     if 'template_diet_id' not in cols:
         cur.execute("ALTER TABLE client_diet_history ADD COLUMN template_diet_id INTEGER")
+    cur.execute("PRAGMA table_info(client_training_history)")
+    training_cols = [r[1] for r in cur.fetchall()]
+    if 'routine_id' not in training_cols:
+        cur.execute("ALTER TABLE client_training_history ADD COLUMN routine_id INTEGER")
+    if 'template_routine_id' not in training_cols:
+        cur.execute("ALTER TABLE client_training_history ADD COLUMN template_routine_id INTEGER")
+
+    # Backfill: routines already assigned as client copies before template flag existed.
+    cur.execute(
+        """
+        UPDATE routines
+        SET is_template = 0
+        WHERE id IN (
+            SELECT DISTINCT routine_id
+            FROM client_training_history
+            WHERE COALESCE(template_routine_id, 0) > 0 AND COALESCE(routine_id, 0) > 0
+        )
+        """
+    )
     conn.commit()
     conn.close()
+
+
+def ensure_fasting_weights_table():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_fasting_weights (
+        id INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL,
+        date_text TEXT NOT NULL,
+        weight_kg REAL NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(client_id, date_text),
+        FOREIGN KEY(client_id) REFERENCES clients(id)
+    )
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_fasting_weights_client_date ON client_fasting_weights(client_id, date_text)")
+    conn.commit()
+    conn.close()
+
+
+def ensure_client_daily_steps_table():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_daily_steps (
+        id INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL,
+        date_text TEXT NOT NULL,
+        steps INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(client_id, date_text),
+        FOREIGN KEY(client_id) REFERENCES clients(id)
+    )
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_daily_steps_client_date ON client_daily_steps(client_id, date_text)")
+    conn.commit()
+    conn.close()
+
+
+def get_fasting_weight_slots():
+    from datetime import date
+    today = date.today()
+    slots = []
+    for delta in range(-2, 6):
+        month_raw = today.month + delta
+        year = today.year + ((month_raw - 1) // 12)
+        month = ((month_raw - 1) % 12) + 1
+        slots.append((year, month))
+    return slots
+
+
+def get_client_fasting_weights_map(client_id, start_date_text, end_date_text):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT date_text, weight_kg
+        FROM client_fasting_weights
+        WHERE client_id = ? AND date_text >= ? AND date_text <= ?
+        ORDER BY date_text
+        """,
+        (int(client_id), start_date_text, end_date_text),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = {}
+    for date_text, weight_kg in rows:
+        out[str(date_text)] = float(weight_kg or 0)
+    return out
+
+
+def get_client_daily_steps_goal(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(daily_steps_goal, 0) FROM clients WHERE id = ?", (int(client_id),))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return 0
+    try:
+        return int(row[0] or 0)
+    except Exception:
+        return 0
+
+
+def get_client_daily_steps_map(client_id, start_date_text, end_date_text):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT date_text, steps
+        FROM client_daily_steps
+        WHERE client_id = ? AND date_text >= ? AND date_text <= ?
+        ORDER BY date_text
+        """,
+        (int(client_id), start_date_text, end_date_text),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = {}
+    for date_text, steps in rows:
+        out[str(date_text)] = int(steps or 0)
+    return out
+
+
+def upsert_client_fasting_weight(client_id, date_text, weight_kg):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if weight_kg is None:
+        cur.execute(
+            "DELETE FROM client_fasting_weights WHERE client_id = ? AND date_text = ?",
+            (int(client_id), date_text),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO client_fasting_weights(client_id, date_text, weight_kg, created_at, updated_at)
+            VALUES(?,?,?,datetime('now'),datetime('now'))
+            ON CONFLICT(client_id, date_text)
+            DO UPDATE SET weight_kg = excluded.weight_kg, updated_at = datetime('now')
+            """,
+            (int(client_id), date_text, float(weight_kg)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def upsert_client_daily_steps(client_id, date_text, steps):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if steps is None:
+        cur.execute(
+            "DELETE FROM client_daily_steps WHERE client_id = ? AND date_text = ?",
+            (int(client_id), date_text),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO client_daily_steps(client_id, date_text, steps, created_at, updated_at)
+            VALUES(?,?,?,datetime('now'),datetime('now'))
+            ON CONFLICT(client_id, date_text)
+            DO UPDATE SET steps = excluded.steps, updated_at = datetime('now')
+            """,
+            (int(client_id), date_text, int(steps)),
+        )
+    conn.commit()
+    conn.close()
+
+
+def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', include_client_id=True):
+    slots = get_fasting_weight_slots()
+    first_year, first_month = slots[0]
+    last_year, last_month = slots[-1]
+    start_date_text = f"{first_year:04d}-{first_month:02d}-01"
+    last_day = calendar.monthrange(last_year, last_month)[1]
+    end_date_text = f"{last_year:04d}-{last_month:02d}-{last_day:02d}"
+    weights_map = get_client_fasting_weights_map(client_id, start_date_text, end_date_text)
+
+    month_columns = []
+    for year, month in slots:
+        max_day = calendar.monthrange(year, month)[1]
+        rows = []
+        for day in range(1, max_day + 1):
+            date_key = f"{year:04d}-{month:02d}-{day:02d}"
+            value = weights_map.get(date_key)
+            value_text = '' if value is None else f"{value:.2f}".replace('.', ',')
+            rows.append(
+                f'<label class="fw-row fw-day-row" data-date="{date_key}">'
+                f'<span>{day}:</span>'
+                f'<input class="fw-input" type="text" inputmode="decimal" data-date="{date_key}" value="{html.escape(value_text)}" placeholder="-" />'
+                '</label>'
+            )
+        month_columns.append(
+            '<div class="fw-month">'
+            f'<div class="fw-month-title">{SPANISH_MONTHS[month - 1]}</div>'
+            f'<div class="fw-month-days">{"".join(rows)}</div>'
+            '</div>'
+        )
+
+    client_payload = f"client_id: {int(client_id)}," if include_client_id else ''
+    return f'''
+    <div class="fw-wrap" id="{panel_id}">
+        <div class="fw-head">Peso corporal en ayunas</div>
+        <div class="fw-grid">{"".join(month_columns)}</div>
+        <div class="fw-foot">Editable por ti y por el cliente. Se guarda automáticamente al salir del campo.</div>
+    </div>
+    <script>
+    (function() {{
+        const root = document.getElementById('{panel_id}');
+        if (!root) return;
+        const inputs = Array.from(root.querySelectorAll('.fw-input'));
+        const dayRows = Array.from(root.querySelectorAll('.fw-day-row'));
+
+        function parseIsoDate(dateText) {{
+            const parts = String(dateText || '').split('-');
+            if (parts.length !== 3) return null;
+            const y = Number(parts[0]);
+            const m = Number(parts[1]);
+            const d = Number(parts[2]);
+            if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+            return new Date(y, m - 1, d);
+        }}
+
+        function isMonday(dateText) {{
+            const dt = parseIsoDate(dateText);
+            if (!dt) return false;
+            return dt.getDay() === 1;
+        }}
+
+        function formatWeight(n) {{
+            return Number(n || 0).toFixed(2).replace('.', ',');
+        }}
+
+        function formatPct(p) {{
+            const sign = p > 0 ? '+' : '';
+            return sign + Number(p || 0).toFixed(2).replace('.', ',') + '%';
+        }}
+
+        function renderWeeklyMeans() {{
+            root.querySelectorAll('.fw-mean-row').forEach((el) => el.remove());
+            const rowByDate = new Map();
+            const valueByDate = new Map();
+
+            dayRows.forEach((row) => {{
+                const dateText = row.dataset.date;
+                if (!dateText) return;
+                rowByDate.set(dateText, row);
+                const input = row.querySelector('.fw-input');
+                if (!input) return;
+                const parsed = normalizeWeight(input.value);
+                if (!parsed.invalid && !parsed.empty) valueByDate.set(dateText, parsed.value);
+            }});
+
+            const orderedDates = Array.from(rowByDate.keys()).sort();
+            let previousMonday = null;
+            let previousAverage = null;
+
+            for (const dateText of orderedDates) {{
+                if (!isMonday(dateText)) continue;
+                if (!previousMonday) {{
+                    previousMonday = dateText;
+                    continue;
+                }}
+
+                const weekDates = orderedDates.filter((d) => d >= previousMonday && d <= dateText);
+                const values = weekDates
+                    .map((d) => valueByDate.get(d))
+                    .filter((v) => Number.isFinite(v));
+
+                if (!values.length) {{
+                    previousMonday = dateText;
+                    continue;
+                }}
+
+                const avg = values.reduce((a, b) => a + b, 0) / values.length;
+                let pctText = '(s/d)';
+                let pctClass = 'neutral';
+                if (previousAverage && previousAverage > 0) {{
+                    const pct = ((avg - previousAverage) / previousAverage) * 100;
+                    pctText = '(' + formatPct(pct) + ')';
+                    pctClass = pct < 0 ? 'down' : (pct > 0 ? 'up' : 'neutral');
+                }}
+
+                const meanRow = document.createElement('div');
+                meanRow.className = 'fw-row fw-mean-row';
+                meanRow.innerHTML = '<span>M:</span><strong class="fw-mean-value ' + pctClass + '">' + formatWeight(avg) + ' <em>' + pctText + '</em></strong>';
+                const anchor = rowByDate.get(dateText);
+                if (anchor && anchor.parentNode) anchor.insertAdjacentElement('afterend', meanRow);
+
+                previousAverage = avg;
+                previousMonday = dateText;
+            }}
+        }}
+
+        function normalizeWeight(raw) {{
+            const text = String(raw || '').trim();
+            if (!text) return {{ empty: true, value: null, text: '' }};
+            const cleaned = text.replace(',', '.');
+            const n = Number(cleaned);
+            if (!Number.isFinite(n) || n <= 0 || n > 400) return {{ invalid: true }};
+            return {{ empty: false, value: n, text: n.toFixed(2).replace('.', ',') }};
+        }}
+        async function saveInput(input) {{
+            const parsed = normalizeWeight(input.value);
+            if (parsed.invalid) {{
+                input.classList.add('is-error');
+                return;
+            }}
+            input.classList.remove('is-error');
+            input.value = parsed.text;
+            input.classList.add('is-saving');
+            try {{
+                const res = await fetch('/api/client_fasting_weight', {{
+                    method: 'PUT',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{
+                        {client_payload}
+                        date: input.dataset.date,
+                        weight_kg: parsed.empty ? '' : parsed.value
+                    }})
+                }});
+                if (!res.ok) throw new Error('save failed');
+                input.classList.remove('is-saving');
+                input.classList.add('is-saved');
+                renderWeeklyMeans();
+                setTimeout(() => input.classList.remove('is-saved'), 650);
+            }} catch (_e) {{
+                input.classList.remove('is-saving');
+                input.classList.add('is-error');
+            }}
+        }}
+        inputs.forEach((input) => {{
+            input.addEventListener('blur', () => saveInput(input));
+            input.addEventListener('keydown', (ev) => {{
+                if (ev.key === 'Enter') {{
+                    ev.preventDefault();
+                    input.blur();
+                }}
+            }});
+            input.addEventListener('input', () => input.classList.remove('is-error'));
+        }});
+        renderWeeklyMeans();
+    }})();
+    </script>
+    '''
+
+
+def render_client_daily_steps_panel(client_id, panel_id='client-steps-panel', include_client_id=True, daily_goal=0):
+    slots = get_fasting_weight_slots()
+    first_year, first_month = slots[0]
+    last_year, last_month = slots[-1]
+    start_date_text = f"{first_year:04d}-{first_month:02d}-01"
+    last_day = calendar.monthrange(last_year, last_month)[1]
+    end_date_text = f"{last_year:04d}-{last_month:02d}-{last_day:02d}"
+    steps_map = get_client_daily_steps_map(client_id, start_date_text, end_date_text)
+
+    month_columns = []
+    for year, month in slots:
+        max_day = calendar.monthrange(year, month)[1]
+        rows = []
+        for day in range(1, max_day + 1):
+            date_key = f"{year:04d}-{month:02d}-{day:02d}"
+            value = steps_map.get(date_key)
+            value_text = '' if value is None else str(int(value))
+            rows.append(
+                f'<label class="fw-row" data-date="{date_key}">'
+                f'<span>{day}:</span>'
+                f'<input class="fw-steps-input" type="text" inputmode="numeric" data-date="{date_key}" value="{html.escape(value_text)}" placeholder="-" />'
+                '</label>'
+            )
+        month_columns.append(
+            '<div class="fw-month">'
+            f'<div class="fw-month-title">{SPANISH_MONTHS[month - 1]}</div>'
+            f'<div class="fw-month-days">{"".join(rows)}</div>'
+            '</div>'
+        )
+
+    goal_value = int(daily_goal or 0)
+    goal_label = f"{goal_value} pasos" if goal_value > 0 else 'Sin objetivo'
+    client_payload = f"client_id: {int(client_id)}," if include_client_id else ''
+    return f'''
+    <div class="fw-wrap" id="{panel_id}">
+        <div class="fw-head">Pasos diarios</div>
+        <div class="fw-grid">{"".join(month_columns)}</div>
+        <div class="fw-foot"><strong>Objetivo diario:</strong> {html.escape(goal_label)}</div>
+        <div class="fw-foot">Editable por ti y por el cliente. Se guarda automáticamente al salir del campo.</div>
+    </div>
+    <script>
+    (function() {{
+        const root = document.getElementById('{panel_id}');
+        if (!root) return;
+        const inputs = Array.from(root.querySelectorAll('.fw-steps-input'));
+        const dailyGoal = {goal_value};
+
+        function normalizeSteps(raw) {{
+            const text = String(raw || '').trim();
+            if (!text) return {{ empty: true, value: null, text: '' }};
+            const digits = text.replace(/[^0-9]/g, '');
+            if (!digits) return {{ invalid: true }};
+            const value = Number(digits);
+            if (!Number.isFinite(value) || value < 0 || value > 100000) return {{ invalid: true }};
+            return {{ empty: false, value, text: String(Math.round(value)) }};
+        }}
+
+        function applyGoalStatus(input, parsed) {{
+            input.classList.remove('goal-met', 'goal-missed');
+            if (!parsed || parsed.invalid || parsed.empty) return;
+            if (!dailyGoal || dailyGoal <= 0) return;
+            if (parsed.value >= dailyGoal) {{
+                input.classList.add('goal-met');
+            }} else {{
+                input.classList.add('goal-missed');
+            }}
+        }}
+
+        async function saveInput(input) {{
+            const parsed = normalizeSteps(input.value);
+            if (parsed.invalid) {{
+                input.classList.add('is-error');
+                input.classList.remove('goal-met', 'goal-missed');
+                return;
+            }}
+            input.classList.remove('is-error');
+            input.value = parsed.text;
+            applyGoalStatus(input, parsed);
+            input.classList.add('is-saving');
+            try {{
+                const res = await fetch('/api/client_daily_steps', {{
+                    method: 'PUT',
+                    headers: {{ 'Content-Type': 'application/json' }},
+                    body: JSON.stringify({{
+                        {client_payload}
+                        date: input.dataset.date,
+                        steps: parsed.empty ? '' : parsed.value
+                    }})
+                }});
+                if (!res.ok) throw new Error('save failed');
+                input.classList.remove('is-saving');
+                input.classList.add('is-saved');
+                setTimeout(() => input.classList.remove('is-saved'), 650);
+            }} catch (_e) {{
+                input.classList.remove('is-saving');
+                input.classList.add('is-error');
+            }}
+        }}
+
+        inputs.forEach((input) => {{
+            input.addEventListener('blur', () => saveInput(input));
+            input.addEventListener('keydown', (ev) => {{
+                if (ev.key === 'Enter') {{
+                    ev.preventDefault();
+                    input.blur();
+                }}
+            }});
+            input.addEventListener('input', () => {{
+                input.classList.remove('is-error');
+                const parsed = normalizeSteps(input.value);
+                applyGoalStatus(input, parsed);
+            }});
+
+            const parsed = normalizeSteps(input.value);
+            applyGoalStatus(input, parsed);
+        }});
+    }})();
+    </script>
+    '''
 
 
 # helpers
@@ -475,7 +1128,7 @@ def get_foods():
     cur = conn.cursor()
     cur.execute(
         "SELECT f.id, f.name, f.brand, c.name as category, f.calories, f.protein, f.carbs, f.fats, f.serving_size, "
-        "COALESCE(f.photo_path, ''), COALESCE(f.nutrition_mode, 'per100'), COALESCE(f.per100_unit, 'g'), COALESCE(f.is_verified, 0) "
+        "COALESCE(f.photo_path, ''), COALESCE(f.nutrition_mode, 'per100'), COALESCE(f.per100_unit, 'g'), COALESCE(f.is_verified, 0), f.has_gluten "
         "FROM foods f LEFT JOIN categories c ON f.category_id = c.id "
         "ORDER BY COALESCE(c.name, 'Sin categoría'), f.name"
     )
@@ -518,8 +1171,10 @@ def get_exercises():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT e.id, e.name, e.muscle_group, e.equipment, e.difficulty, e.notes, ec.name, COALESCE(e.video_url, '') "
-        "FROM exercises e LEFT JOIN exercise_categories ec ON e.exercise_category_id = ec.id "
+        "SELECT e.id, e.name, e.muscle_group, e.equipment, e.difficulty, e.notes, ec.name, COALESCE(e.video_url, ''), COALESCE(e.machine_url, ''), COALESCE(ec2.name, '') "
+        "FROM exercises e "
+        "LEFT JOIN exercise_categories ec ON e.exercise_category_id = ec.id "
+        "LEFT JOIN exercise_categories ec2 ON e.exercise_category_id_2 = ec2.id "
         "ORDER BY e.id"
     )
     rows = cur.fetchall()
@@ -536,20 +1191,89 @@ def get_exercise_categories():
     return rows
 
 
-def get_routines():
+def get_routines(templates_only=True):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-    cur.execute("SELECT id, name, description, created_at FROM routines ORDER BY id DESC")
+    if templates_only:
+        cur.execute(
+            "SELECT id, name, description, created_at FROM routines WHERE COALESCE(is_template, 1) = 1 ORDER BY id DESC"
+        )
+    else:
+        cur.execute("SELECT id, name, description, created_at FROM routines ORDER BY id DESC")
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def get_routine_by_id(routine_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, name, description, created_at, COALESCE(is_template, 1), COALESCE(client_name, '') FROM routines WHERE id = ?",
+        (routine_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def get_routine_series_totals(routine_id):
+    items = get_routine_items(routine_id)
+    exercises = {e[0]: e for e in get_exercises()}
+    totals = {}
+
+    for item in items:
+        exercise_id = item[3]
+        series_count = int(round(parse_numeric_input(item[5], 0)))
+        if series_count <= 0:
+            continue
+
+        exercise = exercises.get(exercise_id)
+        group_candidates = []
+        if exercise:
+            for raw_group in (exercise[6] or '', exercise[9] or '', exercise[2] or ''):
+                label = str(raw_group or '').strip()
+                if label and label not in group_candidates:
+                    group_candidates.append(label)
+        if not group_candidates:
+            group_candidates = ['Sin grupo muscular']
+
+        for group_name in group_candidates:
+            totals[group_name] = totals.get(group_name, 0) + series_count
+
+    return sorted(totals.items(), key=lambda row: normalize_text(row[0]))
+
+
+def render_routine_series_summary_html(routine_id):
+    totals = get_routine_series_totals(routine_id)
+    if not totals:
+        return (
+            '<section class="section-card routine-summary-card">'
+            '<h3>📊 Series por grupo muscular</h3>'
+            '<p style="color:#6d7480;margin:0;">Aún no hay series registradas en esta rutina.</p>'
+            '</section>'
+        )
+
+    rows_html = ''.join([
+        f'<tr><td>{html.escape(group_name)}</td><td>{series_count}</td></tr>'
+        for group_name, series_count in totals
+    ])
+    return (
+        '<section class="section-card routine-summary-card">'
+        '<h3>📊 Series por grupo muscular</h3>'
+        '<table class="routine-summary-table">'
+        '<thead><tr><th>Grupo muscular</th><th>Series</th></tr></thead>'
+        f'<tbody>{rows_html}</tbody>'
+        '</table>'
+        '</section>'
+    )
 
 
 def get_routine_items(routine_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT ri.id, ri.routine_id, ri.day_name, ri.exercise_id, e.name, COALESCE(ri.sets_text, ''), COALESCE(ri.reps_text, ''), COALESCE(ri.notes, ''), COALESCE(ri.sort_order, 0) "
+        "SELECT ri.id, ri.routine_id, ri.day_name, ri.exercise_id, e.name, COALESCE(ri.sets_text, ''), COALESCE(ri.reps_text, ''), COALESCE(ri.notes, ''), COALESCE(ri.sort_order, 0), COALESCE(ri.day_index, -1) "
         "FROM routine_items ri LEFT JOIN exercises e ON ri.exercise_id = e.id "
         "WHERE ri.routine_id = ? ORDER BY ri.sort_order, ri.id",
         (routine_id,),
@@ -560,26 +1284,215 @@ def get_routine_items(routine_id):
 
 
 def get_diets():
+    ensure_diet_display_number_column()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, description, created_at, COALESCE(client_weight_kg, 0) "
-        "FROM diets WHERE COALESCE(is_template, 1) = 1 ORDER BY id"
+        "SELECT id, name, description, created_at, COALESCE(client_weight_kg, 0), COALESCE(display_number, id) "
+        "FROM diets ORDER BY COALESCE(display_number, id), id"
     )
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def ensure_diet_display_number_column():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(diets)")
+    cols = [r[1] for r in cur.fetchall()]
+    if 'display_number' not in cols:
+        cur.execute("ALTER TABLE diets ADD COLUMN display_number INTEGER")
+        cur.execute("UPDATE diets SET display_number = id WHERE display_number IS NULL")
+        conn.commit()
+    conn.close()
 
 
 def get_clients():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, phone, birthdate, COALESCE(height_cm, 0), COALESCE(weight_kg, 0), COALESCE(objectives, ''), COALESCE(plan_start_date, ''), COALESCE(plan_end_date, ''), COALESCE(plan_amount, 0), COALESCE(plan_notes, ''), created_at FROM clients ORDER BY id"
+        "SELECT id, name, phone, COALESCE(email, ''), birthdate, COALESCE(height_cm, 0), COALESCE(weight_kg, 0), COALESCE(objectives, ''), COALESCE(plan_start_date, ''), COALESCE(plan_end_date, ''), COALESCE(plan_amount, 0), COALESCE(plan_notes, ''), created_at FROM clients ORDER BY id"
     )
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def normalize_login_identifier(value):
+    text = str(value or '').strip()
+    return re.sub(r'\s+', '', text).lower()
+
+
+def normalize_phone(value):
+    return re.sub(r'[^0-9+]', '', str(value or '').strip())
+
+
+def get_client_portal_user_by_identifier(identifier):
+    ident_norm = normalize_login_identifier(identifier)
+    phone_norm = normalize_phone(identifier)
+    if not ident_norm:
+        return None
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, COALESCE(name, ''), COALESCE(email, ''), COALESCE(phone, ''), COALESCE(client_access_code, ''), COALESCE(client_password_hash, '')
+        FROM clients
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    for row in rows:
+        cid, name, email, phone, access_code, password_hash = row
+        email_norm = normalize_login_identifier(email)
+        phone_row_norm = normalize_phone(phone)
+        if ident_norm == email_norm or (phone_norm and phone_norm == phone_row_norm):
+            return {
+                'id': int(cid),
+                'name': name,
+                'email': email,
+                'phone': phone,
+                'access_code': str(access_code or ''),
+                'password_hash': str(password_hash or ''),
+            }
+    return None
+
+
+def hash_client_password(password):
+    raw = str(password or '')
+    if not raw:
+        return ''
+    salt = uuid.uuid4().hex
+    digest = hashlib.sha256((salt + '|' + raw).encode('utf-8')).hexdigest()
+    return f"sha256${salt}${digest}"
+
+
+def verify_client_password(password, stored_hash):
+    raw = str(password or '')
+    saved = str(stored_hash or '').strip()
+    if not raw or not saved:
+        return False
+    parts = saved.split('$', 2)
+    if len(parts) != 3 or parts[0] != 'sha256':
+        return False
+    _algo, salt, expected = parts
+    digest = hashlib.sha256((salt + '|' + raw).encode('utf-8')).hexdigest()
+    return hmac.compare_digest(digest, expected)
+
+
+def find_client_by_email(email):
+    normalized = normalize_login_identifier(email)
+    if not normalized:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, COALESCE(name, ''), COALESCE(email, '') FROM clients"
+    )
+    rows = cur.fetchall()
+    conn.close()
+    for row in rows:
+        if normalize_login_identifier(row[2]) == normalized:
+            return row
+    return None
+
+
+def get_active_client_diet(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            h.id,
+            h.diet_id,
+            COALESCE(d.name, 'Dieta'),
+            COALESCE(d.client_diet_name, ''),
+            COALESCE(h.start_date, ''),
+            COALESCE(h.end_date, ''),
+            COALESCE(h.notes, '')
+        FROM client_diet_history h
+        LEFT JOIN diets d ON d.id = h.diet_id
+        WHERE h.client_id = ? AND COALESCE(h.is_active, 0) = 1
+        ORDER BY h.id DESC
+        LIMIT 1
+        """,
+        (client_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def get_active_client_routine(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            h.id,
+            COALESCE(h.routine_id, 0),
+            COALESCE(r.name, ''),
+            COALESCE(h.start_date, ''),
+            COALESCE(h.end_date, ''),
+            COALESCE(h.notes, '')
+        FROM client_training_history h
+        LEFT JOIN routines r ON r.id = h.routine_id
+        WHERE h.client_id = ? AND COALESCE(h.is_active, 0) = 1 AND COALESCE(h.routine_id, 0) > 0
+        ORDER BY h.id DESC
+        LIMIT 1
+        """,
+        (client_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
+
+
+def parse_cookie_header(cookie_header):
+    cookies = {}
+    for part in str(cookie_header or '').split(';'):
+        if '=' not in part:
+            continue
+        key, value = part.split('=', 1)
+        cookies[key.strip()] = urllib.parse.unquote(value.strip())
+    return cookies
+
+
+def make_client_portal_session_token(client_id):
+    issued_at = int(time.time())
+    payload = f"{int(client_id)}:{issued_at}"
+    signature = hmac.new(
+        CLIENT_PORTAL_SECRET.encode('utf-8'),
+        payload.encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload}:{signature}"
+
+
+def parse_client_portal_session_token(token):
+    parts = str(token or '').split(':')
+    if len(parts) != 3:
+        return None
+    client_id_raw, issued_at_raw, signature = parts
+    if not client_id_raw.isdigit() or not issued_at_raw.isdigit():
+        return None
+
+    payload = f"{client_id_raw}:{issued_at_raw}"
+    expected_signature = hmac.new(
+        CLIENT_PORTAL_SECRET.encode('utf-8'),
+        payload.encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        return None
+
+    issued_at = int(issued_at_raw)
+    if (int(time.time()) - issued_at) > CLIENT_PORTAL_SESSION_TTL_SECONDS:
+        return None
+    return int(client_id_raw)
 
 
 def get_client_diet_history(client_id):
@@ -622,8 +1535,12 @@ def get_client_training_history(client_id):
             h.id,
             h.client_id,
             h.exercise_id,
+            COALESCE(h.routine_id, 0),
             COALESCE(h.training_name, ''),
             COALESCE(e.name, ''),
+            COALESCE(r.name, ''),
+            COALESCE(h.template_routine_id, 0),
+            COALESCE(tr.name, ''),
             COALESCE(h.start_date, ''),
             COALESCE(h.end_date, ''),
             COALESCE(h.is_active, 0),
@@ -631,6 +1548,8 @@ def get_client_training_history(client_id):
             COALESCE(h.created_at, '')
         FROM client_training_history h
         LEFT JOIN exercises e ON e.id = h.exercise_id
+        LEFT JOIN routines r ON r.id = h.routine_id
+        LEFT JOIN routines tr ON tr.id = h.template_routine_id
         WHERE h.client_id = ?
         ORDER BY COALESCE(h.start_date, h.created_at) DESC, h.id DESC
         """,
@@ -641,11 +1560,86 @@ def get_client_training_history(client_id):
     return rows
 
 
+def get_active_client_routines_map(client_ids=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if client_ids:
+        placeholders = ','.join(['?'] * len(client_ids))
+        cur.execute(
+            f"""
+            SELECT h.client_id, h.routine_id, COALESCE(r.name, '')
+            FROM client_training_history h
+            LEFT JOIN routines r ON r.id = h.routine_id
+            WHERE h.is_active = 1 AND COALESCE(h.routine_id, 0) > 0 AND h.client_id IN ({placeholders})
+            ORDER BY h.id DESC
+            """,
+            tuple(client_ids),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT h.client_id, h.routine_id, COALESCE(r.name, '')
+            FROM client_training_history h
+            LEFT JOIN routines r ON r.id = h.routine_id
+            WHERE h.is_active = 1 AND COALESCE(h.routine_id, 0) > 0
+            ORDER BY h.id DESC
+            """
+        )
+    rows = cur.fetchall()
+    conn.close()
+    routine_by_client = {}
+    for client_id, routine_id, routine_name in rows:
+        if client_id in routine_by_client:
+            continue
+        routine_by_client[int(client_id)] = (int(routine_id), routine_name or 'Rutina')
+    return routine_by_client
+
+
+def get_active_client_diets_map(client_ids=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if client_ids:
+        placeholders = ','.join(['?'] * len(client_ids))
+        cur.execute(
+            f"""
+            SELECT h.client_id, h.id, h.diet_id, COALESCE(d.client_diet_name, ''), COALESCE(d.name, ''), COALESCE(h.start_date, '')
+            FROM client_diet_history h
+            LEFT JOIN diets d ON d.id = h.diet_id
+            WHERE h.is_active = 1 AND h.client_id IN ({placeholders})
+            ORDER BY h.id DESC
+            """,
+            tuple(client_ids),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT h.client_id, h.id, h.diet_id, COALESCE(d.client_diet_name, ''), COALESCE(d.name, ''), COALESCE(h.start_date, '')
+            FROM client_diet_history h
+            LEFT JOIN diets d ON d.id = h.diet_id
+            WHERE h.is_active = 1
+            ORDER BY h.id DESC
+            """
+        )
+    rows = cur.fetchall()
+    conn.close()
+    diet_by_client = {}
+    for client_id, history_id, diet_id, client_diet_name, diet_name, start_date in rows:
+        if client_id in diet_by_client:
+            continue
+        diet_by_client[int(client_id)] = {
+            'history_id': int(history_id),
+            'diet_id': int(diet_id or 0),
+            'diet_name': (client_diet_name or '').strip() or (diet_name or '').strip() or 'Dieta',
+            'start_date': start_date or '',
+        }
+    return diet_by_client
+
+
 def clone_diet_template_for_client(template_diet_id, client_name=''):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT name, description, COALESCE(client_diet_name, ''), COALESCE(client_weight_kg, 0), "
+        "SELECT name, description, COALESCE(client_instructions, ''), COALESCE(client_diet_name, ''), COALESCE(client_weight_kg, 0), "
         "COALESCE(client_name, ''), COALESCE(client_height_cm, 0), COALESCE(client_age, 0) "
         "FROM diets WHERE id = ?",
         (template_diet_id,),
@@ -655,16 +1649,18 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
         conn.close()
         return None
 
-    template_name, description, client_diet_name, client_weight_kg, src_client_name, client_height_cm, client_age = src
+    template_name, description, client_instructions, client_diet_name, client_weight_kg, src_client_name, client_height_cm, client_age = src
     copy_name = f"{template_name} · {client_name}".strip() if client_name else f"{template_name} · Cliente"
     copy_client_name = src_client_name or client_name or ''
 
+    ensure_diet_display_number_column()
     cur.execute(
-        "INSERT INTO diets(name, description, is_template, client_diet_name, client_weight_kg, client_name, client_height_cm, client_age, created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,datetime('now'))",
+        "INSERT INTO diets(name, description, client_instructions, is_template, client_diet_name, client_weight_kg, client_name, client_height_cm, client_age, created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))",
         (
             copy_name,
             description,
+            client_instructions,
             0,
             client_diet_name,
             client_weight_kg,
@@ -674,6 +1670,7 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
         ),
     )
     new_diet_id = cur.lastrowid
+    cur.execute("UPDATE diets SET display_number = ? WHERE id = ?", (new_diet_id, new_diet_id))
 
     cur.execute(
         "SELECT id, name, order_index FROM diet_meals WHERE diet_id = ? ORDER BY order_index, id",
@@ -715,9 +1712,91 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
             (new_diet_id, item[0], item[1], item[2], item[3], item[4], mapped_meal, item[6], item[7]),
         )
 
+    cur.execute(
+        "SELECT supplement_name, intake_time, dose, notes, COALESCE(order_index, 0) FROM diet_supplements WHERE diet_id = ? ORDER BY COALESCE(order_index, 0), id",
+        (template_diet_id,),
+    )
+    source_supplements = cur.fetchall()
+    for s in source_supplements:
+        cur.execute(
+            "INSERT INTO diet_supplements(diet_id, supplement_name, intake_time, dose, notes, order_index) VALUES(?,?,?,?,?,?)",
+            (new_diet_id, s[0], s[1], s[2], s[3], s[4]),
+        )
+
     conn.commit()
     conn.close()
     return new_diet_id
+
+
+def clone_routine_template_for_client(template_routine_id, client_name=''):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name, description, COALESCE(is_template, 1) FROM routines WHERE id = ?",
+        (template_routine_id,),
+    )
+    src = cur.fetchone()
+    if not src:
+        conn.close()
+        return None
+
+    template_name, description, is_template = src
+    if int(is_template or 0) != 1:
+        conn.close()
+        return None
+
+    copy_name = f"{template_name} · {client_name}".strip() if client_name else f"{template_name} · Cliente"
+    cur.execute(
+        "INSERT INTO routines(name, description, is_template, client_name, created_at) VALUES(?,?,?,?,datetime('now'))",
+        (copy_name, description, 0, client_name or None),
+    )
+    new_routine_id = cur.lastrowid
+
+    cur.execute(
+        "SELECT day_index, day_name, day_type FROM routine_days WHERE routine_id = ? ORDER BY day_index",
+        (template_routine_id,),
+    )
+    source_days = cur.fetchall()
+    if not source_days:
+        source_days = get_default_routine_days()
+
+    for day_index, day_name, day_type in source_days:
+        cur.execute(
+            "INSERT INTO routine_days(routine_id, day_index, day_name, day_type) VALUES(?,?,?,?)",
+            (new_routine_id, int(day_index), day_name, day_type or 'train'),
+        )
+
+    cur.execute(
+        """
+        SELECT day_name, exercise_id, sets_text, reps_text, notes, COALESCE(sort_order, 0), COALESCE(day_index, -1)
+        FROM routine_items
+        WHERE routine_id = ?
+        ORDER BY COALESCE(sort_order, 0), id
+        """,
+        (template_routine_id,),
+    )
+    source_items = cur.fetchall()
+    for day_name, exercise_id, sets_text, reps_text, notes, sort_order, day_index in source_items:
+        cur.execute(
+            """
+            INSERT INTO routine_items(routine_id, day_name, exercise_id, sets_text, reps_text, notes, sort_order, day_index)
+            VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                new_routine_id,
+                day_name,
+                exercise_id,
+                sets_text,
+                reps_text,
+                notes,
+                int(sort_order or 0),
+                int(day_index) if day_index is not None else None,
+            ),
+        )
+
+    conn.commit()
+    conn.close()
+    return new_routine_id
 
 
 def sync_client_payment_plan(client_id, start_date, end_date, amount, notes=''):
@@ -796,7 +1875,8 @@ def get_diet_items(diet_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT di.id, f.id, f.name, f.brand, f.calories, f.protein, f.carbs, f.fats, di.quantity, di.note, di.day_of_week, di.meal_time "
+        "SELECT di.id, f.id, f.name, f.brand, f.calories, f.protein, f.carbs, f.fats, di.quantity, di.note, di.day_of_week, di.meal_time, "
+        "COALESCE(di.quantity_grams, 100), COALESCE(di.quantity_units, 1), COALESCE(f.nutrition_mode, 'per100'), COALESCE(f.per100_unit, 'g') "
         "FROM diet_items di JOIN foods f ON di.food_id = f.id "
         "WHERE di.diet_id = ? ORDER BY di.day_of_week, di.meal_time, di.id",
         (diet_id,),
@@ -811,7 +1891,7 @@ def get_diet_items_without_meal(diet_id):
     cur = conn.cursor()
     cur.execute(
         """
-        SELECT f.name, COALESCE(f.brand, ''), COALESCE(di.quantity, '')
+        SELECT f.name, COALESCE(f.brand, ''), COALESCE(di.quantity, ''), COALESCE(di.quantity_grams, 100), COALESCE(di.quantity_units, 1), COALESCE(f.nutrition_mode, 'per100'), COALESCE(f.per100_unit, 'g')
         FROM diet_items di
         JOIN foods f ON di.food_id = f.id
         WHERE di.diet_id = ? AND di.meal_id IS NULL
@@ -822,6 +1902,53 @@ def get_diet_items_without_meal(diet_id):
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def diet_item_quantity_text(item):
+    try:
+        nutrition_mode = (item[14] or 'per100') if len(item) > 14 else 'per100'
+        per100_unit = (item[15] or 'g') if len(item) > 15 else 'g'
+        if nutrition_mode == 'unit':
+            units = float(item[13] if len(item) > 13 and item[13] is not None else 1)
+            return f"{int(round(units)) if abs(units - round(units)) < 0.01 else round(units, 1)} ud"
+        grams = float(item[12] if len(item) > 12 and item[12] is not None else 0)
+        if grams > 0:
+            if abs(grams - round(grams)) < 0.01:
+                grams_txt = str(int(round(grams)))
+            else:
+                grams_txt = f"{grams:.1f}"
+            return f"{grams_txt}{per100_unit}"
+    except Exception:
+        pass
+    legacy_quantity = ''
+    if len(item) > 8 and item[8]:
+        legacy_quantity = str(item[8]).strip()
+    return legacy_quantity
+
+
+    
+    
+def diet_builder_item_quantity_text(item):
+    try:
+        nutrition_mode = str(item.get('nutrition_mode') or 'per100').strip().lower()
+        per100_unit = str(item.get('per100_unit') or 'g').strip().lower()
+        if nutrition_mode == 'unit':
+            units = float(item.get('units') or 1)
+            if abs(units - round(units)) < 0.01:
+                units_txt = str(int(round(units)))
+            else:
+                units_txt = f"{units:.1f}"
+            return f"{units_txt} ud"
+        grams = float(item.get('grams') or 0)
+        if grams > 0:
+            if abs(grams - round(grams)) < 0.01:
+                grams_txt = str(int(round(grams)))
+            else:
+                grams_txt = f"{grams:.1f}"
+            return f"{grams_txt}{per100_unit}"
+    except Exception:
+        pass
+    return ''
 
 
 def get_food_options():
@@ -850,6 +1977,7 @@ def ensure_diet_builder_tables():
         day_of_week TEXT NOT NULL,
         is_training INTEGER DEFAULT 1,
         goal_kcal REAL DEFAULT 0,
+        goal_steps REAL DEFAULT 0,
         goal_protein REAL DEFAULT 0,
         goal_fat REAL DEFAULT 0,
         goal_carbs REAL DEFAULT 0,
@@ -859,8 +1987,20 @@ def ensure_diet_builder_tables():
         carb_multiplier REAL DEFAULT 0,
         UNIQUE(diet_id, day_of_week)
     )""")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS diet_supplements (
+        id INTEGER PRIMARY KEY,
+        diet_id INTEGER NOT NULL,
+        supplement_name TEXT NOT NULL,
+        intake_time TEXT,
+        dose TEXT,
+        notes TEXT,
+        order_index INTEGER DEFAULT 0
+    )""")
     cur.execute("PRAGMA table_info(diet_day_config)")
     day_cols = [r[1] for r in cur.fetchall()]
+    if 'goal_steps' not in day_cols:
+        cur.execute("ALTER TABLE diet_day_config ADD COLUMN goal_steps REAL DEFAULT 0")
     if 'protein_multiplier' not in day_cols:
         cur.execute("ALTER TABLE diet_day_config ADD COLUMN protein_multiplier REAL DEFAULT 0")
     if 'fat_multiplier' not in day_cols:
@@ -883,7 +2023,7 @@ def get_diet_builder_data(diet_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, description, COALESCE(client_diet_name, ''), COALESCE(client_weight_kg, 0), "
+        "SELECT id, name, description, COALESCE(client_instructions, ''), COALESCE(client_diet_name, ''), COALESCE(client_weight_kg, 0), "
         "COALESCE(client_name, ''), COALESCE(client_height_cm, 0), COALESCE(client_age, 0) "
         "FROM diets WHERE id=?",
         (diet_id,),
@@ -892,15 +2032,17 @@ def get_diet_builder_data(diet_id):
     if not row:
         conn.close()
         return None
+    instructions_template = get_diet_instructions_template()
     diet = {
         'id': row[0],
         'name': row[1],
         'description': row[2] or '',
-        'client_diet_name': row[3] or '',
-        'client_weight_kg': row[4] or 0,
-        'client_name': row[5] or '',
-        'client_height_cm': row[6] or 0,
-        'client_age': row[7] or 0,
+        'client_instructions': (row[3] or '').strip() or instructions_template,
+        'client_diet_name': row[4] or '',
+        'client_weight_kg': row[5] or 0,
+        'client_name': row[6] or '',
+        'client_height_cm': row[7] or 0,
+        'client_age': row[8] or 0,
     }
 
     cur.execute("SELECT id, name, order_index FROM diet_meals WHERE diet_id=? ORDER BY order_index, id", (diet_id,))
@@ -913,10 +2055,21 @@ def get_diet_builder_data(diet_id):
         cur.execute("SELECT id, name, order_index FROM diet_meals WHERE diet_id=? ORDER BY order_index, id", (diet_id,))
         meals = [{'id': r[0], 'name': r[1], 'order_index': r[2]} for r in cur.fetchall()]
 
-    cur.execute("SELECT day_of_week, is_training, goal_kcal, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier FROM diet_day_config WHERE diet_id=?", (diet_id,))
+    cur.execute("SELECT day_of_week, is_training, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier FROM diet_day_config WHERE diet_id=?", (diet_id,))
     day_configs = {}
     for r in cur.fetchall():
-        day_configs[r[0]] = {'is_training': bool(r[1]), 'goal_kcal': r[2], 'goal_protein': r[3], 'goal_fat': r[4], 'goal_carbs': r[5], 'goal_fiber': r[6], 'protein_multiplier': r[7], 'fat_multiplier': r[8], 'carb_multiplier': r[9]}
+        day_configs[r[0]] = {
+            'is_training': bool(r[1]),
+            'goal_kcal': r[2],
+            'goal_steps': r[3],
+            'goal_protein': r[4],
+            'goal_fat': r[5],
+            'goal_carbs': r[6],
+            'goal_fiber': r[7],
+            'protein_multiplier': r[8],
+            'fat_multiplier': r[9],
+            'carb_multiplier': r[10],
+        }
 
     cur.execute("""
          SELECT di.id, di.day_of_week, di.meal_id, di.food_id,
@@ -938,8 +2091,36 @@ def get_diet_builder_data(diet_id):
             'nutrition_mode': r[11] or 'per100', 'per100_unit': r[12] or 'g',
             'units': r[13] if r[13] is not None else 1,
         })
+
+    cur.execute(
+        """
+        SELECT id, COALESCE(supplement_name, ''), COALESCE(intake_time, ''),
+               COALESCE(dose, ''), COALESCE(notes, ''), COALESCE(order_index, 0)
+        FROM diet_supplements
+        WHERE diet_id = ?
+        ORDER BY COALESCE(order_index, 0), id
+        """,
+        (diet_id,),
+    )
+    supplements = []
+    for r in cur.fetchall():
+        supplements.append({
+            'id': r[0],
+            'supplement_name': r[1],
+            'intake_time': r[2],
+            'dose': r[3],
+            'notes': r[4],
+            'order_index': r[5],
+        })
     conn.close()
-    return {'diet': diet, 'meals': meals, 'day_configs': day_configs, 'items': items}
+    return {
+        'diet': diet,
+        'meals': meals,
+        'day_configs': day_configs,
+        'items': items,
+        'supplements': supplements,
+        'instructions_template': instructions_template,
+    }
 
 
 def search_foods_db(query, limit=25, category='', brand='', status='all', kcal_min=None, kcal_max=None):
@@ -1309,6 +2490,7 @@ def build_diet_pdf(diet_id):
         f"Edad: {client_age} años" if client_age > 0 else 'Edad: -',
     ]
     client_data_text = ' · '.join(client_data_parts)
+    client_instructions = (diet.get('client_instructions') or '').strip() or get_diet_instructions_template()
 
     def parse_quantity_text(quantity_text):
         text = (quantity_text or '').strip()
@@ -1339,11 +2521,54 @@ def build_diet_pdf(diet_id):
             trimmed = trimmed[:-1]
         return (trimmed + suffix) if trimmed else suffix
 
+    def wrap_text_lines(text, max_width, font_name='Helvetica', font_size=9):
+        raw = str(text or '').strip()
+        if not raw:
+            return ['-']
+        words = raw.split()
+        if not words:
+            return ['-']
+        lines = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = current + ' ' + word
+            if pdf.stringWidth(candidate, font_name, font_size) <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
+
     def draw_page_number(label):
         page_w, _ = pdf._pagesize
         pdf.setFillColor(colors.HexColor('#94a3b8'))
         pdf.setFont('Helvetica', 8)
         pdf.drawRightString(page_w - 24, 18, label)
+
+    def load_pdf_logo():
+        # Optional logo for first page. If not available, PDF generation continues normally.
+        env_logo_path = str(os.environ.get('DIET_PDF_LOGO_PATH') or '').strip()
+        candidate_paths = []
+        if env_logo_path:
+            candidate_paths.append(env_logo_path if os.path.isabs(env_logo_path) else os.path.join(BASE_DIR, env_logo_path))
+        candidate_paths.extend([
+            os.path.join(STATIC_BASE_DIR, 'logo.png'),
+            os.path.join(STATIC_BASE_DIR, 'logo.jpg'),
+            os.path.join(STATIC_BASE_DIR, 'logo.jpeg'),
+            os.path.join(STATIC_BASE_DIR, 'logo.webp'),
+        ])
+        for path in candidate_paths:
+            if not os.path.exists(path):
+                continue
+            try:
+                img = ImageReader(path)
+                img_w, img_h = img.getSize()
+                if img_w > 0 and img_h > 0:
+                    return img, float(img_w), float(img_h)
+            except Exception:
+                continue
+        return None
 
     meals_data = builder_data.get('meals') or []
     meals = meals_data if meals_data else [
@@ -1362,6 +2587,7 @@ def build_diet_pdf(diet_id):
         cfg = day_configs.get(day, {})
         return {
             'goal_kcal': to_float(cfg.get('goal_kcal')),
+            'goal_steps': to_float(cfg.get('goal_steps')),
             'goal_protein': to_float(cfg.get('goal_protein')),
             'goal_fat': to_float(cfg.get('goal_fat')),
             'goal_carbs': to_float(cfg.get('goal_carbs')),
@@ -1409,31 +2635,43 @@ def build_diet_pdf(diet_id):
     meal_name_set = {m['name'] for m in meals}
     for item in get_diet_items(diet_id):
         day = normalize_day_name(item[10])
+        meal_id = item[6] if len(item) > 6 else None
         meal_time = (item[11] or '').strip()
-        if day not in days or meal_time not in meal_name_set:
+        meal_name = meal_name_by_id.get(meal_id)
+        if day not in days:
+            continue
+        if not meal_name and meal_time in meal_name_set:
+            meal_name = meal_time
+        if not meal_name:
             continue
         label = item[2]
         if item[3]:
             label += f' ({item[3]})'
-        if item[8]:
-            label += f' {item[8]}'
-        if label not in schedule[meal_time][day]:
-            schedule[meal_time][day].append(label)
+        quantity_text = diet_item_quantity_text(item)
+        if quantity_text:
+            label += f' {quantity_text}'
+        if label not in schedule[meal_name][day]:
+            schedule[meal_name][day].append(label)
 
-    for food_name, food_brand, quantity in get_diet_items_without_meal(diet_id):
+    for food_name, food_brand, quantity, grams, units, nutrition_mode, per100_unit in get_diet_items_without_meal(diet_id):
         food = (food_name or 'Alimento').strip()
         brand = (food_brand or '').strip()
         key = (food, brand)
         if key not in shopping:
             shopping[key] = {'units': {}, 'raw': []}
-        qty_kind, qty_amount, qty_unit = parse_quantity_text(quantity)
-        if qty_kind == 'grams':
-            shopping[key]['units']['g'] = shopping[key]['units'].get('g', 0.0) + qty_amount
-        elif qty_kind == 'unit':
-            shopping[key]['units'][qty_unit] = shopping[key]['units'].get(qty_unit, 0.0) + qty_amount
+        if (nutrition_mode or 'per100') == 'unit':
+            shopping[key]['units']['ud'] = shopping[key]['units'].get('ud', 0.0) + max(float(units or 1), 1.0)
+        elif float(grams or 0) > 0:
+            shopping[key]['units'][per100_unit or 'g'] = shopping[key]['units'].get(per100_unit or 'g', 0.0) + float(grams or 0)
         else:
-            if qty_unit not in shopping[key]['raw']:
-                shopping[key]['raw'].append(qty_unit)
+            qty_kind, qty_amount, qty_unit = parse_quantity_text(quantity)
+            if qty_kind == 'grams':
+                shopping[key]['units']['g'] = shopping[key]['units'].get('g', 0.0) + qty_amount
+            elif qty_kind == 'unit':
+                shopping[key]['units'][qty_unit] = shopping[key]['units'].get(qty_unit, 0.0) + qty_amount
+            else:
+                if qty_unit not in shopping[key]['raw']:
+                    shopping[key]['raw'].append(qty_unit)
 
     rows = []
     for (food, brand), data in sorted(shopping.items(), key=lambda x: (x[0][0].lower(), x[0][1].lower())):
@@ -1453,9 +2691,22 @@ def build_diet_pdf(diet_id):
     left = 24
     right = width - 24
     top = height - 24
+    pdf_logo = load_pdf_logo()
 
     pdf.setFillColor(colors.HexColor('#f8fafc'))
     pdf.roundRect(left - 2, top - 52, (right - left) + 4, 56, 8, stroke=0, fill=1)
+
+    if pdf_logo is not None:
+        logo_img, logo_w, logo_h = pdf_logo
+        max_logo_w = 210.0
+        max_logo_h = 42.0
+        scale = min(max_logo_w / logo_w, max_logo_h / logo_h)
+        draw_w = logo_w * scale
+        draw_h = logo_h * scale
+        logo_x = right - draw_w - 8
+        logo_y = top - draw_h - 5
+        pdf.drawImage(logo_img, logo_x, logo_y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask='auto')
+
     pdf.setFillColor(colors.HexColor('#0f172a'))
     pdf.setFont('Helvetica-Bold', 16)
     pdf.drawString(left + 4, top - 2, f"Dieta: {diet_name}")
@@ -1469,34 +2720,115 @@ def build_diet_pdf(diet_id):
     header_h = 44
     meal_col_w = 126
     day_col_w = (right - left - meal_col_w) / 7.0
-    row_count = max(1, len(meals))
     table_bottom_limit = 72
     max_table_h = table_top - table_bottom_limit - header_h
-    row_h = max(56.0, min(82.0, max_table_h / row_count))
-    if table_top - header_h - (row_h * row_count) < table_bottom_limit:
-        row_h = (table_top - header_h - table_bottom_limit) / row_count
-    table_bottom = table_top - header_h - (row_h * row_count)
+
+    table_font_size = 7.2
+    table_line_h = 8.2
+    table_row_padding = 12
+
+    def wrap_line(text, max_width, font_size=7.2):
+        words = text.split()
+        if not words:
+            return ['']
+        lines = []
+        curr = words[0]
+        for word in words[1:]:
+            candidate = curr + ' ' + word
+            if pdf.stringWidth(candidate, 'Helvetica', font_size) <= max_width:
+                curr = candidate
+            else:
+                lines.append(curr)
+                curr = word
+        lines.append(curr)
+        return lines
+
+    line_width = day_col_w - 10
+
+    def draw_cell_lines(lines, x, y_top, w, h, font_size, line_h):
+        pdf.setFont('Helvetica', font_size)
+        y = y_top - 10
+        for text in lines:
+            if y < (y_top - h + 8):
+                break
+            pdf.drawString(x + 3, y, text)
+            y -= line_h
+
+    row_infos = []
+
+    for meal in meals:
+        meal_name = meal['name']
+        cell_lines_by_day = []
+        max_cell_lines = 1
+        for day in days:
+            items = schedule.get(meal_name, {}).get(day, [])
+            if not items:
+                cell_lines = ['Sin alimentos']
+            else:
+                cell_lines = []
+                for it in items:
+                    wrapped = wrap_line(it, max_width=line_width, font_size=table_font_size)
+                    for i, segment in enumerate(wrapped):
+                        cell_lines.append(('- ' if i == 0 else '  ') + segment)
+            max_cell_lines = max(max_cell_lines, len(cell_lines))
+            cell_lines_by_day.append(cell_lines)
+        row_infos.append({
+            'meal_name': meal_name,
+            'cell_lines_by_day': cell_lines_by_day,
+            'height': max(42.0, table_row_padding + (max_cell_lines * table_line_h)),
+        })
+
+    available_table_h = max_table_h
+    total_rows_h = sum(r['height'] for r in row_infos)
+    if total_rows_h > available_table_h and total_rows_h > 0:
+        shrink = available_table_h / total_rows_h
+        table_font_size = max(6.0, round(table_font_size * shrink, 1))
+        table_line_h = max(7.0, round(table_line_h * shrink, 1))
+        table_row_padding = max(8.0, round(table_row_padding * shrink, 1))
+        row_infos = []
+        for meal in meals:
+            meal_name = meal['name']
+            cell_lines_by_day = []
+            max_cell_lines = 1
+            for day in days:
+                items = schedule.get(meal_name, {}).get(day, [])
+                if not items:
+                    cell_lines = ['Sin alimentos']
+                else:
+                    cell_lines = []
+                    for it in items:
+                        wrapped = wrap_line(it, max_width=line_width, font_size=table_font_size)
+                        for i, segment in enumerate(wrapped):
+                            cell_lines.append(('- ' if i == 0 else '  ') + segment)
+                max_cell_lines = max(max_cell_lines, len(cell_lines))
+                cell_lines_by_day.append(cell_lines)
+            row_infos.append({
+                'meal_name': meal_name,
+                'cell_lines_by_day': cell_lines_by_day,
+                'height': max(44.0, table_row_padding + (max_cell_lines * table_line_h)),
+            })
 
     col_x = [left, left + meal_col_w]
     for i in range(1, 8):
         col_x.append(left + meal_col_w + (i * day_col_w))
 
-    row_y = [table_top, table_top - header_h]
-    for i in range(1, row_count + 1):
-        row_y.append(table_top - header_h - (i * row_h))
-
     pdf.setFillColor(colors.HexColor('#f7efe7'))
     pdf.rect(left, table_top - header_h, right - left, header_h, stroke=0, fill=1)
     pdf.setFillColor(colors.HexColor('#fffaf5'))
-    for idx in range(row_count):
-        y = table_top - header_h - ((idx + 1) * row_h)
-        pdf.rect(left, y, meal_col_w, row_h, stroke=0, fill=1)
+    row_tops = [table_top - header_h]
+    current_row_top = table_top - header_h
+    for row_info in row_infos:
+        pdf.rect(left, current_row_top - row_info['height'], meal_col_w, row_info['height'], stroke=0, fill=1)
+        current_row_top -= row_info['height']
+        row_tops.append(current_row_top)
+
+    table_bottom = current_row_top
 
     pdf.setStrokeColor(colors.HexColor('#cbd5e1'))
     pdf.setLineWidth(0.8)
     for x in col_x:
         pdf.line(x, table_top, x, table_bottom)
-    for y in row_y:
+    for y in [table_top, table_top - header_h] + row_tops[1:]:
         pdf.line(left, y, right, y)
 
     pdf.setFillColor(colors.HexColor('#334155'))
@@ -1508,6 +2840,7 @@ def build_diet_pdf(diet_id):
         cfg = day_cfg(day)
         is_training = cfg['is_training']
         goal_kcal = cfg['goal_kcal']
+        goal_steps = cfg['goal_steps']
         goal_protein = cfg['goal_protein']
         goal_fat = cfg['goal_fat']
         goal_carbs = cfg['goal_carbs']
@@ -1536,59 +2869,98 @@ def build_diet_pdf(diet_id):
         pdf.setFont('Helvetica', 6.4)
         pdf.drawString(x + 6, table_top - 34, macro_goal_text)
 
-    def draw_cell_lines(lines, x, y_top, w, h):
-        pdf.setFont('Helvetica', 7.2)
-        line_h = 8.2
-        max_lines = max(2, int((h - 10) // line_h))
-        y = y_top - 10
-        for text in lines[:max_lines]:
-            pdf.drawString(x + 3, y, text)
-            y -= line_h
+        steps_goal_text = f"Pasos: {fmt_num(goal_steps)}" if goal_steps > 0 else "Pasos: sin definir"
+        pdf.setFont('Helvetica', 6.4)
+        pdf.drawString(x + 6, table_top - 41, steps_goal_text)
 
-    def wrap_line(text, max_width):
-        words = text.split()
-        if not words:
-            return ['']
-        lines = []
-        curr = words[0]
-        for word in words[1:]:
-            candidate = curr + ' ' + word
-            if pdf.stringWidth(candidate, 'Helvetica', 7.2) <= max_width:
-                curr = candidate
-            else:
-                lines.append(curr)
-                curr = word
-        lines.append(curr)
-        return lines
-
-    line_width = day_col_w - 10
-
-    for meal_idx, meal in enumerate(meals):
-        meal_name = meal['name']
-        cell_top = table_top - header_h - (meal_idx * row_h)
+    current_y = table_top - header_h
+    for meal_idx, row_info in enumerate(row_infos):
+        meal_name = row_info['meal_name']
+        row_h_i = row_info['height']
+        cell_top = current_y
         pdf.setFillColor(colors.HexColor('#334155'))
         pdf.setFont('Helvetica-Bold', 8.8)
         pdf.drawString(left + 6, cell_top - 14, meal_name)
 
         for day_idx, day in enumerate(days):
-            items = schedule.get(meal_name, {}).get(day, [])
             cell_x = left + meal_col_w + (day_idx * day_col_w)
-            if not items:
+            cell_lines = row_info['cell_lines_by_day'][day_idx]
+            if cell_lines == ['Sin alimentos']:
                 pdf.setFillColor(colors.HexColor('#94a3b8'))
-                draw_cell_lines(['Sin alimentos'], cell_x, cell_top, day_col_w, row_h)
-                continue
+            else:
+                pdf.setFillColor(colors.HexColor('#0f172a'))
+            draw_cell_lines(cell_lines, cell_x, cell_top, day_col_w, row_h_i, table_font_size, table_line_h)
 
-            lines = []
-            for it in items:
-                wrapped = wrap_line(it, max_width=line_width)
-                for i, segment in enumerate(wrapped):
-                    lines.append(('- ' if i == 0 else '  ') + segment)
-            pdf.setFillColor(colors.HexColor('#0f172a'))
-            draw_cell_lines(lines, cell_x, cell_top, day_col_w, row_h)
+        current_y -= row_h_i
 
     draw_page_number('Página 1')
     pdf.showPage()
 
+    # Página 2: indicaciones del cliente
+    pdf.setPageSize(A4)
+    width, height = A4
+    left = 36
+    right = width - 36
+    top = height - 36
+    bottom = 42
+
+    pdf.setFillColor(colors.HexColor('#f8fafc'))
+    pdf.roundRect(left - 2, top - 45, (right - left) + 4, 48, 8, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor('#0f172a'))
+    pdf.setFont('Helvetica-Bold', 14)
+    pdf.drawString(left + 2, top - 1, 'Indicaciones del cliente')
+    pdf.setFillColor(colors.HexColor('#475569'))
+    pdf.setFont('Helvetica', 9)
+    pdf.drawString(left + 2, top - 13, f"Cliente: {client_name}")
+    pdf.drawString(left + 2, top - 25, f"Dieta: {diet_name}")
+    pdf.drawString(left + 2, top - 37, client_data_text)
+
+    text_y_start = top - 64
+    pdf.setFillColor(colors.HexColor('#ffffff'))
+    pdf.roundRect(left - 1, bottom - 4, (right - left) + 2, text_y_start - bottom + 8, 8, stroke=0, fill=1)
+    pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
+    pdf.setLineWidth(0.8)
+    pdf.roundRect(left - 1, bottom - 4, (right - left) + 2, text_y_start - bottom + 8, 8, stroke=1, fill=0)
+
+    max_line_width = right - left - 14
+    line_height = 12
+    y_cursor = text_y_start - 8
+    paragraphs = [p.strip() for p in (client_instructions or '').split('\n') if p.strip()]
+    if not paragraphs:
+        paragraphs = ['Sin indicaciones específicas.']
+
+    pdf.setFillColor(colors.HexColor('#0f172a'))
+    pdf.setFont('Helvetica', 10)
+
+    for paragraph in paragraphs:
+        words = paragraph.split()
+        if not words:
+            continue
+        current = words[0]
+        lines = []
+        for word in words[1:]:
+            candidate = current + ' ' + word
+            if pdf.stringWidth(candidate, 'Helvetica', 10) <= max_line_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+
+        for idx, line in enumerate(lines):
+            if y_cursor < bottom + 10:
+                break
+            prefix = '• ' if idx == 0 else '  '
+            pdf.drawString(left + 6, y_cursor, fit_text(prefix + line, max_line_width, font_name='Helvetica', font_size=10))
+            y_cursor -= line_height
+        y_cursor -= 4
+        if y_cursor < bottom + 10:
+            break
+
+    draw_page_number('Página 2')
+    pdf.showPage()
+
+    # Página 3: lista de compra semanal
     pdf.setPageSize(A4)
     width, height = A4
     left = 36
@@ -1661,23 +3033,196 @@ def build_diet_pdf(diet_id):
             pdf.line(left, y - row_h, right, y - row_h)
             y -= row_h
         draw_page_number(f"Página {pdf.getPageNumber()}")
+
     pdf.showPage()
+
+    # Última página: suplementación
+    supplements = builder_data.get('supplements') or []
+    pdf.setPageSize(A4)
+    width, height = A4
+    left = 36
+    right = width - 36
+    top = height - 36
+    bottom = 36
+
+    pdf.setFillColor(colors.HexColor('#f8fafc'))
+    pdf.roundRect(left - 2, top - 45, (right - left) + 4, 48, 8, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor('#0f172a'))
+    pdf.setFont('Helvetica-Bold', 14)
+    pdf.drawString(left + 2, top - 1, 'Suplementación')
+    pdf.setFillColor(colors.HexColor('#475569'))
+    pdf.setFont('Helvetica', 9)
+    pdf.drawString(left + 2, top - 13, f"Cliente: {client_name}")
+    pdf.drawString(left + 2, top - 25, f"Dieta: {diet_name}")
+    pdf.drawString(left + 2, top - 37, client_data_text)
+
+    table_top = top - 58
+    name_w = (right - left) * 0.24
+    when_w = (right - left) * 0.18
+    dose_w = (right - left) * 0.14
+    notes_w = (right - left) - name_w - when_w - dose_w
+
+    pdf.setFillColor(colors.HexColor('#f1f5f9'))
+    pdf.rect(left, table_top - 16, right - left, 16, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor('#334155'))
+    pdf.setFont('Helvetica-Bold', 9)
+    pdf.drawString(left + 4, table_top - 11, 'Suplemento')
+    pdf.drawString(left + name_w + 4, table_top - 11, 'Momento de toma')
+    pdf.drawString(left + name_w + when_w + 4, table_top - 11, 'Dosis')
+    pdf.drawString(left + name_w + when_w + dose_w + 4, table_top - 11, 'Observaciones')
+
+    base_row_h = 18
+    line_h = 10
+    y = table_top - 18
+    pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
+    pdf.setLineWidth(0.6)
+
+    col_1 = left + name_w
+    col_2 = col_1 + when_w
+    col_3 = col_2 + dose_w
+
+    if not supplements:
+        pdf.setFillColor(colors.HexColor('#64748b'))
+        pdf.setFont('Helvetica', 10)
+        pdf.drawString(left, y - 4, 'No hay suplementación registrada en esta dieta.')
+    else:
+        for idx, s in enumerate(supplements):
+            if y - base_row_h < bottom:
+                draw_page_number(f"Página {pdf.getPageNumber()}")
+                pdf.showPage()
+                pdf.setPageSize(A4)
+                width, height = A4
+                left = 36
+                right = width - 36
+                top = height - 36
+                bottom = 36
+
+                pdf.setFillColor(colors.HexColor('#f8fafc'))
+                pdf.roundRect(left - 2, top - 45, (right - left) + 4, 48, 8, stroke=0, fill=1)
+                pdf.setFillColor(colors.HexColor('#0f172a'))
+                pdf.setFont('Helvetica-Bold', 14)
+                pdf.drawString(left + 2, top - 1, 'Suplementación')
+                pdf.setFillColor(colors.HexColor('#475569'))
+                pdf.setFont('Helvetica', 9)
+                pdf.drawString(left + 2, top - 13, f"Cliente: {client_name}")
+                pdf.drawString(left + 2, top - 25, f"Dieta: {diet_name}")
+                pdf.drawString(left + 2, top - 37, client_data_text)
+
+                table_top = top - 58
+                pdf.setFillColor(colors.HexColor('#f1f5f9'))
+                pdf.rect(left, table_top - 16, right - left, 16, stroke=0, fill=1)
+                pdf.setFillColor(colors.HexColor('#334155'))
+                pdf.setFont('Helvetica-Bold', 9)
+                pdf.drawString(left + 4, table_top - 11, 'Suplemento')
+                pdf.drawString(left + name_w + 4, table_top - 11, 'Momento de toma')
+                pdf.drawString(left + name_w + when_w + 4, table_top - 11, 'Dosis')
+                pdf.drawString(left + name_w + when_w + dose_w + 4, table_top - 11, 'Observaciones')
+                pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
+                pdf.setLineWidth(0.6)
+                y = table_top - 18
+
+            name_lines = wrap_text_lines((s.get('supplement_name') or '-').strip() or '-', name_w - 8, font_name='Helvetica', font_size=8.8)
+            when_lines = wrap_text_lines((s.get('intake_time') or '-').strip() or '-', when_w - 8, font_name='Helvetica', font_size=8.8)
+            dose_lines = wrap_text_lines((s.get('dose') or '-').strip() or '-', dose_w - 8, font_name='Helvetica', font_size=8.8)
+            notes_lines = wrap_text_lines((s.get('notes') or '-').strip() or '-', notes_w - 8, font_name='Helvetica', font_size=8.8)
+            max_lines = max(len(name_lines), len(when_lines), len(dose_lines), len(notes_lines))
+            row_h = max(base_row_h, 8 + (max_lines * line_h))
+
+            if y - row_h < bottom:
+                draw_page_number(f"Página {pdf.getPageNumber()}")
+                pdf.showPage()
+                pdf.setPageSize(A4)
+                width, height = A4
+                left = 36
+                right = width - 36
+                top = height - 36
+                bottom = 36
+
+                pdf.setFillColor(colors.HexColor('#f8fafc'))
+                pdf.roundRect(left - 2, top - 45, (right - left) + 4, 48, 8, stroke=0, fill=1)
+                pdf.setFillColor(colors.HexColor('#0f172a'))
+                pdf.setFont('Helvetica-Bold', 14)
+                pdf.drawString(left + 2, top - 1, 'Suplementación')
+                pdf.setFillColor(colors.HexColor('#475569'))
+                pdf.setFont('Helvetica', 9)
+                pdf.drawString(left + 2, top - 13, f"Cliente: {client_name}")
+                pdf.drawString(left + 2, top - 25, f"Dieta: {diet_name}")
+                pdf.drawString(left + 2, top - 37, client_data_text)
+
+                table_top = top - 58
+                pdf.setFillColor(colors.HexColor('#f1f5f9'))
+                pdf.rect(left, table_top - 16, right - left, 16, stroke=0, fill=1)
+                pdf.setFillColor(colors.HexColor('#334155'))
+                pdf.setFont('Helvetica-Bold', 9)
+                pdf.drawString(left + 4, table_top - 11, 'Suplemento')
+                pdf.drawString(left + name_w + 4, table_top - 11, 'Momento de toma')
+                pdf.drawString(left + name_w + when_w + 4, table_top - 11, 'Dosis')
+                pdf.drawString(left + name_w + when_w + dose_w + 4, table_top - 11, 'Observaciones')
+                pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
+                pdf.setLineWidth(0.6)
+                y = table_top - 18
+
+                name_lines = wrap_text_lines((s.get('supplement_name') or '-').strip() or '-', name_w - 8, font_name='Helvetica', font_size=8.8)
+                when_lines = wrap_text_lines((s.get('intake_time') or '-').strip() or '-', when_w - 8, font_name='Helvetica', font_size=8.8)
+                dose_lines = wrap_text_lines((s.get('dose') or '-').strip() or '-', dose_w - 8, font_name='Helvetica', font_size=8.8)
+                notes_lines = wrap_text_lines((s.get('notes') or '-').strip() or '-', notes_w - 8, font_name='Helvetica', font_size=8.8)
+                max_lines = max(len(name_lines), len(when_lines), len(dose_lines), len(notes_lines))
+                row_h = max(base_row_h, 8 + (max_lines * line_h))
+
+            if idx % 2 == 0:
+                pdf.setFillColor(colors.HexColor('#f8fafc'))
+                pdf.rect(left, y - row_h + 1, right - left, row_h, stroke=0, fill=1)
+
+            pdf.setFillColor(colors.HexColor('#0f172a'))
+            pdf.setFont('Helvetica', 8.8)
+            start_y = y - 11
+            for i, line in enumerate(name_lines):
+                pdf.drawString(left + 4, start_y - (i * line_h), line)
+            for i, line in enumerate(when_lines):
+                pdf.drawString(col_1 + 4, start_y - (i * line_h), line)
+            for i, line in enumerate(dose_lines):
+                pdf.drawString(col_2 + 4, start_y - (i * line_h), line)
+            for i, line in enumerate(notes_lines):
+                pdf.drawString(col_3 + 4, start_y - (i * line_h), line)
+
+            pdf.line(left, y - row_h, right, y - row_h)
+            pdf.line(col_1, y, col_1, y - row_h)
+            pdf.line(col_2, y, col_2, y - row_h)
+            pdf.line(col_3, y, col_3, y - row_h)
+            y -= row_h
+
+    draw_page_number(f"Página {pdf.getPageNumber()}")
+
     pdf.save()
     return buffer.getvalue()
 
 
 def build_routine_pdf(routine_id):
-    routines = get_routines()
-    routine = next((r for r in routines if r[0] == routine_id), None)
+    routine = get_routine_by_id(routine_id)
     if routine is None:
         return None
 
+    routine_title = str(routine[1] or '').strip() or f'Rutina {routine_id}'
+
     items = get_routine_items(routine_id)
+    series_summary = get_routine_series_totals(routine_id)
     exercise_lookup = {e[0]: {'name': e[1], 'video_url': (e[7] or '').strip()} for e in get_exercises()}
-    days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
-    grouped_items = {day: [] for day in days}
+    routine_days = get_routine_days(routine_id)
+    if routine_days:
+        ordered_days = [(int(day_index), day_name or f'Día {int(day_index) + 1}') for day_index, day_name, _day_type in routine_days]
+    else:
+        ordered_days = [(day_index, day_name) for day_index, day_name, _day_type in get_default_routine_days()]
+    grouped_items = {day_index: [] for day_index, _day_name in ordered_days}
     for item in items:
-        grouped_items.setdefault(item[2], []).append(item)
+        item_day_index = int(item[9]) if int(item[9]) >= 0 else None
+        if item_day_index is None:
+            for day_index, day_name in ordered_days:
+                if (item[2] or '').strip() == (day_name or '').strip():
+                    item_day_index = day_index
+                    break
+        if item_day_index is None:
+            item_day_index = 0
+        grouped_items.setdefault(item_day_index, []).append(item)
 
     def fit_text(text, max_width, font_name='Helvetica', font_size=9):
         if pdf.stringWidth(text, font_name, font_size) <= max_width:
@@ -1722,12 +3267,12 @@ def build_routine_pdf(routine_id):
         pdf.setFillColor(colors.HexColor('#f8fafc'))
         pdf.roundRect(24, y_top - 56, 794, 58, 8, stroke=0, fill=1)
         pdf.setFillColor(colors.HexColor('#0f172a'))
-        pdf.setFont('Helvetica-Bold', 16)
-        pdf.drawString(30, y_top - 4, f"Rutina: {routine[1]}")
+        pdf.setFont('Helvetica-Bold', 18)
+        pdf.drawString(30, y_top - 6, fit_text(routine_title, 760, font_name='Helvetica-Bold', font_size=18))
         pdf.setFillColor(colors.HexColor('#475569'))
         pdf.setFont('Helvetica', 10)
-        pdf.drawString(30, y_top - 20, f"Descripción: {routine[2] or '-'}")
-        pdf.drawString(30, y_top - 34, f"Creada: {routine[3] or '-'}")
+        pdf.drawString(30, y_top - 24, f"Descripción: {routine[2] or '-'}")
+        pdf.drawString(30, y_top - 38, f"Creada: {routine[3] or '-'}")
         pdf.drawString(30, y_top - 48, f"ID: {routine[0]}")
         return y_top - 72
 
@@ -1744,16 +3289,45 @@ def build_routine_pdf(routine_id):
 
     y = draw_header(top)
 
+    summary_rows = series_summary or [('Sin grupo muscular', 0)]
+    summary_height = 28 + (len(summary_rows) + 1) * 14
+    if y - summary_height < bottom:
+        draw_page_number(f'Página {pdf.getPageNumber()}')
+        pdf.showPage()
+        pdf.setPageSize(A4)
+        pdf.setPageCompression(0)
+        pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
+        pdf.setLineWidth(0.8)
+        y = draw_header(top)
+
+    pdf.setFillColor(colors.HexColor('#f8fafc'))
+    pdf.roundRect(left, y - summary_height + 4, content_width, summary_height - 4, 8, stroke=0, fill=1)
+    pdf.setFillColor(colors.HexColor('#0f172a'))
+    pdf.setFont('Helvetica-Bold', 11)
+    pdf.drawString(left + 8, y - 14, 'Series por grupo muscular')
+    pdf.setFillColor(colors.HexColor('#64748b'))
+    pdf.setFont('Helvetica-Bold', 8)
+    pdf.drawString(left + 10, y - 28, 'Grupo muscular')
+    pdf.drawRightString(right - 10, y - 28, 'Series')
+    row_y = y - 42
+    pdf.setFont('Helvetica', 9)
+    pdf.setFillColor(colors.HexColor('#0f172a'))
+    for group_name, series_count in summary_rows:
+        pdf.drawString(left + 10, row_y, fit_text(str(group_name), content_width - 72))
+        pdf.drawRightString(right - 10, row_y, str(series_count))
+        row_y -= 14
+    y = row_y - 10
+
     pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
     pdf.setLineWidth(0.8)
     used_video_links = []
     used_video_ids = set()
 
-    for day in days:
-        day_items = grouped_items.get(day, [])
+    for day_index, day in ordered_days:
+        day_items = grouped_items.get(day_index, [])
         item_lines = []
         for item in day_items:
-            item_id, _routine_id, _day_name, _exercise_id, exercise_name, sets_text, reps_text, notes, _sort_order = item
+            item_id, _routine_id, _day_name, _exercise_id, exercise_name, sets_text, reps_text, notes, _sort_order, _item_day_index = item
             if _exercise_id in exercise_lookup and _exercise_id not in used_video_ids:
                 exercise_data = exercise_lookup.get(_exercise_id) or {}
                 video_url = normalize_video_url(exercise_data.get('video_url') or '')
@@ -1991,16 +3565,592 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
+        if path == '/client_logout':
+            self.send_response(303)
+            self.send_header('Set-Cookie', f'{CLIENT_PORTAL_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
+            self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Sesión cerrada'))
+            self.end_headers()
+            return
+
+        if path == '/client_register':
+            diet_panel_html = f'''
+            <section class="panel">
+                <h2>🥗 Dietas</h2>
+                <form method="post" action="/assign_client_diet" class="assign">
+                    <input type="hidden" name="client_id" value="{cid_i}" />
+                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=diet" />
+                    <select name="diet_id" class="full" required>
+                        <option value="">Selecciona una dieta</option>
+                        {diet_options}
+                    </select>
+                    <input name="start_date" type="date" placeholder="Inicio" />
+                    <input name="end_date" type="date" placeholder="Fin" />
+                    <input name="notes" class="full" placeholder="Notas de asignación" />
+                    <button type="submit" class="full">✨ Asignar dieta al cliente</button>
+                </form>
+
+                <div class="history-group">
+                    <h3>Dietas activas</h3>
+                    {active_diets_html}
+                </div>
+                <div class="history-group">
+                    <h3>Dietas antiguas</h3>
+                    {old_diets_html}
+                </div>
+            </section>
+            '''
+
+            training_panel_html = f'''
+            <section class="panel">
+                <h2>🏋️ Entrenamientos</h2>
+                <form method="post" action="/assign_client_training" class="assign">
+                    <input type="hidden" name="client_id" value="{cid_i}" />
+                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=training" />
+                    <select name="routine_id" class="full" required>
+                        <option value="">Selecciona una rutina</option>
+                        {routine_options}
+                    </select>
+                    <input name="start_date" type="date" placeholder="Inicio" />
+                    <input name="end_date" type="date" placeholder="Fin" />
+                    <input name="notes" class="full" placeholder="Notas de entrenamiento" />
+                    <button type="submit" class="full">✨ Asignar rutina</button>
+                </form>
+
+                <div class="history-group">
+                    <h3>Entrenamientos activos</h3>
+                    {active_training_html}
+                </div>
+                <div class="history-group">
+                    <h3>Entrenamientos antiguos</h3>
+                    {old_training_html}
+                </div>
+            </section>
+            '''
+
+            weight_panel_html = f'''
+            <section class="panel panel-full">
+                <h2>⚖️ Peso corporal en ayunas</h2>
+                {fasting_weights_html}
+            </section>
+            '''
+
+            steps_panel_html = f'''
+            <section class="panel panel-full">
+                <h2>👟 Pasos diarios</h2>
+                <form method="post" action="/set_client_steps_goal" class="steps-goal-form">
+                    <input type="hidden" name="client_id" value="{cid_i}" />
+                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=steps" />
+                    <label>Objetivo diario de pasos
+                        <input name="daily_steps_goal" type="number" min="0" step="1" value="{int(daily_steps_goal or 0) if int(daily_steps_goal or 0) > 0 else ''}" placeholder="Ej: 10000" />
+                    </label>
+                    <button type="submit">Guardar objetivo</button>
+                </form>
+                {daily_steps_html}
+            </section>
+            '''
+
+            section_titles = {
+                'diet': 'Dietas',
+                'training': 'Entrenamientos',
+                'weight': 'Peso corporal en ayunas',
+                'steps': 'Pasos diarios',
+            }
+            section_descriptions = {
+                'diet': 'Asigna dietas, revisa historial activo y antiguo.',
+                'training': 'Asigna rutinas y consulta todo el histórico.',
+                'weight': 'Registra y supervisa el peso en ayunas por día.',
+                'steps': 'Define objetivo y controla pasos diarios.',
+            }
+            section_status = {
+                'diet': 'Activa' if active_diets else 'Sin dieta activa',
+                'training': 'Activa' if active_training else 'Sin entrenamiento activo',
+                'weight': 'Seguimiento activo',
+                'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
+            }
+            section_content = {
+                'diet': diet_panel_html,
+                'training': training_panel_html,
+                'weight': weight_panel_html,
+                'steps': steps_panel_html,
+            }
+
+            selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
+            if selected_section not in section_content:
+                selected_section = ''
+
+            cards_html = ''.join([
+                f'<a class="admin-home-card" href="/client_profile?id={cid_i}&section={key}">'
+                f'<div class="chip">{html.escape(section_status[key])}</div>'
+                f'<h3>{html.escape(section_titles[key])}</h3>'
+                f'<p>{html.escape(section_descriptions[key])}</p>'
+                '</a>'
+                for key in ('diet', 'training', 'weight', 'steps')
+            ])
+
+            detail_html = ''
+            if selected_section:
+                detail_html = (
+                    '<section class="detail-wrap">'
+                    f'<a class="back-btn" href="/client_profile?id={cid_i}">← Volver al panel</a>'
+                    '<details class="accordion" open>'
+                    f'<summary>{html.escape(section_titles[selected_section])}</summary>'
+                    f'<div class="accordion-body">{section_content[selected_section]}</div>'
+                    '</details>'
+                    '</section>'
+                )
+
+            msg = q.get('msg', [''])[0] if 'msg' in q else ''
+            page = f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Registro cliente</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:560px;margin:0 auto;padding:28px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
+        h1{{margin:0 0 10px;font-size:2rem;}}
+        p{{margin:0 0 18px;color:#6d7480;}}
+        form{{display:grid;gap:12px;}}
+        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
+        button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
+        .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
+        .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
+        .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            <h1>Crear cuenta cliente</h1>
+            <p>Crea tu acceso con email y contraseña para entrar a tu app.</p>
+            {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
+            <form method="post" action="/client_register">
+                <input name="email" type="email" placeholder="Tu correo" required />
+                <input name="password" type="password" placeholder="Contraseña" minlength="6" required />
+                <input name="password_confirm" type="password" placeholder="Repite contraseña" minlength="6" required />
+                <button type="submit">Continuar</button>
+            </form>
+            <div class="helper">¿Ya tienes cuenta? <a href="/client_login">Iniciar sesión</a></div>
+        </div>
+    </div>
+</body>
+</html>
+            '''
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/client_onboarding':
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            client_id = parse_client_portal_session_token(token)
+            if client_id is None:
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Inicia sesión para completar tu perfil'))
+                self.end_headers()
+                return
+
+            client_rows = [r for r in get_clients() if int(r[0]) == int(client_id)]
+            if not client_rows:
+                self.send_response(303)
+                self.send_header('Location', '/client_register?msg=' + urllib.parse.quote('Primero crea tu cuenta'))
+                self.end_headers()
+                return
+
+            c = client_rows[0]
+            _cid, name, phone, email, birthdate, height_cm, weight_kg, objectives, _psd, _ped, _pa, _pn, _created = c
+            msg = q.get('msg', [''])[0] if 'msg' in q else ''
+            page = f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Completar perfil</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:900px;margin:0 auto;padding:28px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
+        h1{{margin:0 0 8px;font-size:2rem;}}
+        p{{margin:0 0 16px;color:#6d7480;}}
+        form{{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));}}
+        input,textarea{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
+        textarea{{grid-column:1/-1;min-height:110px;resize:vertical;}}
+        .full{{grid-column:1/-1;}}
+        button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
+        .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            <h1>Completa tus datos</h1>
+            <p>Estos datos crearán tu ficha automáticamente en el sistema del entrenador.</p>
+            {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
+            <form method="post" action="/client_onboarding">
+                <label class="full">Nombre completo<input name="name" value="{html.escape(name or '')}" required /></label>
+                <label>Teléfono<input name="phone" value="{html.escape(phone or '')}" /></label>
+                <label>Email<input name="email" type="email" value="{html.escape(email or '')}" required /></label>
+                <label>Fecha de nacimiento<input name="birthdate" type="date" value="{html.escape(birthdate or '')}" /></label>
+                <label>Altura (cm)<input name="height_cm" type="number" min="0" step="0.1" value="{height_cm if height_cm else ''}" /></label>
+                <label>Peso (kg)<input name="weight_kg" type="number" min="0" step="0.1" value="{weight_kg if weight_kg else ''}" /></label>
+                <label class="full">Objetivos<textarea name="objectives">{html.escape(objectives or '')}</textarea></label>
+                <div class="full"><button type="submit">Guardar y entrar</button></div>
+            </form>
+        </div>
+    </div>
+</body>
+</html>
+            '''
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/client_login':
+            msg = q.get('msg', [''])[0] if 'msg' in q else ''
+            page = f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Acceso cliente</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:560px;margin:0 auto;padding:28px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
+        h1{{margin:0 0 10px;font-size:2rem;}}
+        p{{margin:0 0 18px;color:#6d7480;}}
+        form{{display:grid;gap:12px;}}
+        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
+        button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
+        .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
+        .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
+        .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            <h1>Acceso cliente</h1>
+            <p>Inicia sesión para ver tu dieta activa y tu rutina activa.</p>
+            {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
+            <form method="post" action="/client_login">
+                <input name="identifier" placeholder="Email o teléfono" required />
+                <input name="password" type="password" placeholder="Contraseña" />
+                <input name="access_code" placeholder="Código de acceso (opcional)" />
+                <button type="submit">Entrar</button>
+            </form>
+            <div class="helper">¿Primera vez? <a href="/client_register">Crear cuenta</a></div>
+        </div>
+    </div>
+</body>
+</html>
+            '''
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/client_app':
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            client_id = parse_client_portal_session_token(token)
+            if client_id is None:
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Inicia sesión para continuar'))
+                self.end_headers()
+                return
+
+            client_rows = [r for r in get_clients() if int(r[0]) == int(client_id)]
+            if not client_rows:
+                self.send_response(303)
+                self.send_header('Set-Cookie', f'{CLIENT_PORTAL_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Cliente no encontrado'))
+                self.end_headers()
+                return
+
+            c = client_rows[0]
+            _cid, client_name, _phone, client_email, _birthdate, _height_cm, _weight_kg, _objectives, _psd, _ped, _pa, _pn, _created = c
+            active_diet = get_active_client_diet(client_id)
+            active_routine = get_active_client_routine(client_id)
+
+            diet_html = '<p class="empty">No tienes dieta activa.</p>'
+            if active_diet:
+                _hid, diet_id, diet_name, client_diet_name, start_date, end_date, notes = active_diet
+                diet_label = (client_diet_name or '').strip() or (diet_name or 'Dieta')
+                diet_html = (
+                    '<div class="info-block">'
+                    f'<h3>{html.escape(diet_label)}</h3>'
+                    f'<p><strong>Inicio:</strong> {html.escape(start_date or "-")}</p>'
+                    f'<p><strong>Fin:</strong> {html.escape(end_date or "En curso")}</p>'
+                    f'<p><strong>Notas:</strong> {html.escape(notes or "-")}</p>'
+                    f'<a class="btn" href="/export_diet_pdf/dieta_{diet_id}.pdf?v={uuid.uuid4().hex}" target="_blank">Descargar PDF</a>'
+                    '</div>'
+                )
+
+            routine_html = '<p class="empty">No tienes rutina activa.</p>'
+            if active_routine:
+                _thid, routine_id, routine_name, r_start, r_end, r_notes = active_routine
+                routine_days = get_routine_days(routine_id)
+                routine_items = get_routine_items(routine_id)
+                day_name_by_index = {int(d[0]): d[1] for d in routine_days}
+                grouped = {int(d[0]): [] for d in routine_days}
+                for it in routine_items:
+                    day_index = int(it[9]) if int(it[9]) >= 0 else 0
+                    grouped.setdefault(day_index, []).append(it)
+                day_blocks = []
+                ordered_day_indexes = [int(d[0]) for d in routine_days] if routine_days else sorted(grouped.keys())
+                for day_index in ordered_day_indexes:
+                    day_name = day_name_by_index.get(day_index, f'Día {day_index + 1}')
+                    items = grouped.get(day_index, [])
+                    if not items:
+                        day_blocks.append(f'<div class="day"><h4>{html.escape(day_name)}</h4><p class="empty">Sin ejercicios.</p></div>')
+                        continue
+                    rows = []
+                    for item in items:
+                        ex_name = item[4] or 'Ejercicio'
+                        sets_text = item[5] or '-'
+                        reps_text = item[6] or '-'
+                        rows.append(
+                            '<tr>'
+                            f'<td>{html.escape(ex_name)}</td>'
+                            f'<td>{html.escape(sets_text)}</td>'
+                            f'<td>{html.escape(reps_text)}</td>'
+                            '</tr>'
+                        )
+                    day_blocks.append(
+                        f'<div class="day"><h4>{html.escape(day_name)}</h4>'
+                        '<table><thead><tr><th>Ejercicio</th><th>Series</th><th>Reps</th></tr></thead>'
+                        f'<tbody>{"".join(rows)}</tbody></table></div>'
+                    )
+
+                routine_html = (
+                    '<div class="info-block">'
+                    f'<h3>{html.escape(routine_name or "Rutina")}</h3>'
+                    f'<p><strong>Inicio:</strong> {html.escape(r_start or "-")}</p>'
+                    f'<p><strong>Fin:</strong> {html.escape(r_end or "En curso")}</p>'
+                    f'<p><strong>Notas:</strong> {html.escape(r_notes or "-")}</p>'
+                    f'<a class="btn" href="/export_routine_pdf/rutina_{routine_id}.pdf?v={uuid.uuid4().hex}" target="_blank">Descargar PDF</a>'
+                    f'<div class="days">{"".join(day_blocks)}</div>'
+                    '</div>'
+                )
+
+            fasting_weights_html = render_fasting_weights_panel(client_id, panel_id=f'fw-client-{client_id}', include_client_id=False)
+            daily_steps_goal = get_client_daily_steps_goal(client_id)
+            daily_steps_html = render_client_daily_steps_panel(
+                client_id,
+                panel_id=f'steps-client-{client_id}',
+                include_client_id=False,
+                daily_goal=daily_steps_goal,
+            )
+            selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
+            if selected_section not in ('diet', 'routine', 'weight', 'steps'):
+                selected_section = ''
+
+            section_titles = {
+                'diet': 'Mi dieta',
+                'routine': 'Mi rutina',
+                'weight': 'Mi peso corporal en ayunas',
+                'steps': 'Mis pasos diarios',
+            }
+            section_descriptions = {
+                'diet': 'Consulta tu plan actual y descarga tu PDF.',
+                'routine': 'Revisa tus días de entrenamiento y ejercicios.',
+                'weight': 'Registra tu peso diario y revisa la media semanal.',
+                'steps': 'Anota tus pasos diarios y compáralos con tu objetivo.',
+            }
+            section_status = {
+                'diet': 'Activa' if active_diet else 'Sin dieta activa',
+                'routine': 'Activa' if active_routine else 'Sin rutina activa',
+                'weight': 'Seguimiento activo',
+                'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
+            }
+
+            section_content = {
+                'diet': diet_html,
+                'routine': routine_html,
+                'weight': fasting_weights_html,
+                'steps': daily_steps_html,
+            }
+
+            cards_html = ''.join([
+                f'<a class="client-home-card" href="/client_app?section={key}">'
+                f'<div class="chip">{html.escape(section_status[key])}</div>'
+                f'<h3>{html.escape(section_titles[key])}</h3>'
+                f'<p>{html.escape(section_descriptions[key])}</p>'
+                '</a>'
+                for key in ('diet', 'routine', 'weight', 'steps')
+            ])
+
+            detail_html = ''
+            if selected_section:
+                detail_html = (
+                    '<section class="detail-wrap">'
+                    '<a class="back-btn" href="/client_app">← Volver al panel</a>'
+                    '<details class="accordion" open>'
+                    f'<summary>{html.escape(section_titles[selected_section])}</summary>'
+                    f'<div class="accordion-body">{section_content[selected_section]}</div>'
+                    '</details>'
+                    '</section>'
+                )
+
+            page = f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Mi app</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:1040px;margin:0 auto;padding:28px;}}
+        .top{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px;}}
+        .top h1{{margin:0;font-size:2rem;}}
+        .mail{{color:#6d7480;font-size:.95rem;}}
+        .logout{{text-decoration:none;border:1px solid #d8dde6;border-radius:12px;padding:10px 12px;color:#101318;background:#fff;}}
+        .welcome{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:20px;box-shadow:0 12px 30px rgba(16,19,24,.06);margin-bottom:14px;}}
+        .welcome h2{{margin:0;font-size:1.35rem;}}
+        .welcome p{{margin:8px 0 0;color:#6d7480;}}
+        .cards{{display:grid;gap:12px;grid-template-columns:repeat(3,minmax(0,1fr));}}
+        .client-home-card{{display:block;text-decoration:none;border:1px solid #d8dde6;background:#fff;border-radius:16px;padding:16px;box-shadow:0 10px 22px rgba(16,19,24,.06);transition:transform .14s ease, box-shadow .14s ease, border-color .14s ease;color:#101318;}}
+        .client-home-card:hover{{transform:translateY(-2px);box-shadow:0 16px 30px rgba(16,19,24,.10);border-color:#c5ccd8;}}
+        .client-home-card .chip{{display:inline-flex;padding:4px 10px;border-radius:999px;background:#eef2f7;color:#475569;font-size:.72rem;font-weight:800;}}
+        .client-home-card h3{{margin:10px 0 6px;font-size:1.05rem;}}
+        .client-home-card p{{margin:0;color:#6d7480;font-size:.92rem;line-height:1.35;}}
+        .detail-wrap{{margin-top:14px;}}
+        .back-btn{{display:inline-flex;align-items:center;gap:6px;text-decoration:none;border:1px solid #d8dde6;border-radius:10px;padding:8px 11px;background:#fff;color:#101318;font-weight:700;font-size:.88rem;margin-bottom:10px;}}
+        .accordion{{border:1px solid #e8ebef;border-radius:16px;background:#fff;box-shadow:0 12px 30px rgba(16,19,24,.06);overflow:hidden;}}
+        .accordion summary{{list-style:none;cursor:pointer;padding:14px 16px;font-weight:800;font-size:1.03rem;border-bottom:1px solid #eef2f7;}}
+        .accordion summary::-webkit-details-marker{{display:none;}}
+        .accordion-body{{padding:14px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:18px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
+        .card.full{{grid-column:1 / -1;}}
+        .card h2{{margin:0 0 10px;}}
+        .empty{{color:#6d7480;}}
+        .info-block h3{{margin:0 0 8px;}}
+        .info-block p{{margin:4px 0;}}
+        .btn{{display:inline-flex;margin-top:8px;text-decoration:none;background:#101318;color:#fff;padding:9px 12px;border-radius:10px;}}
+        .days{{display:grid;gap:10px;margin-top:12px;}}
+        .day{{border:1px solid #e8ebef;border-radius:12px;padding:10px;background:#fbfcfd;}}
+        .day h4{{margin:0 0 8px;}}
+        table{{width:100%;border-collapse:collapse;background:#fff;border-radius:8px;overflow:hidden;}}
+        th,td{{padding:8px 9px;border-bottom:1px solid #e8ebef;text-align:left;font-size:.9rem;}}
+        th{{background:#f3f5f8;}}
+        .fw-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:8px;overflow:hidden;}}
+        .fw-head{{font-size:.98rem;font-weight:800;color:#b91c1c;text-align:center;margin:1px 0 8px;}}
+        .fw-grid{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;align-items:start;width:100%;min-width:0;}}
+        .fw-month{{border:1px solid #d8dde6;border-radius:9px;background:#f8fafc;min-height:220px;min-width:0;overflow:hidden;}}
+        .fw-month-title{{padding:5px 4px;border-bottom:1px solid #d8dde6;text-align:center;font-weight:800;color:#101318;font-size:.78rem;line-height:1.1;overflow-wrap:anywhere;}}
+        .fw-month-days{{padding:5px;display:flex;flex-direction:column;gap:3px;max-height:none;overflow:visible;min-width:0;}}
+        .fw-row{{display:grid;grid-template-columns:20px 58px;gap:4px;align-items:center;font-size:.74rem;color:#111827;min-width:0;justify-content:start;}}
+        .fw-mean-row{{padding:2px 0 4px;}}
+        .fw-mean-row span{{font-weight:800;color:#991b1b;}}
+        .fw-mean-value{{color:#991b1b;font-weight:800;font-size:.74rem;line-height:1.15;}}
+        .fw-mean-value em{{font-style:normal;font-weight:700;margin-left:3px;display:block;}}
+        .fw-mean-value.down em{{color:#15803d;}}
+        .fw-mean-value.up em{{color:#b91c1c;}}
+        .fw-mean-value.neutral em{{color:#6d7480;}}
+        .fw-input{{width:58px;max-width:58px;min-width:58px;padding:2px 4px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.72rem;height:24px;}}
+        .fw-steps-input{{width:58px;max-width:58px;min-width:58px;padding:2px 4px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.72rem;height:24px;}}
+        .fw-input.is-saving{{background:#fff7ed;border-color:#fdba74;}}
+        .fw-steps-input.is-saving{{background:#fff7ed;border-color:#fdba74;}}
+        .fw-input.is-saved{{background:#ecfdf5;border-color:#86efac;}}
+        .fw-steps-input.is-saved{{background:#ecfdf5;border-color:#86efac;}}
+        .fw-input.is-error{{background:#fef2f2;border-color:#fca5a5;}}
+        .fw-steps-input.is-error{{background:#fef2f2;border-color:#fca5a5;}}
+        .fw-steps-input.goal-met{{background:#ecfdf5;border-color:#86efac;color:#166534;font-weight:700;}}
+        .fw-steps-input.goal-missed{{background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700;}}
+        .fw-foot{{margin-top:8px;color:#6d7480;font-size:.82rem;}}
+        @media (max-width: 1280px){{ .fw-grid{{grid-template-columns:repeat(5,minmax(0,1fr));}} }}
+        @media (max-width: 1100px){{ .fw-grid{{grid-template-columns:repeat(4,minmax(0,1fr));}} }}
+        @media (max-width: 900px){{ .cards{{grid-template-columns:1fr;}} .fw-grid{{grid-template-columns:repeat(3,minmax(0,1fr));}} }}
+        @media (max-width: 720px){{ .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} }}
+        @media (max-width: 560px){{ .fw-grid{{grid-template-columns:1fr;}} }}
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="top">
+            <div>
+                <h1>Hola, {html.escape(client_name or 'Cliente')}</h1>
+                <div class="mail">{html.escape(client_email or '')}</div>
+            </div>
+            <a class="logout" href="/client_logout">Cerrar sesión</a>
+        </div>
+        <section class="welcome">
+            <h2>Bienvenido/a a tu panel</h2>
+            <p>Selecciona un apartado para ver todo el detalle de tu progreso.</p>
+        </section>
+        <section class="cards">{cards_html}</section>
+        {detail_html}
+    </div>
+</body>
+</html>
+            '''
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         # API endpoints
+        m = re.match(r'^/api/foods/(\d+)$', path)
+        if m:
+            fid = int(m.group(1))
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT f.id, f.name, f.brand, f.category_id, c.name as category, f.calories, f.protein, f.carbs, f.fats, "
+                "f.serving_size, COALESCE(f.photo_path, ''), COALESCE(f.nutrition_mode, 'per100'), COALESCE(f.per100_unit, 'g'), "
+                "COALESCE(f.is_verified, 0), COALESCE(f.is_active, 1), f.has_gluten, COALESCE(f.barcode, ''), COALESCE(f.keywords, '') "
+                "FROM foods f LEFT JOIN categories c ON f.category_id = c.id WHERE f.id = ?",
+                (fid,),
+            )
+            row = cur.fetchone()
+            conn.close()
+            if not row:
+                return self.send_json({'error': 'not found'}, status=404)
+            keys = [
+                'id', 'name', 'brand', 'category_id', 'category', 'calories', 'protein', 'carbs', 'fats',
+                'serving_size', 'photo_path', 'nutrition_mode', 'per100_unit', 'is_verified', 'is_active',
+                'has_gluten', 'barcode', 'keywords'
+            ]
+            return self.send_json(dict(zip(keys, row)))
+
         if path == '/api/foods':
             foods = get_foods()
-            keys = ['id', 'name', 'brand', 'category', 'calories', 'protein', 'carbs', 'fats', 'serving_size', 'photo_path', 'nutrition_mode', 'per100_unit', 'is_verified']
+            keys = ['id', 'name', 'brand', 'category', 'calories', 'protein', 'carbs', 'fats', 'serving_size', 'photo_path', 'nutrition_mode', 'per100_unit', 'is_verified', 'has_gluten']
             data = [dict(zip(keys, r)) for r in foods]
             return self.send_json(data)
 
         if path == '/api/exercises':
             exercises = get_exercises()
-            keys = ['id', 'name', 'muscle_group', 'equipment', 'difficulty', 'notes', 'category', 'video_url']
+            keys = ['id', 'name', 'muscle_group', 'equipment', 'difficulty', 'notes', 'category', 'video_url', 'machine_url', 'category_2']
             data = [dict(zip(keys, r)) for r in exercises]
             return self.send_json(data)
 
@@ -2067,12 +4217,16 @@ class Handler(BaseHTTPRequestHandler):
             </a>
       <a class="card" href="/exercises">
         <h2>🏋️ Base de datos de ejercicios</h2>
-        <p>Crea, edita y organiza ejercicios con categorías y detalles.</p>
+                <p>Crea, edita y organiza ejercicios por grupo muscular y detalles.</p>
       </a>
       <a class="card" href="/diets">
         <h2>🥗 Creación de dietas</h2>
         <p>Define dietas y añade alimentos sincronizados desde la base de datos.</p>
       </a>
+            <a class="card" href="/client_login">
+                <h2>📲 App de cliente</h2>
+                <p>Acceso del cliente para consultar dieta activa y rutina activa.</p>
+            </a>
     </section>
 
     <div class="footer">
@@ -2130,12 +4284,16 @@ class Handler(BaseHTTPRequestHandler):
                 created_dmy = format_date_dmy(d[3])
                 diet_rows_list.append(
                     '<article class="diet-card">'
-                    f'<div class="diet-card-head"><span class="diet-card-id">#{d[0]}</span><span class="diet-card-date">{html.escape(created_dmy)}</span></div>'
+                    f'<div class="diet-card-head"><span class="diet-card-id">#{d[5]}</span><span class="diet-card-date">{html.escape(created_dmy)}</span></div>'
                     f'<h3 class="diet-card-name">{html.escape(d[1])}</h3>'
                     f'<p class="diet-card-desc">{html.escape(d[2] or "Sin descripción")}</p>'
+                    f'<form method="post" action="/update_diet_display_number" class="diet-number-form">'
+                    f'<input type="hidden" name="diet_id" value="{d[0]}" />'
+                    f'<label>Número <input type="number" name="display_number" value="{d[5]}" min="1" step="1"></label>'
+                    f'<button class="action-button" type="submit">Guardar</button></form>'
                     '<div class="diet-card-actions">'
                     f'<a class="action-button action-edit" href="/static/builder.html?diet_id={d[0]}">Abrir</a>'
-                    f'<a class="action-button" href="/export_diet_pdf/dieta_{d[0]}.pdf" target="_blank">PDF</a>'
+                    f'<a class="action-button" href="/export_diet_pdf/dieta_{d[0]}.pdf?v={uuid.uuid4().hex}" target="_blank">PDF</a>'
                     f'<form method="post" action="/assign_client_diet" class="assign-inline">'
                     f'<input type="hidden" name="diet_id" value="{d[0]}" />'
                     f'<input type="hidden" name="return_to" value="/diets" />'
@@ -2158,8 +4316,9 @@ class Handler(BaseHTTPRequestHandler):
                     label = html.escape(item[2])
                     if item[3]:
                         label += f' ({html.escape(item[3])})'
-                    if item[8]:
-                        label += f' — {html.escape(item[8])}'
+                    quantity_text = html.escape(diet_item_quantity_text(item))
+                    if quantity_text:
+                        label += f' — {quantity_text}'
                     if item[9]:
                         label += f' | {html.escape(item[9])}'
                     day = item[10] or ''
@@ -2231,7 +4390,7 @@ class Handler(BaseHTTPRequestHandler):
       <p>{html.escape(selected_diet[2] or '')}</p>
             <p><strong>Peso cliente:</strong> {selected_diet[4] if selected_diet[4] else '-'} kg</p>
       <div style="margin-bottom:16px;display:flex;gap:12px;flex-wrap:wrap;">
-                <a class="action-button action-edit" href="/export_diet_pdf/dieta_{selected_diet[0]}.pdf" target="_blank">Exportar PDF</a>
+                <a class="action-button action-edit" href="/export_diet_pdf/dieta_{selected_diet[0]}.pdf?v={uuid.uuid4().hex}" target="_blank">Exportar PDF</a>
       </div>
       <form method="post" action="/add_diet_item" style="display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));align-items:start;">
         <input type="hidden" name="diet_id" value="{selected_diet[0]}" />
@@ -2306,6 +4465,10 @@ class Handler(BaseHTTPRequestHandler):
     .diet-card-date{{font-size:.76rem;color:var(--muted);font-weight:700;}}
     .diet-card-name{{margin:0 0 6px;font-size:1rem;line-height:1.2;color:var(--text);}}
     .diet-card-desc{{margin:0;color:var(--muted);font-size:.83rem;line-height:1.3;min-height:2.4em;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}}
+    .diet-number-form{{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:8px 0 10px;}}
+    .diet-number-form label{{display:flex;gap:6px;align-items:center;font-size:.78rem;color:var(--muted);font-weight:700;}}
+    .diet-number-form input{{padding:6px 8px;border-radius:10px;font-size:.82rem;max-width:84px;}}
+    .diet-number-form .action-button{{padding:6px 10px;font-size:.8rem;border-radius:10px;}}
     .diet-card-actions{{margin-top:auto;display:flex;gap:6px;flex-wrap:wrap;}}
     .diet-card-actions .action-button{{padding:6px 10px;font-size:.82rem;border-radius:10px;}}
     .assign-inline{{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:0;}}
@@ -2321,6 +4484,25 @@ class Handler(BaseHTTPRequestHandler):
     .action-edit:hover{{background:#232933;}}
     .action-delete{{border:none;background:#8b1b20;color:#fff;}}
     .action-delete:hover{{background:#6f1116;}}
+    .day-card{{display:flex;flex-direction:column;gap:12px;}}
+    .day-header-row{{display:flex;align-items:center;gap:10px;justify-content:space-between;flex-wrap:wrap;}}
+    .day-status-pill{{display:inline-flex;align-items:center;justify-content:center;padding:4px 10px;border-radius:999px;font-size:.78rem;font-weight:800;letter-spacing:.02em;}}
+    .day-status-pill.train{{background:#e8f7ed;color:#166534;border:1px solid #b7e3c3;}}
+    .day-status-pill.rest{{background:#fef3e8;color:#9a3412;border:1px solid #f8d9bf;}}
+    .day-tools{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}}
+    .day-tools form{{display:inline-flex !important;grid-template-columns:none !important;align-items:center;gap:8px;margin:0 !important;width:auto !important;}}
+    .day-tools form button{{display:inline-flex !important;align-items:center;justify-content:center;width:auto !important;min-width:0 !important;white-space:nowrap;box-shadow:none;}}
+    .day-meta-form input{{min-width:180px;max-width:260px;}}
+    .rest-label{{font-size:.86rem;font-weight:700;color:#9a3412;background:#fef3e8;border:1px solid #f8d9bf;padding:8px 10px;border-radius:10px;}}
+    .exercise-modal{{position:fixed;inset:0;z-index:999;display:flex;align-items:center;justify-content:center;padding:18px;}}
+    .exercise-modal[hidden]{{display:none;}}
+    .exercise-modal-backdrop{{position:absolute;inset:0;background:rgba(15,23,42,.42);}}
+    .exercise-modal-card{{position:relative;background:#fff;border:1px solid #d8dde6;border-radius:16px;box-shadow:0 18px 40px rgba(16,19,24,.22);max-width:540px;width:100%;padding:16px;}}
+    .exercise-modal-card h3{{margin:0 0 12px;font-size:1.05rem;color:#101318;}}
+    .exercise-modal-form{{display:grid;gap:10px;grid-template-columns:1fr;}}
+    .exercise-modal-form input,.exercise-modal-form select{{padding:12px 14px;border:1px solid #d8dde6;border-radius:12px;background:#fff;color:#101318;}}
+    .modal-actions{{display:flex;justify-content:flex-end;gap:8px;margin-top:4px;}}
+    .modal-actions button{{padding:11px 14px;border-radius:12px;}}
         .diet-grid-wrap{{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:#fff;box-shadow:var(--shadow);}}
         .diet-grid{{display:grid;grid-template-columns:180px repeat(7,minmax(170px,1fr));min-width:1300px;width:100%;}}
         .diet-corner{{background:#eef2f7;font-weight:800;color:#475569;font-size:.78rem;letter-spacing:.02em;padding:12px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);}}
@@ -2358,6 +4540,9 @@ class Handler(BaseHTTPRequestHandler):
             body = page.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -2366,11 +4551,14 @@ class Handler(BaseHTTPRequestHandler):
         # Clients page
         if path == '/clients':
             clients = get_clients()
+            clients = sorted(clients, key=lambda c: (str(c[1] or '').casefold(), c[0]))
+            active_routine_by_client = get_active_client_routines_map([c[0] for c in clients]) if clients else {}
+            active_diet_by_client = get_active_client_diets_map([c[0] for c in clients]) if clients else {}
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
             client_cards = []
             from datetime import date, datetime
             for c in clients:
-                client_id, name, phone, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, created_at = c
+                client_id, name, phone, email, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, created_at = c
                 service_status = payment_plan_status(plan_start_date, plan_end_date)
                 is_active = service_status == 'Activo'
 
@@ -2394,15 +4582,34 @@ class Handler(BaseHTTPRequestHandler):
                 plan_label = (plan_notes or '').strip() or ('Plan activo' if plan_start_date or plan_end_date else 'Sin plan')
                 objective = (objectives or '').strip() or 'Sin objetivo'
                 phone_value = (phone or '').strip()
+                email_value = (email or '').strip()
                 phone_link = re.sub(r'[^0-9+]', '', phone_value)
                 contact_button = (
                     f'<a class="card-btn" href="tel:{html.escape(phone_link)}">Contactar</a>'
                     if phone_link else '<button class="card-btn is-disabled" type="button" disabled>Contactar</button>'
                 )
+                routine_button = ''
+                active_routine = active_routine_by_client.get(int(client_id))
+                if active_routine:
+                    routine_id, _routine_name = active_routine
+                    routine_button = f'<a class="card-btn" href="/routines?routine_id={routine_id}">Editar rutina</a>'
+
+                active_diet = active_diet_by_client.get(int(client_id))
+                active_diet_editor = '<div class="diet-start-inline muted">Sin dieta activa</div>'
+                if active_diet:
+                    active_diet_editor = (
+                        '<form method="post" action="/update_client_diet_dates" class="diet-start-inline">'
+                        f'<input type="hidden" name="history_id" value="{active_diet["history_id"]}" />'
+                        f'<input type="hidden" name="client_id" value="{client_id}" />'
+                        '<input type="hidden" name="return_to" value="/clients" />'
+                        f'<label>Inicio dieta activa: <input type="date" name="start_date" value="{html.escape(active_diet["start_date"])}" /></label>'
+                        '<button class="card-btn" type="submit">Guardar inicio</button>'
+                        '</form>'
+                    )
 
                 status_class = 'status-active' if is_active else 'status-inactive'
                 search_blob = ' '.join([
-                    str(name or ''), str(phone_value), str(service_status), str(plan_label),
+                    str(name or ''), str(phone_value), str(email_value), str(service_status), str(plan_label),
                     str(monthly_fee), str(objective), str(plan_start_date or ''), str(plan_end_date or '')
                 ]).lower().strip()
 
@@ -2412,8 +4619,8 @@ class Handler(BaseHTTPRequestHandler):
                     f'data-search="{html.escape(search_blob)}">'
                     f'<div class="card-head"><h3>{html.escape(name)}</h3><span class="service-status {status_class}">{html.escape(service_status)}</span></div>'
                     f'<div class="card-grid">'
-                    f'<div class="kv"><span>Email</span><strong>-</strong></div>'
-                    f'<div class="kv"><span>Teléfono</span><strong>{html.escape(phone_value or "-")}</strong></div>'
+                    f'<div class="kv kv-email"><span>Email</span><strong>{html.escape(email_value or "-")}</strong></div>'
+                    f'<div class="kv kv-phone"><span>Teléfono</span><strong>{html.escape(phone_value or "-")}</strong></div>'
                     f'<div class="kv"><span>Inicio</span><strong>{html.escape(plan_start_date or "-")}</strong></div>'
                     f'<div class="kv"><span>Fin</span><strong>{html.escape(plan_end_date or "-")}</strong></div>'
                     f'<div class="kv"><span>Días restantes</span><strong>{html.escape(days_remaining)}</strong></div>'
@@ -2423,14 +4630,16 @@ class Handler(BaseHTTPRequestHandler):
                     f'</div>'
                     f'<div class="card-actions">'
                     f'<a class="card-btn" href="/client_profile?id={client_id}">Ver perfil</a>'
+                    f'{routine_button}'
                     f'{contact_button}'
-                    f'<a class="card-btn" href="/edit_client?id={client_id}">Extender</a>'
+                    f'<a class="card-btn" href="/edit_client?id={client_id}">Editar</a>'
                     f'<button class="card-btn" type="button" onclick="clientAction(\'Bloquear\', \'{html.escape(name)}\')">Bloquear</button>'
                     f'<button class="card-btn" type="button" onclick="clientAction(\'Desactivar\', \'{html.escape(name)}\')">Desactivar</button>'
                     f'<form method="post" action="/delete_client" onsubmit="return confirm(\'¿Seguro que quieres eliminar este cliente?\')">'
                     f'<input type="hidden" name="id" value="{client_id}" />'
                     f'<button class="card-btn danger" type="submit">Eliminar</button></form>'
                     f'</div>'
+                    f'{active_diet_editor}'
                     f'</article>'
                 )
 
@@ -2476,30 +4685,42 @@ class Handler(BaseHTTPRequestHandler):
         .filter-grid{{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:10px;}}
         .filter-grid label{{display:flex;flex-direction:column;gap:6px;font-size:.85rem;color:var(--muted);font-weight:700;}}
         .filter-grid select{{padding:10px 12px;border:1px solid var(--line-strong);border-radius:10px;background:#fff;font:inherit;color:var(--ink);}}
-        .clients-grid{{display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:14px;}}
-        .client-card{{background:#fff;border:1px solid var(--line);border-radius:16px;padding:16px;box-shadow:var(--shadow);}}
-        .card-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px;}}
-        .card-head h3{{margin:0;font-size:1.15rem;}}
-        .service-status{{padding:5px 9px;border-radius:999px;font-size:.75rem;font-weight:800;letter-spacing:.02em;}}
+        .clients-grid{{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;}}
+        .client-card{{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px;box-shadow:var(--shadow);}}
+        .card-head{{display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:9px;}}
+        .card-head h3{{margin:0;font-size:.98rem;line-height:1.2;}}
+        .service-status{{padding:3px 7px;border-radius:999px;font-size:.66rem;font-weight:800;letter-spacing:.02em;}}
         .status-active{{background:#eaf8ef;color:#1f7a40;}}
         .status-inactive{{background:#eef2f7;color:#4a5568;}}
-        .card-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px 14px;margin-bottom:14px;}}
-        .kv span{{display:block;font-size:.74rem;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.03em;}}
-        .kv strong{{display:block;margin-top:3px;font-size:.95rem;line-height:1.25;}}
-        .card-actions{{display:flex;gap:8px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:12px;}}
+        .card-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px 10px;margin-bottom:9px;}}
+        .kv{{min-width:0;}}
+        .kv span{{display:block;font-size:.63rem;color:var(--muted);font-weight:700;text-transform:uppercase;letter-spacing:.03em;}}
+        .kv strong{{display:block;margin-top:2px;font-size:.82rem;line-height:1.2;}}
+        .kv-email{{grid-column:1 / -1;}}
+        .kv-email strong{{overflow-wrap:anywhere;word-break:break-word;white-space:normal;}}
+        .kv-phone strong{{overflow-wrap:anywhere;}}
+        .card-actions{{display:flex;gap:6px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:8px;}}
         .card-actions form{{margin:0;}}
-        .card-btn{{display:inline-flex;align-items:center;justify-content:center;height:34px;padding:0 10px;border-radius:9px;border:1px solid var(--line-strong);background:#fff;color:var(--ink);text-decoration:none;font-size:.82rem;font-weight:700;cursor:pointer;}}
+        .card-btn{{display:inline-flex;align-items:center;justify-content:center;height:28px;padding:0 8px;border-radius:8px;border:1px solid var(--line-strong);background:#fff;color:var(--ink);text-decoration:none;font-size:.72rem;font-weight:700;cursor:pointer;}}
         .card-btn:hover{{background:#f5f7fa;}}
         .card-btn.danger{{border-color:#efcfd2;color:#8b1b20;background:#fff4f4;}}
         .card-btn.danger:hover{{background:#fee2e2;}}
         .card-btn.is-disabled{{opacity:.45;cursor:not-allowed;pointer-events:none;}}
+        .diet-start-inline{{margin-top:8px;padding-top:8px;border-top:1px dashed var(--line-strong);display:flex;gap:8px;align-items:center;flex-wrap:wrap;}}
+        .diet-start-inline label{{font-size:.75rem;color:var(--muted);font-weight:700;display:flex;align-items:center;gap:6px;}}
+        .diet-start-inline input{{font:inherit;padding:6px 8px;border:1px solid var(--line-strong);border-radius:8px;background:#fff;color:var(--ink);}}
+        .diet-start-inline.muted{{font-size:.75rem;color:var(--muted);font-style:italic;}}
         .empty-state{{display:none;padding:22px;border:1px dashed var(--line-strong);border-radius:12px;background:#fff;color:var(--muted);font-weight:700;text-align:center;}}
         .empty-state.show{{display:block;}}
         .is-hidden{{display:none !important;}}
-        @media (max-width: 1000px){{
-            .clients-grid{{grid-template-columns:1fr;}}
+        @media (max-width: 980px){{
+            .clients-grid{{grid-template-columns:repeat(3,minmax(0,1fr));}}
         }}
         @media (max-width: 760px){{
+            .clients-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}}
+        }}
+        @media (max-width: 560px){{
+            .clients-grid{{grid-template-columns:1fr;}}
             .tabs{{grid-template-columns:1fr;}}
             .search-wrap{{grid-template-columns:1fr;}}
             .filter-grid{{grid-template-columns:1fr;}}
@@ -2635,6 +4856,9 @@ class Handler(BaseHTTPRequestHandler):
             body = page.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -2676,6 +4900,8 @@ class Handler(BaseHTTPRequestHandler):
             <form method="post" action="/add_client">
                 <label>Nombre<input name="name" placeholder="Nombre del cliente" required /></label>
                 <label>Teléfono<input name="phone" placeholder="Número de teléfono" /></label>
+                <label>Email<input name="email" type="email" placeholder="cliente@email.com" /></label>
+                <label>Código acceso app<input name="client_access_code" placeholder="Ej: 1234" /></label>
                 <label>Fecha de nacimiento<input name="birthdate" type="date" /></label>
                 <label>Altura (cm)<input name="height_cm" type="number" min="0" step="0.1" placeholder="184" /></label>
                 <label>Peso (kg)<input name="weight_kg" type="number" min="0" step="0.1" placeholder="80" /></label>
@@ -2697,6 +4923,9 @@ class Handler(BaseHTTPRequestHandler):
             body = page.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -2717,7 +4946,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             c = rows[0]
-            _, name, phone, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, _created_at = c
+            _, name, phone, email, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, _created_at = c
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT COALESCE(client_access_code, '') FROM clients WHERE id = ?", (cid_i,))
+            access_row = cur.fetchone()
+            conn.close()
+            client_access_code = access_row[0] if access_row else ''
             page = f'''
 <!doctype html>
 <html>
@@ -2750,6 +4985,8 @@ class Handler(BaseHTTPRequestHandler):
                 <input type="hidden" name="id" value="{cid_i}" />
                 <label>Nombre<input name="name" value="{html.escape(name)}" required /></label>
                 <label>Teléfono<input name="phone" value="{html.escape(phone or '')}" /></label>
+                <label>Email<input name="email" type="email" value="{html.escape(email or '')}" /></label>
+                <label>Código acceso app<input name="client_access_code" value="{html.escape(client_access_code or '')}" /></label>
                 <label>Fecha de nacimiento<input name="birthdate" type="date" value="{html.escape(birthdate or '')}" /></label>
                 <label>Altura (cm)<input name="height_cm" type="number" min="0" step="0.1" value="{height_cm if height_cm else ''}" /></label>
                 <label>Peso (kg)<input name="weight_kg" type="number" min="0" step="0.1" value="{weight_kg if weight_kg else ''}" /></label>
@@ -2794,10 +5031,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             c = rows[0]
-            _, name, phone, birthdate, _height_cm, _weight_kg, objectives, _plan_start_date, _plan_end_date, _plan_amount, _plan_notes, _created_at = c
+            _, name, phone, email, birthdate, _height_cm, _weight_kg, objectives, _plan_start_date, _plan_end_date, _plan_amount, _plan_notes, _created_at = c
             age = calculate_age(birthdate)
             diets = get_diets()
-            exercises = get_exercises()
+            routines_all = get_routines()
             diet_history = get_client_diet_history(cid_i)
             training_history = get_client_training_history(cid_i)
 
@@ -2811,61 +5048,107 @@ class Handler(BaseHTTPRequestHandler):
                 f'<option value="{d[0]}" {"selected" if selected_diet_id == str(d[0]) else ""}>{html.escape(d[1])}</option>'
                 for d in diets
             ])
-            exercise_options = ''.join([
-                f'<option value="{e[0]}">{html.escape(e[1])}</option>'
-                for e in exercises
+            routine_options = ''.join([
+                f'<option value="{r[0]}">{html.escape(r[1] or "Rutina")}</option>'
+                for r in routines_all
             ])
 
             active_diets = [h for h in diet_history if int(h[9] or 0) == 1]
             old_diets = [h for h in diet_history if int(h[9] or 0) == 0]
-            active_training = [h for h in training_history if int(h[7] or 0) == 1]
-            old_training = [h for h in training_history if int(h[7] or 0) == 0]
+            active_training = [h for h in training_history if int(h[11] or 0) == 1]
+            old_training = [h for h in training_history if int(h[11] or 0) == 0]
 
             def diet_item_html(item):
                 history_id, _client_id, diet_id, diet_name, client_diet_name, template_diet_id, template_diet_name, start_date, end_date, is_active, notes, _created = item
                 display_name = (client_diet_name or '').strip() or (diet_name or '').strip() or 'Dieta'
-                badge = 'Activa' if int(is_active or 0) == 1 else 'Antigua'
+                badge = 'Activa' if int(is_active or 0) == 1 else 'No activa'
                 end_label = end_date or ('En curso' if int(is_active or 0) == 1 else '-')
                 template_label = template_diet_name or ('Plantilla #' + str(template_diet_id) if template_diet_id else '-')
-                close_button = ''
+                badge_html = f'<span class="badge badge-old">{badge}</span>'
                 if int(is_active or 0) == 1:
-                    close_button = (
+                    badge_html = (
                         f'<form method="post" action="/deactivate_client_diet" style="display:inline;margin:0">'
                         f'<input type="hidden" name="history_id" value="{history_id}" />'
                         f'<input type="hidden" name="client_id" value="{cid_i}" />'
-                        f'<button type="submit" class="mini-btn">Cerrar</button>'
+                        f'<button type="submit" class="badge badge-active badge-btn" title="Pulsar para pasar a no activa">Activa</button>'
                         f'</form>'
                     )
+                else:
+                    badge_html = (
+                        f'<form method="post" action="/activate_client_diet" style="display:inline;margin:0">'
+                        f'<input type="hidden" name="history_id" value="{history_id}" />'
+                        f'<input type="hidden" name="client_id" value="{cid_i}" />'
+                        f'<input type="hidden" name="return_to" value="/client_profile?id={cid_i}" />'
+                        f'<button type="submit" class="badge badge-inactive badge-btn" title="Pulsar para activar esta dieta">No activa</button>'
+                        f'</form>'
+                    )
+                date_form_fields = (
+                    '<label>Inicio'
+                    f'<input type="date" name="start_date" value="{html.escape(start_date or "")}" />'
+                    '</label>'
+                )
+                save_label = 'Guardar inicio'
+                if int(is_active or 0) == 0:
+                    date_form_fields += (
+                        '<label>Fin'
+                        f'<input type="date" name="end_date" value="{html.escape(end_date or "")}" />'
+                        '</label>'
+                    )
+                    save_label = 'Guardar fechas'
+                edit_dates_form = (
+                    f'<form method="post" action="/update_client_diet_dates" class="inline-dates-form">'
+                    f'<input type="hidden" name="history_id" value="{history_id}" />'
+                    f'<input type="hidden" name="client_id" value="{cid_i}" />'
+                    f'<input type="hidden" name="return_to" value="/client_profile?id={cid_i}" />'
+                    f'{date_form_fields}'
+                    f'<button type="submit" class="mini-btn">{save_label}</button>'
+                    f'</form>'
+                )
                 return (
                     '<div class="history-item">'
-                    f'<div class="history-head"><strong>{html.escape(display_name)}</strong><span class="badge">{badge}</span></div>'
+                    f'<div class="history-head"><strong>{html.escape(display_name)}</strong>{badge_html}</div>'
                     f'<div class="history-meta">Inicio: {html.escape(start_date or "-")} · Fin: {html.escape(end_label)} · Plantilla: {html.escape(template_label)}</div>'
                     f'<div class="history-note">{html.escape(notes or "Sin notas")}</div>'
-                    f'<div style="margin-top:8px;"><a class="mini-btn" href="/static/builder.html?diet_id={diet_id}">Editar dieta</a></div>'
-                    f'{close_button}'
+                    f'<div class="history-edit-box">{edit_dates_form}</div>'
+                    f'<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;"><a class="mini-btn" href="/static/builder.html?diet_id={diet_id}">Editar dieta</a></div>'
                     '</div>'
                 )
 
             def training_item_html(item):
-                history_id, _client_id, _exercise_id, training_name, exercise_name, start_date, end_date, is_active, notes, _created = item
-                display_name = (training_name or '').strip() or (exercise_name or '').strip() or 'Entrenamiento'
-                badge = 'Activo' if int(is_active or 0) == 1 else 'Antiguo'
+                history_id, _client_id, _exercise_id, routine_id, training_name, exercise_name, routine_name, template_routine_id, template_routine_name, start_date, end_date, is_active, notes, _created = item
+                routine_id_i = int(routine_id or 0)
+                display_name = (training_name or '').strip() or (routine_name or '').strip() or (exercise_name or '').strip() or 'Entrenamiento'
+                badge = 'Activa' if int(is_active or 0) == 1 else 'No activa'
                 end_label = end_date or ('En curso' if int(is_active or 0) == 1 else '-')
-                close_button = ''
+                template_label = template_routine_name or ('Plantilla #' + str(template_routine_id) if template_routine_id else '-')
+                badge_html = f'<span class="badge badge-old">{badge}</span>'
                 if int(is_active or 0) == 1:
-                    close_button = (
+                    badge_html = (
                         f'<form method="post" action="/deactivate_client_training" style="display:inline;margin:0">'
                         f'<input type="hidden" name="history_id" value="{history_id}" />'
                         f'<input type="hidden" name="client_id" value="{cid_i}" />'
-                        f'<button type="submit" class="mini-btn">Cerrar</button>'
+                        f'<input type="hidden" name="return_to" value="/client_profile?id={cid_i}" />'
+                        f'<button type="submit" class="badge badge-active badge-btn" title="Pulsar para pasar a no activa">Activa</button>'
                         f'</form>'
                     )
+                else:
+                    badge_html = (
+                        f'<form method="post" action="/activate_client_training" style="display:inline;margin:0">'
+                        f'<input type="hidden" name="history_id" value="{history_id}" />'
+                        f'<input type="hidden" name="client_id" value="{cid_i}" />'
+                        f'<input type="hidden" name="return_to" value="/client_profile?id={cid_i}" />'
+                        f'<button type="submit" class="badge badge-inactive badge-btn" title="Pulsar para activar esta rutina">No activa</button>'
+                        f'</form>'
+                    )
+                edit_button = ''
+                if routine_id_i > 0:
+                    edit_button = f'<div style="margin-top:8px;"><a class="mini-btn" href="/routines?routine_id={routine_id_i}">Editar rutina</a></div>'
                 return (
                     '<div class="history-item">'
-                    f'<div class="history-head"><strong>{html.escape(display_name)}</strong><span class="badge">{badge}</span></div>'
-                    f'<div class="history-meta">Inicio: {html.escape(start_date or "-")} · Fin: {html.escape(end_label)}</div>'
+                    f'<div class="history-head"><strong>{html.escape(display_name)}</strong>{badge_html}</div>'
+                    f'<div class="history-meta">Inicio: {html.escape(start_date or "-")} · Fin: {html.escape(end_label)} · Plantilla: {html.escape(template_label)}</div>'
                     f'<div class="history-note">{html.escape(notes or "Sin notas")}</div>'
-                    f'{close_button}'
+                    f'{edit_button}'
                     '</div>'
                 )
 
@@ -2873,6 +5156,138 @@ class Handler(BaseHTTPRequestHandler):
             old_diets_html = ''.join([diet_item_html(h) for h in old_diets]) or '<p class="empty">Sin dietas antiguas.</p>'
             active_training_html = ''.join([training_item_html(h) for h in active_training]) or '<p class="empty">Sin entrenamientos activos.</p>'
             old_training_html = ''.join([training_item_html(h) for h in old_training]) or '<p class="empty">Sin entrenamientos antiguos.</p>'
+            fasting_weights_html = render_fasting_weights_panel(cid_i, panel_id=f'fw-admin-{cid_i}', include_client_id=True)
+            daily_steps_goal = get_client_daily_steps_goal(cid_i)
+            daily_steps_html = render_client_daily_steps_panel(
+                cid_i,
+                panel_id=f'steps-admin-{cid_i}',
+                include_client_id=True,
+                daily_goal=daily_steps_goal,
+            )
+
+            diet_panel_html = f'''
+            <section class="panel">
+                <h2>🥗 Dietas</h2>
+                <form method="post" action="/assign_client_diet" class="assign">
+                    <input type="hidden" name="client_id" value="{cid_i}" />
+                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=diet" />
+                    <select name="diet_id" class="full" required>
+                        <option value="">Selecciona una dieta</option>
+                        {diet_options}
+                    </select>
+                    <input name="start_date" type="date" placeholder="Inicio" />
+                    <input name="end_date" type="date" placeholder="Fin" />
+                    <input name="notes" class="full" placeholder="Notas de asignación" />
+                    <button type="submit" class="full">✨ Asignar dieta al cliente</button>
+                </form>
+                <div class="history-group">
+                    <h3>Dietas activas</h3>
+                    {active_diets_html}
+                </div>
+                <div class="history-group">
+                    <h3>Dietas antiguas</h3>
+                    {old_diets_html}
+                </div>
+            </section>
+            '''
+
+            training_panel_html = f'''
+            <section class="panel">
+                <h2>🏋️ Entrenamientos</h2>
+                <form method="post" action="/assign_client_training" class="assign">
+                    <input type="hidden" name="client_id" value="{cid_i}" />
+                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=training" />
+                    <select name="routine_id" class="full" required>
+                        <option value="">Selecciona una rutina</option>
+                        {routine_options}
+                    </select>
+                    <input name="start_date" type="date" placeholder="Inicio" />
+                    <input name="end_date" type="date" placeholder="Fin" />
+                    <input name="notes" class="full" placeholder="Notas de entrenamiento" />
+                    <button type="submit" class="full">✨ Asignar rutina</button>
+                </form>
+                <div class="history-group">
+                    <h3>Entrenamientos activos</h3>
+                    {active_training_html}
+                </div>
+                <div class="history-group">
+                    <h3>Entrenamientos antiguos</h3>
+                    {old_training_html}
+                </div>
+            </section>
+            '''
+
+            weight_panel_html = f'''
+            <section class="panel panel-full">
+                <h2>⚖️ Peso corporal en ayunas</h2>
+                {fasting_weights_html}
+            </section>
+            '''
+
+            steps_panel_html = f'''
+            <section class="panel panel-full">
+                <h2>👟 Pasos diarios</h2>
+                <form method="post" action="/set_client_steps_goal" class="steps-goal-form">
+                    <input type="hidden" name="client_id" value="{cid_i}" />
+                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=steps" />
+                    <label>Objetivo diario de pasos
+                        <input name="daily_steps_goal" type="number" min="0" step="1" value="{int(daily_steps_goal or 0) if int(daily_steps_goal or 0) > 0 else ''}" placeholder="Ej: 10000" />
+                    </label>
+                    <button type="submit">Guardar objetivo</button>
+                </form>
+                {daily_steps_html}
+            </section>
+            '''
+
+            section_titles = {
+                'diet': 'Dietas',
+                'training': 'Entrenamientos',
+                'weight': 'Peso corporal en ayunas',
+                'steps': 'Pasos diarios',
+            }
+            section_descriptions = {
+                'diet': 'Asigna dietas y revisa el historial del cliente.',
+                'training': 'Asigna rutinas y consulta histórico de entrenamientos.',
+                'weight': 'Control diario del peso corporal en ayunas.',
+                'steps': 'Objetivo y seguimiento de pasos diarios.',
+            }
+            section_status = {
+                'diet': 'Activa' if active_diets else 'Sin dieta activa',
+                'training': 'Activa' if active_training else 'Sin entrenamiento activo',
+                'weight': 'Seguimiento activo',
+                'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
+            }
+            section_content = {
+                'diet': diet_panel_html,
+                'training': training_panel_html,
+                'weight': weight_panel_html,
+                'steps': steps_panel_html,
+            }
+
+            selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
+            if selected_section not in section_content:
+                selected_section = ''
+
+            cards_html = ''.join([
+                f'<a class="admin-home-card" href="/client_profile?id={cid_i}&section={key}">'
+                f'<div class="chip">{html.escape(section_status[key])}</div>'
+                f'<h3>{html.escape(section_titles[key])}</h3>'
+                f'<p>{html.escape(section_descriptions[key])}</p>'
+                '</a>'
+                for key in ('diet', 'training', 'weight', 'steps')
+            ])
+
+            detail_html = ''
+            if selected_section:
+                detail_html = (
+                    '<section class="detail-wrap">'
+                    f'<a class="back-btn" href="/client_profile?id={cid_i}">← Volver al panel</a>'
+                    '<details class="accordion" open>'
+                    f'<summary>{html.escape(section_titles[selected_section])}</summary>'
+                    f'<div class="accordion-body">{section_content[selected_section]}</div>'
+                    '</details>'
+                    '</section>'
+                )
 
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
             page = f'''
@@ -2889,7 +5304,18 @@ class Handler(BaseHTTPRequestHandler):
         .sub{{color:#6d7480;margin-top:4px;}}
         .back{{text-decoration:none;color:#101318;font-weight:700;}}
         .msg{{padding:10px 12px;border-radius:10px;background:#fef4ea;border:1px solid #f5dcc0;color:#4d3217;margin:10px 0 16px;}}
-        .grid{{display:grid;grid-template-columns:repeat(2,minmax(320px,1fr));gap:16px;}}
+        .cards{{display:grid;gap:12px;grid-template-columns:repeat(4,minmax(0,1fr));}}
+        .admin-home-card{{display:block;text-decoration:none;border:1px solid #d8dde6;background:#fff;border-radius:16px;padding:16px;box-shadow:0 10px 22px rgba(16,19,24,.06);transition:transform .14s ease, box-shadow .14s ease, border-color .14s ease;color:#101318;}}
+        .admin-home-card:hover{{transform:translateY(-2px);box-shadow:0 16px 30px rgba(16,19,24,.10);border-color:#c5ccd8;}}
+        .admin-home-card .chip{{display:inline-flex;padding:4px 10px;border-radius:999px;background:#eef2f7;color:#475569;font-size:.72rem;font-weight:800;}}
+        .admin-home-card h3{{margin:10px 0 6px;font-size:1.05rem;}}
+        .admin-home-card p{{margin:0;color:#6d7480;font-size:.92rem;line-height:1.35;}}
+        .detail-wrap{{margin-top:14px;}}
+        .back-btn{{display:inline-flex;align-items:center;gap:6px;text-decoration:none;border:1px solid #d8dde6;border-radius:10px;padding:8px 11px;background:#fff;color:#101318;font-weight:700;font-size:.88rem;margin-bottom:10px;}}
+        .accordion{{border:1px solid #e8ebef;border-radius:16px;background:#fff;box-shadow:0 12px 30px rgba(16,19,24,.06);overflow:hidden;}}
+        .accordion summary{{list-style:none;cursor:pointer;padding:14px 16px;font-weight:800;font-size:1.03rem;border-bottom:1px solid #eef2f7;}}
+        .accordion summary::-webkit-details-marker{{display:none;}}
+        .accordion-body{{padding:14px;}}
         .panel{{background:#fff;border:1px solid #e8ebef;border-radius:16px;padding:16px;box-shadow:0 12px 30px rgba(16,19,24,.06);color:#101318;}}
         .panel h2{{margin:0 0 12px;font-size:1.2rem;}}
         .profile-meta{{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0 12px;}}
@@ -2903,13 +5329,59 @@ class Handler(BaseHTTPRequestHandler):
         .history-item{{border:1px solid #e8ebef;border-radius:12px;padding:10px;margin-bottom:8px;background:#fff;}}
         .history-head{{display:flex;justify-content:space-between;gap:8px;align-items:center;}}
         .badge{{padding:4px 8px;border-radius:999px;background:#eef2f7;font-size:.74rem;font-weight:800;color:#4a5568;}}
+        .badge-old{{background:#eef2f7;color:#4a5568;}}
+        .badge-active{{background:#dcfce7;color:#166534;}}
+        .badge-inactive{{background:#fee2e2;color:#991b1b;}}
+        .badge-btn{{border:1px solid #bbf7d0;cursor:pointer;}}
+        .badge-btn:hover{{filter:brightness(.97);}}
         .history-meta{{margin-top:6px;color:#6d7480;font-size:.86rem;}}
         .history-note{{margin-top:6px;color:#101318;font-size:.9rem;}}
         .mini-btn{{display:inline-flex;margin-top:8px;padding:7px 10px;border:1px solid #d8dde6;border-radius:8px;background:#fff;color:#101318;font-weight:700;cursor:pointer;text-decoration:none;}}
+        .history-edit-box{{margin-top:10px;padding:10px;border:1px dashed #d8dde6;border-radius:10px;background:#f9fbfd;}}
+        .inline-dates-form{{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;}}
+        .inline-dates-form label{{display:flex;flex-direction:column;gap:4px;font-size:.75rem;color:#6d7480;font-weight:700;}}
+        .inline-dates-form input{{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid #d8dde6;background:#fff;color:#101318;min-width:170px;}}
+        .inline-dates-form .mini-btn{{margin-top:0;}}
+        .panel-full{{grid-column:1 / -1;}}
+        .fw-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:8px;overflow:hidden;}}
+        .fw-head{{font-size:.98rem;font-weight:800;color:#b91c1c;text-align:center;margin:1px 0 8px;}}
+        .fw-grid{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;align-items:start;width:100%;min-width:0;}}
+        .fw-month{{border:1px solid #d8dde6;border-radius:9px;background:#f8fafc;min-height:220px;min-width:0;overflow:hidden;}}
+        .fw-month-title{{padding:5px 4px;border-bottom:1px solid #d8dde6;text-align:center;font-weight:800;color:#101318;font-size:.78rem;line-height:1.1;overflow-wrap:anywhere;}}
+        .fw-month-days{{padding:5px;display:flex;flex-direction:column;gap:3px;max-height:none;overflow:visible;min-width:0;}}
+        .fw-row{{display:grid;grid-template-columns:20px 58px;gap:4px;align-items:center;font-size:.74rem;color:#111827;min-width:0;justify-content:start;}}
+        .fw-mean-row{{padding:2px 0 4px;}}
+        .fw-mean-row span{{font-weight:800;color:#991b1b;}}
+        .fw-mean-value{{color:#991b1b;font-weight:800;font-size:.74rem;line-height:1.15;}}
+        .fw-mean-value em{{font-style:normal;font-weight:700;margin-left:3px;display:block;}}
+        .fw-mean-value.down em{{color:#15803d;}}
+        .fw-mean-value.up em{{color:#b91c1c;}}
+        .fw-mean-value.neutral em{{color:#6d7480;}}
+        .fw-input{{width:58px;max-width:58px;min-width:58px;padding:2px 4px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.72rem;height:24px;}}
+        .fw-steps-input{{width:58px;max-width:58px;min-width:58px;padding:2px 4px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.72rem;height:24px;}}
+        .fw-input.is-saving{{background:#fff7ed;border-color:#fdba74;}}
+        .fw-steps-input.is-saving{{background:#fff7ed;border-color:#fdba74;}}
+        .fw-input.is-saved{{background:#ecfdf5;border-color:#86efac;}}
+        .fw-steps-input.is-saved{{background:#ecfdf5;border-color:#86efac;}}
+        .fw-input.is-error{{background:#fef2f2;border-color:#fca5a5;}}
+        .fw-steps-input.is-error{{background:#fef2f2;border-color:#fca5a5;}}
+        .fw-steps-input.goal-met{{background:#ecfdf5;border-color:#86efac;color:#166534;font-weight:700;}}
+        .fw-steps-input.goal-missed{{background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700;}}
+        .fw-foot{{margin-top:8px;color:#6d7480;font-size:.82rem;}}
+        .steps-goal-form{{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px;}}
+        .steps-goal-form label{{display:flex;flex-direction:column;gap:5px;font-size:.78rem;color:#6d7480;font-weight:700;}}
+        .steps-goal-form input{{font:inherit;padding:8px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;min-width:200px;}}
+        .steps-goal-form button{{padding:8px 12px;border:1px solid #d8dde6;border-radius:9px;background:#fff;color:#101318;font-weight:700;cursor:pointer;}}
         .empty{{color:#6d7480;font-style:italic;}}
+        @media (max-width: 1280px){{ .fw-grid{{grid-template-columns:repeat(5,minmax(0,1fr));}} }}
+        @media (max-width: 1200px){{ .fw-grid{{grid-template-columns:repeat(4,minmax(0,1fr));}} }}
         @media (max-width: 960px){{
-            .grid{{grid-template-columns:1fr;}}
+            .cards{{grid-template-columns:repeat(2,minmax(0,1fr));}}
+            .fw-grid{{grid-template-columns:repeat(3,minmax(0,1fr));}}
         }}
+        @media (max-width: 820px){{ .cards{{grid-template-columns:1fr;}} }}
+        @media (max-width: 720px){{ .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} }}
+        @media (max-width: 560px){{ .fw-grid{{grid-template-columns:1fr;}} }}
     </style>
 </head>
 <body>
@@ -2921,65 +5393,19 @@ class Handler(BaseHTTPRequestHandler):
                 <div class="sub">Dos apartados principales: Dietas y Entrenamientos</div>
                 <div class="profile-meta">
                     <span class="chip">Teléfono: {html.escape(phone or '-')}</span>
+                    <span class="chip">Email: {html.escape(email or '-')}</span>
                     <span class="chip">Edad: {age if age is not None else '-'}</span>
                     <span class="chip">Objetivo: {html.escape((objectives or '').strip() or 'Sin objetivo')}</span>
                 </div>
             </div>
-            <a class="back" href="/clients">← Volver a clientes</a>
+            <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <a class="back" href="/edit_client?id={cid_i}">✏️ Editar cliente</a>
+                <a class="back" href="/clients">← Volver a clientes</a>
+            </div>
         </div>
         {f'<div class="msg">{html.escape(msg)}</div>' if msg else ''}
-        <div class="grid">
-            <section class="panel">
-                <h2>🥗 Dietas</h2>
-                <form method="post" action="/assign_client_diet" class="assign">
-                    <input type="hidden" name="client_id" value="{cid_i}" />
-                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}" />
-                    <select name="diet_id" class="full" required>
-                        <option value="">Selecciona una dieta</option>
-                        {diet_options}
-                    </select>
-                    <input name="start_date" type="date" placeholder="Inicio" />
-                    <input name="end_date" type="date" placeholder="Fin" />
-                    <input name="notes" class="full" placeholder="Notas de asignación" />
-                    <button type="submit" class="full">✨ Asignar dieta al cliente</button>
-                </form>
-
-                <div class="history-group">
-                    <h3>Dietas activas</h3>
-                    {active_diets_html}
-                </div>
-                <div class="history-group">
-                    <h3>Dietas antiguas</h3>
-                    {old_diets_html}
-                </div>
-            </section>
-
-            <section class="panel">
-                <h2>🏋️ Entrenamientos</h2>
-                <form method="post" action="/assign_client_training" class="assign">
-                    <input type="hidden" name="client_id" value="{cid_i}" />
-                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}" />
-                    <select name="exercise_id" class="full">
-                        <option value="">Selecciona ejercicio base (opcional)</option>
-                        {exercise_options}
-                    </select>
-                    <input name="training_name" class="full" placeholder="Nombre del entrenamiento" />
-                    <input name="start_date" type="date" placeholder="Inicio" />
-                    <input name="end_date" type="date" placeholder="Fin" />
-                    <input name="notes" class="full" placeholder="Notas de entrenamiento" />
-                    <button type="submit" class="full">✨ Asignar entrenamiento</button>
-                </form>
-
-                <div class="history-group">
-                    <h3>Entrenamientos activos</h3>
-                    {active_training_html}
-                </div>
-                <div class="history-group">
-                    <h3>Entrenamientos antiguos</h3>
-                    {old_training_html}
-                </div>
-            </section>
-        </div>
+        <section class="cards">{cards_html}</section>
+        {detail_html}
     </div>
 </body>
 </html>
@@ -3279,6 +5705,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({'error': 'not found'}, status=404)
             return self.send_json(data)
 
+        if path == '/api/settings/diet_instructions_template':
+            return self.send_json({'value': get_diet_instructions_template()})
+
         # API: instant food search
         if path == '/api/foods/search':
             query = q.get('q', [''])[0].strip()
@@ -3323,6 +5752,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'application/pdf')
             self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('Content-Disposition', f'inline; filename="dieta_{diet_id}.pdf"; filename*=UTF-8\'\'dieta_{diet_id}.pdf')
             self.send_header('Content-Length', str(len(pdf)))
             self.end_headers()
@@ -3349,6 +5781,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'application/pdf')
             self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('Content-Disposition', f'inline; filename="rutina_{routine_id}.pdf"; filename*=UTF-8\'\'rutina_{routine_id}.pdf')
             self.send_header('Content-Length', str(len(pdf)))
             self.end_headers()
@@ -3415,7 +5850,7 @@ class Handler(BaseHTTPRequestHandler):
 
             food_cards_html = []
             for r in foods_sorted:
-                fid, name, brand, category, cal, prot, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, is_verified = r
+                fid, name, brand, category, cal, prot, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, is_verified, has_gluten = r
                 brand_name = brand or 'Sin marca'
                 category_name = category or 'Sin categoría'
                 photo_html = (
@@ -3424,12 +5859,20 @@ class Handler(BaseHTTPRequestHandler):
                     '<div class="food-photo-placeholder">Sin foto</div>'
                 )
                 verified_badge = '<span class="verified-pill" title="Alimento verificado">✓ Verificado</span>' if int(is_verified or 0) == 1 else ''
+                gluten_value = parse_gluten_input(has_gluten)
+                if gluten_value == 1:
+                    gluten_badge = '<span class="gluten-pill has-gluten" title="Con gluten">🌾 Con gluten</span>'
+                elif gluten_value == 0:
+                    gluten_badge = '<span class="gluten-pill gluten-free" title="Sin gluten">✅ Sin gluten</span>'
+                else:
+                    gluten_badge = '<span class="gluten-pill gluten-unknown" title="Gluten no indicado">❔ Gluten n/i</span>'
                 food_cards_html.append(f'''
                     <article class="food-result-card" data-name="{html.escape(normalize_text(name))}" data-brand="{html.escape(normalize_text(brand_name))}" data-category="{html.escape(normalize_text(category_name))}" data-open-url="/edit?id={fid}">
                         <div class="food-result-photo">{photo_html}</div>
                         <div class="food-result-main">
                             <h3>{html.escape(name)} {verified_badge}</h3>
                             <p class="food-result-sub">{html.escape(brand_name)} · {html.escape(category_name)}</p>
+                            <div class="food-tags-row">{gluten_badge}</div>
                             <div class="food-macros-grid">
                                 <span><strong>{fmt_macro(cal)}</strong> kcal</span>
                                 <span><strong>{fmt_macro(prot)} g</strong> proteínas</span>
@@ -3570,6 +6013,11 @@ class Handler(BaseHTTPRequestHandler):
         .food-result-main h3{{margin:0;font-size:1.08rem;letter-spacing:-.02em;}}
         .verified-pill{{display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:3px 10px;border-radius:999px;font-size:.74rem;font-weight:800;letter-spacing:.02em;background:#eaf8ef;color:#1f7a40;border:1px solid #bde7cc;vertical-align:middle;}}
         .food-result-sub{{margin:4px 0 8px;color:var(--muted);font-size:.92rem;}}
+        .food-tags-row{{display:flex;align-items:center;gap:6px;margin:0 0 8px;min-height:22px;}}
+        .gluten-pill{{display:inline-flex;align-items:center;justify-content:center;height:22px;padding:0 8px;border-radius:999px;font-size:.72rem;font-weight:800;letter-spacing:.01em;border:1px solid transparent;}}
+        .gluten-pill.has-gluten{{background:#fff2e8;color:#9a3412;border-color:#fed7aa;}}
+        .gluten-pill.gluten-free{{background:#eaf8ef;color:#1f7a40;border-color:#bde7cc;}}
+        .gluten-pill.gluten-unknown{{background:#f3f5f8;color:#5b6574;border-color:#dce2ea;}}
         .food-macros-grid{{display:grid;grid-template-columns:1fr;gap:6px;font-size:.88rem;color:#333d4b;margin-top:6px;}}
         .food-macros-grid strong{{font-weight:800;color:#11151a;}}
         .card-actions{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-start;padding-top:6px;}}
@@ -3640,6 +6088,11 @@ class Handler(BaseHTTPRequestHandler):
                 <select name="category">
                     <option value="">Categoría (opcional)</option>
                     {category_options}
+                </select>
+                <select name="has_gluten">
+                    <option value="">Gluten (no indicado)</option>
+                    <option value="1">Con gluten</option>
+                    <option value="0">Sin gluten</option>
                 </select>
                 <input name="calories" placeholder="Kcal" />
                 <input name="protein" placeholder="Proteínas (g)" />
@@ -3850,6 +6303,7 @@ class Handler(BaseHTTPRequestHandler):
             categories = get_exercise_categories()
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
             rows_html = []
+            grouped_exercises = {}
             for e in exercises:
                 video_url = (e[7] or '').strip()
                 if video_url:
@@ -3857,17 +6311,65 @@ class Handler(BaseHTTPRequestHandler):
                     video_cell = f'<a class="action-link" href="{safe_url}" target="_blank" rel="noopener noreferrer">Ver video</a>'
                 else:
                     video_cell = '-'
+                machine_url = (e[8] or '').strip()
+                if machine_url:
+                    safe_machine_url = html.escape(machine_url, quote=True)
+                    machine_cell = f'<a class="action-link" href="{safe_machine_url}" target="_blank" rel="noopener noreferrer">Ver máquina</a>'
+                else:
+                    machine_cell = '-'
+
+                group_names = []
+                primary_group = (e[6] or '').strip()
+                secondary_group = (e[9] or '').strip()
+                if primary_group:
+                    group_names.append(primary_group)
+                if secondary_group and secondary_group not in group_names:
+                    group_names.append(secondary_group)
+                if not group_names:
+                    group_names = ['Sin grupo muscular']
+                for group_name in group_names:
+                    grouped_exercises.setdefault(group_name, []).append(e)
+
+                group_cell = ' + '.join([html.escape(g) for g in group_names])
+
                 rows_html.append(
                     '<tr>' +
                     f'<td>{html.escape(e[1])}</td>' +
-                    f'<td>{html.escape(e[6] or "")}</td>' +
+                    f'<td>{group_cell}</td>' +
                     f'<td>{video_cell}</td>' +
+                    f'<td>{machine_cell}</td>' +
+                    '<td>' +
+                    f'<a class="action-link" href="/edit_exercise?id={e[0]}">Editar</a>' +
+                    f'<form method="post" action="/delete_exercise" style="display:inline" onsubmit="return confirm(\'¿Seguro que quieres borrar este ejercicio?\')">'
+                    f'<input type="hidden" name="id" value="{e[0]}" />'
+                    '<button class="action-link" type="submit" style="background:none;border:none;padding:0;cursor:pointer">Borrar</button>' +
+                    '</form>' +
+                    '</td>' +
                     '</tr>'
                 )
 
+            grouped_blocks = []
+            ordered_group_names = sorted(grouped_exercises.keys(), key=lambda n: (n == 'Sin grupo muscular', n.casefold()))
+            for group_name in ordered_group_names:
+                group_items = grouped_exercises[group_name]
+                group_items_sorted = sorted(group_items, key=lambda ex: (str(ex[1] or '').casefold(), ex[0]))
+                item_links = ''.join([
+                    '<li>'
+                    f'<a class="group-ex-link" href="/edit_exercise?id={ex[0]}">{html.escape(ex[1] or "Ejercicio")}</a>'
+                    '</li>'
+                    for ex in group_items_sorted
+                ])
+                grouped_blocks.append(
+                    '<details class="group-chip">'
+                    f'<summary>{html.escape(group_name)} <span class="group-count">{len(group_items)}</span></summary>'
+                    f'<ul class="group-ex-list">{item_links}</ul>'
+                    '</details>'
+                )
+
             category_options = ''.join([f'<option value="{c[0]}">{html.escape(c[1])}</option>' for c in categories])
+            secondary_category_options = '<option value="">-- Segundo grupo muscular (opcional) --</option>' + category_options
             category_list = ''.join([
-                f'<li>{html.escape(c[1])} <form method="post" action="/delete_exercise_category" style="display:inline;margin-left:8px"><input type="hidden" name="id" value="{c[0]}" /><button type="submit">Borrar</button></form></li>'
+                f'<li><span class="muscle-name">{html.escape(c[1])}</span><form method="post" action="/delete_exercise_category" class="muscle-delete-form" style="display:inline-flex;width:auto;grid-template-columns:none;"><input type="hidden" name="id" value="{c[0]}" /><button class="muscle-delete-btn" type="submit" style="width:86px;min-width:86px;max-width:86px;padding:6px 10px;">Borrar</button></form></li>'
                 for c in categories
             ])
 
@@ -3890,9 +6392,29 @@ class Handler(BaseHTTPRequestHandler):
         button{{padding:13px 18px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;transition:transform .18s ease,background .18s ease,box-shadow .18s ease;box-shadow:0 8px 18px rgba(16,19,24,.12);}}
         button:hover{{background:#232933;transform:translateY(-1px);}}
         .message{{padding:14px 16px;border-radius:14px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:20px;}}
-    .grid-list{{display:grid;grid-template-columns:1fr;gap:12px;list-style:none;padding:0;margin:0;}}
-        .grid-list li{{padding:12px 16px;border:1px solid #e8ebef;border-radius:12px;background:#fff;display:flex;justify-content:space-between;align-items:center;color:#101318;}}
-    .grid-list button{{margin:0;padding:8px 12px;font-size:.95rem;}}
+    .grid-list{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;list-style:none;padding:0;margin:0;}}
+        .grid-list li{{padding:12px;border:1px solid #e8ebef;border-radius:12px;background:#fff;display:flex;flex-direction:column;justify-content:space-between;align-items:flex-start;min-height:140px;color:#101318;box-shadow:0 8px 18px rgba(16,19,24,.04);}}
+        .muscle-name{{font-size:1rem;font-weight:800;line-height:1.2;word-break:break-word;}}
+        .muscle-delete-form{{display:flex !important;width:auto !important;margin-top:10px;align-self:flex-start;}}
+        .muscle-delete-btn{{
+            display:inline-flex !important;
+            align-items:center;
+            justify-content:center;
+            width:86px !important;
+            min-width:86px !important;
+            max-width:86px !important;
+            padding:6px 10px !important;
+            border-radius:8px !important;
+            border:1px solid #efcfd2 !important;
+            background:#fff4f4 !important;
+            color:#8b1b20 !important;
+            font-size:.8rem !important;
+            font-weight:700;
+            line-height:1;
+            cursor:pointer;
+            box-shadow:none !important;
+        }}
+        .muscle-delete-btn:hover{{background:#fee2e2 !important;transform:none !important;}}
         .action-button{{display:inline-flex;align-items:center;justify-content:center;padding:8px 12px;border-radius:12px;border:1px solid #d8dde6;background:#fff;color:#101318;text-decoration:none;font-weight:600;font-size:.95rem;cursor:pointer;transition:transform .18s ease,background .18s ease,border-color .18s ease;}}
         .action-button:hover{{background:#f5f7fa;transform:translateY(-1px);border-color:#d8dde6;}}
         .action-edit{{border:none;background:#101318;color:#fff;}}
@@ -3906,6 +6428,16 @@ class Handler(BaseHTTPRequestHandler):
         tr:hover{{background:#f8fafc;}}
     .actions form{{display:inline;}}
         .action-link{{color:#101318;text-decoration:none;font-weight:700;margin-right:10px;}}
+                .group-grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;}}
+                .group-chip{{border:1px solid #d7deea;border-radius:12px;background:#fff;overflow:hidden;}}
+                .group-chip summary{{list-style:none;cursor:pointer;padding:8px 10px;background:#f8fafc;font-weight:800;font-size:.82rem;line-height:1.2;display:flex;justify-content:space-between;align-items:center;}}
+                .group-chip summary::-webkit-details-marker{{display:none;}}
+                .group-chip[open] summary{{background:#eef3fb;border-bottom:1px solid #dbe5f4;}}
+                .group-count{{display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 4px;border-radius:999px;background:#101318;color:#fff;font-size:.62rem;font-weight:800;}}
+                .group-ex-list{{margin:0;padding:8px 10px 10px 22px;background:#fff;}}
+                .group-ex-list li{{margin:4px 0;line-height:1.15;}}
+                .group-ex-link{{color:#101318;text-decoration:none;font-weight:600;font-size:.8rem;}}
+                .group-ex-link:hover{{text-decoration:underline;}}
   </style>
 </head>
 <body>
@@ -3925,28 +6457,37 @@ class Handler(BaseHTTPRequestHandler):
       <form method="post" action="/add_exercise">
         <input name="name" placeholder="Nombre" required />
                 <select name="category_id" required>
-                    <option value="">-- Selecciona categoría --</option>
+                                        <option value="">-- Selecciona grupo muscular --</option>
           {category_options}
         </select>
+                                <select name="category_id_2">
+                    {secondary_category_options}
+                </select>
                 <input name="video_url" placeholder="Link de video (YouTube o propio)" />
+                                <input name="machine_url" placeholder="Link de la máquina" />
         <button type="submit">Añadir ejercicio</button>
       </form>
     </section>
 
     <section class="section-card">
-    <h2>🏷️ Categorías de ejercicios</h2>
+        <h2>🏷️ Grupos musculares</h2>
       <form method="post" action="/add_exercise_category" style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center;margin-bottom:16px;">
-        <input name="name" placeholder="Nueva categoría de ejercicio" required />
-        <button type="submit">Crear categoría</button>
+                <input name="name" placeholder="Nuevo grupo muscular" required />
+                <button type="submit">Crear grupo muscular</button>
       </form>
       <ul class="grid-list">
         {category_list}
       </ul>
     </section>
 
-    <section class="section-card">
+        <section class="section-card">
+            <h2>🧩 Ejercicios por grupo muscular</h2>
+            {'<div class="group-grid">' + ''.join(grouped_blocks) + '</div>' if grouped_blocks else '<p>No hay ejercicios registrados todavía.</p>'}
+        </section>
+
+        <section class="section-card" style="clear:both;">
             <table>
-                                <thead><tr><th>Nombre</th><th>Categoría</th><th>Video</th></tr></thead>
+                                                                <thead><tr><th>Nombre</th><th>Grupo muscular</th><th>Video</th><th>Máquina</th><th>Acciones</th></tr></thead>
         <tbody>
           {''.join(rows_html)}
         </tbody>
@@ -3969,8 +6510,10 @@ class Handler(BaseHTTPRequestHandler):
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
             routines = get_routines()
             exercises = get_exercises()
+            clients = sorted(get_clients(), key=lambda c: (str(c[1] or '').casefold(), c[0]))
             routine_id = q.get('routine_id', [''])[0]
             selected_routine = None
+            selected_is_template = True
             items = []
             if routine_id:
                 try:
@@ -3978,63 +6521,592 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     routine_id_i = None
                 else:
-                    selected_routine = next((r for r in routines if r[0] == routine_id_i), None)
+                    selected_routine = get_routine_by_id(routine_id_i)
                     if selected_routine:
+                        selected_is_template = int(selected_routine[4] or 0) == 1
                         items = get_routine_items(routine_id_i)
-
-            day_names = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
-            exercise_options = ''.join([f'<option value="{e[0]}">{html.escape(e[1])}</option>' for e in exercises])
 
             routine_editor_html = ''
             if selected_routine:
                 routine_name = selected_routine[1]
                 routine_desc = selected_routine[2] or ''
-                grouped = {d: [] for d in day_names}
+                client_assign_options = ''.join([
+                    f'<option value="{c[0]}">{html.escape(c[1] or "Cliente")}</option>'
+                    for c in clients
+                ])
+                routine_day_rows = get_routine_days(routine_id_i)
+                if not routine_day_rows:
+                    routine_day_rows = get_default_routine_days()
+
+                grouped_by_day_index = {int(day_index): [] for day_index, _day_name, _day_type in routine_day_rows}
+                fallback_day_index_by_name = {(day_name or '').strip(): int(day_index) for day_index, day_name, _day_type in routine_day_rows}
                 for item in items:
-                    grouped.setdefault(item[2], []).append(item)
+                    try:
+                        item_day_index = int(item[9]) if int(item[9]) >= 0 else None
+                    except Exception:
+                        item_day_index = None
+                    if item_day_index is None:
+                        item_day_index = fallback_day_index_by_name.get((item[2] or '').strip(), 0)
+                    grouped_by_day_index.setdefault(item_day_index, []).append(item)
+
+                for ex in sorted(exercises, key=lambda row: normalize_text(row[1] or '')):
+                    category_main = (ex[6] or '').strip()
+                    category_secondary = (ex[9] or '').strip()
+                    category_parts = [c for c in [category_main, category_secondary] if c]
+                    category_text = ' + '.join(category_parts) if category_parts else 'Sin grupo muscular'
+                exercise_search_options = [
+                    {
+                        'value': int(ex[0]),
+                        'label': f'{(ex[1] or "Ejercicio")} ({(" + ".join([c for c in [(ex[6] or "").strip(), (ex[9] or "").strip()] if c]) or "Sin grupo muscular")})'
+                    }
+                    for ex in sorted(exercises, key=lambda row: normalize_text(row[1] or ''))
+                ]
+                exercise_search_options_json = json.dumps(exercise_search_options, ensure_ascii=False).replace('</', '<\\/')
 
                 day_cards = []
-                for day_name in day_names:
+                for day_index, day_name, day_type in routine_day_rows:
+                    day_index_i = int(day_index)
+                    normalized_day_type = 'rest' if str(day_type or '').strip().lower() == 'rest' else 'train'
+                    status_label = 'Entreno' if normalized_day_type == 'train' else 'Descanso'
+
                     cards_html = []
-                    for item in grouped.get(day_name, []):
-                        item_id, _routine_id, _day_name, _exercise_id, exercise_name, sets_text, reps_text, notes, _sort_order = item
+                    sorted_day_items = sorted(grouped_by_day_index.get(day_index_i, []), key=lambda row: (row[8], row[0]))
+                    for exercise_index, item in enumerate(sorted_day_items, start=1):
+                        item_id, _routine_id, _day_name, _exercise_id, exercise_name, sets_text, reps_text, notes, _sort_order, _item_day_index = item
+                        safe_sets = html.escape(sets_text or '')
+                        safe_reps = html.escape(reps_text or '')
                         cards_html.append(
-                            '<div class="diet-card" style="min-height:auto;">'
-                            f'<div class="diet-card-head"><span class="diet-card-id">#{item_id}</span><span class="diet-card-date">{html.escape(day_name)}</span></div>'
-                            f'<h3 class="diet-card-name">{html.escape(exercise_name or "Ejercicio")}</h3>'
-                            f'<p class="diet-card-desc">Series: {html.escape(sets_text or "-")} · Reps: {html.escape(reps_text or "-")}</p>'
-                            f'<p class="diet-card-desc">{html.escape(notes or "Sin notas")}</p>'
-                            f'<form method="post" action="/delete_routine_item" style="margin-top:8px;"><input type="hidden" name="id" value="{item_id}" /><input type="hidden" name="routine_id" value="{routine_id}" /><button type="submit">Eliminar</button></form>'
+                            f'<div class="routine-item-row" draggable="true" data-item-id="{item_id}">'
+                            '<button type="button" class="routine-drag-handle" title="Arrastra para mover" aria-label="Arrastra para mover">⋮⋮</button>'
+                            '<div class="routine-item-main">'
+                            f'<p class="routine-item-name"><span class="routine-item-order">{exercise_index}.</span> {html.escape(exercise_name or "Ejercicio")}</p>'
+                            '<div class="routine-item-editline">'
+                            '<label class="routine-item-label">Series '
+                            f'<input class="routine-item-edit" data-field="sets_text" value="{safe_sets}" placeholder="-" />'
+                            '</label>'
+                            '<label class="routine-item-label">Reps '
+                            f'<input class="routine-item-edit" data-field="reps_text" value="{safe_reps}" placeholder="-" />'
+                            '</label>'
+                            '</div>'
+                            '</div>'
+                            f'<form method="post" action="/delete_routine_item" class="routine-item-delete-form"><input type="hidden" name="id" value="{item_id}" /><input type="hidden" name="routine_id" value="{routine_id}" /><button type="submit" class="routine-item-delete">Eliminar</button></form>'
                             '</div>'
                         )
-                    cards_html = ''.join(cards_html) or '<p style="color:#6d7480;">Sin ejercicios para este día.</p>'
-                    day_cards.append(f'<section class="section-card"><h2>🏷️ {html.escape(day_name)}</h2><div class="diet-cards">{cards_html}</div></section>')
+
+                    cards_html_rendered = ''.join(cards_html) or '<p style="color:#6d7480;">Sin ejercicios para este día.</p>'
+                    day_cards.append(
+                        f'<section id="routine-day-{day_index_i}" class="section-card day-card">'
+                        '<div class="day-header-row">'
+                        f'<h2 class="day-title" style="margin:0;">🏷️ Día {day_index_i + 1} · <span class="day-name-inline" contenteditable="false" data-routine-id="{routine_id}" data-day-index="{day_index_i}">{html.escape(day_name or f"Dia {day_index_i + 1}")}</span></h2>'
+                        '<div class="day-header-actions">'
+                        '<div class="day-type-segment">'
+                        f'<form method="post" action="/update_routine_day" class="segment-form">'
+                        f'<input type="hidden" name="routine_id" value="{routine_id}" />'
+                        f'<input type="hidden" name="day_index" value="{day_index_i}" />'
+                        f'<input type="hidden" name="day_name" value="{html.escape(day_name or "")}" />'
+                        '<input type="hidden" name="day_type" value="train" />'
+                        f'<button type="submit" class="segment-btn train {"active" if normalized_day_type == "train" else ""}">Entreno</button>'
+                        '</form>'
+                        f'<form method="post" action="/update_routine_day" class="segment-form">'
+                        f'<input type="hidden" name="routine_id" value="{routine_id}" />'
+                        f'<input type="hidden" name="day_index" value="{day_index_i}" />'
+                        f'<input type="hidden" name="day_name" value="{html.escape(day_name or "")}" />'
+                        '<input type="hidden" name="day_type" value="rest" />'
+                        f'<button type="submit" class="segment-btn rest {"active" if normalized_day_type == "rest" else ""}">Descanso</button>'
+                        '</form>'
+                        '</div>'
+                        f'<button type="button" class="action-button action-edit open-add-exercise" data-day-index="{day_index_i}" data-day-name="{html.escape(day_name or "")}">+ Añadir ejercicio</button>'
+                        '</div>'
+                        f'<div class="routine-items" data-routine-id="{routine_id}" data-day-index="{day_index_i}">{cards_html_rendered}</div>'
+                        '</section>'
+                    )
+
+                assign_form_html = ''
+                if selected_is_template:
+                    assign_form_html = f'''
+            <form method="post" action="/assign_client_training" class="routine-assign-form">
+                <input type="hidden" name="routine_id" value="{routine_id}" />
+                <input type="hidden" name="return_to" value="/routines?routine_id={routine_id}" />
+                <select name="client_id" required>
+                    <option value="">Asignar esta rutina a cliente...</option>
+                    {client_assign_options}
+                </select>
+                <input name="start_date" type="date" placeholder="Inicio" />
+                <input name="end_date" type="date" placeholder="Fin" />
+                <input name="notes" placeholder="Notas (opcional)" />
+                <button type="submit">Asignar a cliente</button>
+            </form>
+'''
 
                 routine_editor_html = f'''
     <section class="section-card">
       <h2>Editar rutina: {html.escape(routine_name)}</h2>
       <p style="color:#6d7480;margin-top:-4px;">{html.escape(routine_desc or 'Sin descripción')}</p>
+            <form method="post" action="/update_routine_name" class="routine-name-form">
+                <input type="hidden" name="routine_id" value="{routine_id}" />
+                <input type="hidden" name="return_to" value="/routines?routine_id={routine_id}" />
+                <label class="routine-name-label">Nombre visible para el cliente
+                    <input name="name" value="{html.escape(routine_name)}" placeholder="Nombre de la rutina" required />
+                </label>
+                <button type="submit">Guardar nombre</button>
+            </form>
             <div style="margin:8px 0 14px;">
                 <a class="action-button action-edit" href="/export_routine_pdf/rutina_{routine_id}.pdf" target="_blank">Exportar PDF</a>
             </div>
-      <form method="post" action="/add_routine_item">
-        <input type="hidden" name="routine_id" value="{routine_id}" />
-        <select name="day_name" required>
-          <option value="">Selecciona día</option>
-          {''.join([f'<option value="{day}">{day}</option>' for day in day_names])}
-        </select>
-        <select name="exercise_id" required>
-          <option value="">Selecciona ejercicio</option>
-          {exercise_options}
-        </select>
-        <input name="sets_text" placeholder="Series" />
-        <input name="reps_text" placeholder="Reps" />
-        <input class="full" name="notes" placeholder="Notas" />
-        <button class="full" type="submit">Añadir ejercicio a la rutina</button>
-      </form>
+            {assign_form_html}
     </section>
     {''.join(day_cards)}
+    <div id="exercise-modal" class="exercise-modal" hidden>
+      <div class="exercise-modal-backdrop"></div>
+      <div class="exercise-modal-card">
+        <h3 id="exercise-modal-title">Añadir ejercicio</h3>
+        <form method="post" action="/add_routine_item" class="exercise-modal-form">
+          <input type="hidden" name="routine_id" value="{routine_id}" />
+          <input type="hidden" name="day_index" id="modal_day_index" />
+          <input type="hidden" name="day_name" id="modal_day_name" />
+                    <input type="hidden" name="exercise_id" id="exercise_id_hidden" />
+                    <div class="exercise-search-wrap">
+                        <input id="exercise_search" type="text" placeholder="Buscar ejercicio por nombre o grupo" autocomplete="off" />
+                        <div id="exercise_search_results" class="exercise-search-results" hidden></div>
+                    </div>
+          <input name="sets_text" placeholder="Número de series" required />
+          <input name="reps_text" placeholder="Número de repeticiones" required />
+          <input name="notes" placeholder="Notas (opcional)" />
+          <div class="modal-actions">
+            <button type="button" id="exercise-modal-cancel">Cancelar</button>
+            <button type="submit">Guardar</button>
+          </div>
+        </form>
+      </div>
+    </div>
+        <script>
+            (function() {{
+                const modal = document.getElementById('exercise-modal');
+                const modalTitle = document.getElementById('exercise-modal-title');
+                const modalDayIndex = document.getElementById('modal_day_index');
+                const modalDayName = document.getElementById('modal_day_name');
+                const modalCancel = document.getElementById('exercise-modal-cancel');
+                const modalBackdrop = modal ? modal.querySelector('.exercise-modal-backdrop') : null;
+                const exerciseSearch = document.getElementById('exercise_search');
+                const exerciseSearchResults = document.getElementById('exercise_search_results');
+                const exerciseHiddenInput = document.getElementById('exercise_id_hidden');
+                const exerciseModalForm = modal ? modal.querySelector('.exercise-modal-form') : null;
+                const baseExerciseOptions = {exercise_search_options_json};
+                let lastFilteredOptions = [];
+
+                function hideExerciseResults() {{
+                    if (!exerciseSearchResults) return;
+                    exerciseSearchResults.innerHTML = '';
+                    exerciseSearchResults.setAttribute('hidden', 'hidden');
+                }}
+
+                function renderExerciseResults(filterText) {{
+                    if (!exerciseSearchResults) return;
+                    const needle = String(filterText || '').toLowerCase().trim();
+                    if (!needle) {{
+                        lastFilteredOptions = [];
+                        if (exerciseHiddenInput) exerciseHiddenInput.value = '';
+                        hideExerciseResults();
+                        return;
+                    }}
+
+                    const filtered = baseExerciseOptions
+                        .filter((item) => item.label.toLowerCase().includes(needle))
+                        .slice(0, 20);
+                    lastFilteredOptions = filtered;
+
+                    exerciseSearchResults.innerHTML = '';
+                    if (!filtered.length) {{
+                        if (exerciseHiddenInput) exerciseHiddenInput.value = '';
+                        hideExerciseResults();
+                        return;
+                    }}
+
+                    filtered.forEach((item, idx) => {{
+                        const row = document.createElement('button');
+                        row.type = 'button';
+                        row.className = 'exercise-search-item' + (idx === 0 ? ' active' : '');
+                        row.textContent = item.label;
+                        row.addEventListener('click', () => {{
+                            if (exerciseSearch) exerciseSearch.value = item.label;
+                            if (exerciseHiddenInput) exerciseHiddenInput.value = item.value;
+                            hideExerciseResults();
+                        }});
+                        exerciseSearchResults.appendChild(row);
+                    }});
+                    if (exerciseHiddenInput) exerciseHiddenInput.value = '';
+                    exerciseSearchResults.removeAttribute('hidden');
+                }}
+
+                function closeModal() {{
+                    if (!modal) return;
+                    hideExerciseResults();
+                    modal.setAttribute('hidden', 'hidden');
+                }}
+
+                function openModal(dayIndex, dayName) {{
+                    if (!modal) return;
+                    modalDayIndex.value = dayIndex || '0';
+                    modalDayName.value = dayName || '';
+                    modalTitle.textContent = 'Añadir ejercicio - ' + (dayName || 'Día');
+                    if (exerciseSearch) exerciseSearch.value = '';
+                    if (exerciseHiddenInput) exerciseHiddenInput.value = '';
+                    hideExerciseResults();
+                    modal.removeAttribute('hidden');
+                    if (exerciseSearch) exerciseSearch.focus();
+                }}
+
+                function bindAddExerciseButton(btn) {{
+                    if (!btn) return;
+                    btn.addEventListener('click', () => openModal(btn.dataset.dayIndex, btn.dataset.dayName));
+                }}
+
+                function applyDayTypeUI(dayCard, dayType, dayName, dayIndex) {{
+                    if (!dayCard) return;
+                    const normalizedType = dayType === 'rest' ? 'rest' : 'train';
+
+                    dayCard.querySelectorAll('.segment-btn').forEach((button) => {{
+                        const isTrainBtn = button.classList.contains('train');
+                        const shouldBeActive = (normalizedType === 'train' && isTrainBtn) || (normalizedType === 'rest' && !isTrainBtn);
+                        button.classList.toggle('active', shouldBeActive);
+                    }});
+
+                    const dayNameInput = dayCard.querySelector('.day-name-inline');
+                    if (dayNameInput) {{
+                        dayNameInput.dataset.dayType = normalizedType;
+                        if (dayName) {{
+                            dayNameInput.textContent = dayName;
+                            dayNameInput.dataset.lastValue = dayName;
+                        }}
+                    }}
+
+                    dayCard.querySelectorAll('.segment-form input[name="day_name"]').forEach((input) => {{
+                        input.value = dayName || input.value;
+                    }});
+
+                    const existingAddBtn = dayCard.querySelector('.open-add-exercise');
+                    if (existingAddBtn) {{
+                        existingAddBtn.dataset.dayName = dayName || existingAddBtn.dataset.dayName;
+                        existingAddBtn.dataset.dayIndex = String(dayIndex || existingAddBtn.dataset.dayIndex || '0');
+                    }}
+                }}
+
+                function getActiveDayType(dayCard) {{
+                    if (!dayCard) return 'train';
+                    const activeBtn = dayCard.querySelector('.segment-btn.active');
+                    if (!activeBtn) return 'train';
+                    return activeBtn.classList.contains('rest') ? 'rest' : 'train';
+                }}
+
+                async function saveInlineDayName(inputEl) {{
+                    if (!inputEl) return;
+                    const dayCard = inputEl.closest('.day-card');
+                    const routineId = inputEl.dataset.routineId || '';
+                    const dayIndex = inputEl.dataset.dayIndex || '0';
+                    const rawName = (inputEl.textContent || '').trim();
+                    const parsedDayIndex = parseInt(dayIndex, 10);
+                    const fallbackName = Number.isFinite(parsedDayIndex) ? ('Dia ' + String(parsedDayIndex + 1)) : 'Dia';
+                    const newName = rawName || fallbackName;
+                    const lastValue = inputEl.dataset.lastValue || '';
+                    if (newName === lastValue) return;
+
+                    const dayType = getActiveDayType(dayCard);
+                    const payload = new URLSearchParams();
+                    payload.set('routine_id', routineId);
+                    payload.set('day_index', dayIndex);
+                    payload.set('day_name', newName);
+                    payload.set('day_type', dayType);
+
+                    inputEl.contentEditable = 'false';
+                    try {{
+                        const response = await fetch('/update_routine_day', {{
+                            method: 'POST',
+                            headers: {{
+                                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                'X-Requested-With': 'fetch'
+                            }},
+                            body: payload.toString()
+                        }});
+                        if (!response.ok) throw new Error('request_failed');
+                        inputEl.textContent = newName;
+                        inputEl.dataset.lastValue = newName;
+                        applyDayTypeUI(dayCard, dayType, newName, dayIndex);
+                    }} catch (_err) {{
+                        inputEl.textContent = lastValue || inputEl.textContent;
+                    }}
+                }}
+
+                function renumberRoutineRows(dayCard) {{
+                    if (!dayCard) return;
+                    dayCard.querySelectorAll('.routine-item-row').forEach((row, idx) => {{
+                        const orderEl = row.querySelector('.routine-item-order');
+                        if (orderEl) orderEl.textContent = String(idx + 1) + '.';
+                    }});
+                }}
+
+                async function persistRoutineOrder(dayCard) {{
+                    if (!dayCard) return;
+                    const list = dayCard.querySelector('.routine-items');
+                    if (!list) return;
+                    const routineId = list.dataset.routineId || '';
+                    const dayIndex = list.dataset.dayIndex || '0';
+                    const itemIds = Array.from(list.querySelectorAll('.routine-item-row'))
+                        .map((row) => row.dataset.itemId)
+                        .filter(Boolean)
+                        .join(',');
+                    const payload = new URLSearchParams();
+                    payload.set('routine_id', routineId);
+                    payload.set('day_index', dayIndex);
+                    payload.set('item_ids', itemIds);
+                    const response = await fetch('/reorder_routine_items', {{
+                        method: 'POST',
+                        headers: {{
+                            'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                            'X-Requested-With': 'fetch'
+                        }},
+                        body: payload.toString()
+                    }});
+                    if (!response.ok) throw new Error('reorder_failed');
+                }}
+
+                async function saveRoutineItemRow(row) {{
+                    if (!row) return;
+                    const itemId = row.dataset.itemId || '';
+                    const setsInput = row.querySelector('.routine-item-edit[data-field="sets_text"]');
+                    const repsInput = row.querySelector('.routine-item-edit[data-field="reps_text"]');
+                    if (!itemId || !setsInput || !repsInput) return;
+                    const payload = new URLSearchParams();
+                    payload.set('id', itemId);
+                    payload.set('sets_text', (setsInput.value || '').trim());
+                    payload.set('reps_text', (repsInput.value || '').trim());
+
+                    setsInput.disabled = true;
+                    repsInput.disabled = true;
+                    try {{
+                        const response = await fetch('/update_routine_item', {{
+                            method: 'POST',
+                            headers: {{
+                                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                'X-Requested-With': 'fetch'
+                            }},
+                            body: payload.toString()
+                        }});
+                        if (!response.ok) throw new Error('save_failed');
+                        const meta = row.querySelector('.routine-item-meta');
+                        if (meta) {{
+                            const s = (setsInput.value || '').trim() || '-';
+                            const r = (repsInput.value || '').trim() || '-';
+                            meta.textContent = 'Series: ' + s + ' · Reps: ' + r;
+                        }}
+                    }} catch (_err) {{
+                        // keep current text; user can retry by blurring again
+                    }} finally {{
+                        setsInput.disabled = false;
+                        repsInput.disabled = false;
+                    }}
+                }}
+
+                function bindRoutineItemInteractions() {{
+                    let draggingRow = null;
+
+                    document.querySelectorAll('.routine-item-row').forEach((row) => {{
+                        row.addEventListener('dragstart', (ev) => {{
+                            draggingRow = row;
+                            row.classList.add('dragging');
+                            if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+                        }});
+
+                        row.addEventListener('dragend', () => {{
+                            row.classList.remove('dragging');
+                            draggingRow = null;
+                        }});
+
+                        row.addEventListener('dragover', (ev) => {{
+                            if (!draggingRow || draggingRow === row) return;
+                            if (draggingRow.parentElement !== row.parentElement) return;
+                            ev.preventDefault();
+                            const rect = row.getBoundingClientRect();
+                            const before = ev.clientY < rect.top + rect.height / 2;
+                            const parent = row.parentElement;
+                            if (before) parent.insertBefore(draggingRow, row);
+                            else parent.insertBefore(draggingRow, row.nextSibling);
+                        }});
+
+                        row.addEventListener('drop', async (ev) => {{
+                            if (!draggingRow) return;
+                            ev.preventDefault();
+                            const dayCard = row.closest('.day-card');
+                            renumberRoutineRows(dayCard);
+                            try {{
+                                await persistRoutineOrder(dayCard);
+                            }} catch (_err) {{
+                                window.location.reload();
+                            }}
+                        }});
+
+                        row.querySelectorAll('.routine-item-edit').forEach((inputEl) => {{
+                            inputEl.addEventListener('keydown', (ev) => {{
+                                if (ev.key === 'Enter') {{
+                                    ev.preventDefault();
+                                    inputEl.blur();
+                                }}
+                            }});
+                            inputEl.addEventListener('blur', () => saveRoutineItemRow(row));
+                        }});
+                    }});
+                }}
+
+                async function handleSegmentSubmit(event) {{
+                    event.preventDefault();
+                    const form = event.currentTarget;
+                    if (!form) return;
+                    const dayCard = form.closest('.day-card');
+                    const dayIndexInput = form.querySelector('input[name="day_index"]');
+                    const dayTypeInput = form.querySelector('input[name="day_type"]');
+                    const formDayNameInput = form.querySelector('input[name="day_name"]');
+                    const dayNameEditor = dayCard ? dayCard.querySelector('.day-name-inline') : null;
+
+                    if (formDayNameInput && dayNameEditor && dayNameEditor.textContent.trim()) {{
+                        formDayNameInput.value = dayNameEditor.textContent.trim();
+                    }}
+
+                    const payload = new URLSearchParams(new FormData(form));
+                    const buttons = dayCard ? Array.from(dayCard.querySelectorAll('.segment-btn')) : [];
+                    buttons.forEach((btn) => {{ btn.disabled = true; }});
+
+                    try {{
+                        const response = await fetch(form.action, {{
+                            method: 'POST',
+                            headers: {{
+                                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                'X-Requested-With': 'fetch'
+                            }},
+                            body: payload.toString()
+                        }});
+
+                        if (!response.ok) throw new Error('request_failed');
+
+                        applyDayTypeUI(
+                            dayCard,
+                            (dayTypeInput ? dayTypeInput.value : 'train'),
+                            (formDayNameInput ? formDayNameInput.value : ''),
+                            (dayIndexInput ? dayIndexInput.value : '0')
+                        );
+                    }} catch (_err) {{
+                        form.submit();
+                    }} finally {{
+                        buttons.forEach((btn) => {{ btn.disabled = false; }});
+                    }}
+                }}
+
+                document.querySelectorAll('.open-add-exercise').forEach((btn) => bindAddExerciseButton(btn));
+                document.querySelectorAll('.segment-form').forEach((form) => {{
+                    form.addEventListener('submit', handleSegmentSubmit);
+                }});
+                bindRoutineItemInteractions();
+                if (exerciseSearch) {{
+                    exerciseSearch.addEventListener('input', () => {{
+                        const text = exerciseSearch.value;
+                        renderExerciseResults(text);
+
+                        // If user typed an exact suggestion label, bind it immediately.
+                        const exact = baseExerciseOptions.find((item) => item.label.toLowerCase() === text.toLowerCase().trim());
+                        if (exerciseHiddenInput && exact) exerciseHiddenInput.value = exact.value;
+                    }});
+                    exerciseSearch.addEventListener('keydown', (ev) => {{
+                        if (ev.key === 'Enter') {{
+                            ev.preventDefault();
+                            if (!exerciseSearch.value.trim()) return;
+                            const chosenId = exerciseHiddenInput ? String(exerciseHiddenInput.value || '').trim() : '';
+                            if (chosenId) {{
+                                const selected = baseExerciseOptions.find((item) => String(item.value) === chosenId);
+                                if (selected && exerciseSearch) exerciseSearch.value = selected.label;
+                                hideExerciseResults();
+                                return;
+                            }}
+                            if (lastFilteredOptions.length) {{
+                                exerciseSearch.value = lastFilteredOptions[0].label;
+                                if (exerciseHiddenInput) exerciseHiddenInput.value = lastFilteredOptions[0].value;
+                                hideExerciseResults();
+                            }}
+                        }}
+                    }});
+                }}
+                if (exerciseModalForm) {{
+                    exerciseModalForm.addEventListener('submit', (ev) => {{
+                        const chosenId = exerciseHiddenInput ? String(exerciseHiddenInput.value || '').trim() : '';
+                        if (!chosenId) {{
+                            ev.preventDefault();
+                            if (exerciseSearch) exerciseSearch.focus();
+                            alert('Selecciona un ejercicio del buscador antes de guardar.');
+                        }}
+                    }});
+                }}
+                document.addEventListener('click', (ev) => {{
+                    if (!modal || modal.hasAttribute('hidden')) return;
+                    if (!exerciseSearchResults || exerciseSearchResults.hasAttribute('hidden')) return;
+                    const target = ev.target;
+                    if (exerciseSearch && exerciseSearch.contains(target)) return;
+                    if (exerciseSearchResults.contains(target)) return;
+                    hideExerciseResults();
+                }});
+                document.querySelectorAll('.day-name-inline').forEach((inputEl) => {{
+                    inputEl.dataset.lastValue = (inputEl.textContent || '').trim();
+                    const dayCard = inputEl.closest('.day-card');
+                    inputEl.dataset.dayType = getActiveDayType(dayCard);
+                    inputEl.addEventListener('click', () => {{
+                        inputEl.contentEditable = 'true';
+                        inputEl.focus();
+                        const selection = window.getSelection();
+                        if (selection) {{
+                            const range = document.createRange();
+                            range.selectNodeContents(inputEl);
+                            range.collapse(false);
+                            selection.removeAllRanges();
+                            selection.addRange(range);
+                        }}
+                    }});
+                    inputEl.addEventListener('blur', () => saveInlineDayName(inputEl));
+                    inputEl.addEventListener('keydown', (ev) => {{
+                        if (ev.key === 'Enter') {{
+                            ev.preventDefault();
+                            inputEl.blur();
+                        }}
+                        if (ev.key === 'Escape') {{
+                            ev.preventDefault();
+                            inputEl.textContent = inputEl.dataset.lastValue || inputEl.textContent;
+                            inputEl.contentEditable = 'false';
+                            inputEl.blur();
+                        }}
+                    }});
+                }});
+                if (modalCancel) modalCancel.addEventListener('click', closeModal);
+                if (modalBackdrop) modalBackdrop.addEventListener('click', closeModal);
+            }})();
+        </script>
 '''
+
+            show_only_selected_editor = bool(selected_routine) and not selected_is_template
+            manager_sections_html = ''
+            if not show_only_selected_editor:
+                manager_sections_html = f'''
+    <section class="section-card">
+            <h2>➕ Nueva rutina</h2>
+            <form method="post" action="/add_routine">
+                <input name="name" placeholder="Nombre de la rutina" required />
+                <input name="description" placeholder="Descripción" />
+                <button type="submit">Crear rutina</button>
+            </form>
+    </section>
+    <section class="section-card">
+            <h2>Rutinas existentes</h2>
+            <div class="diet-cards">
+                                {''.join([f'<div class="diet-card"><div class="diet-card-head"><span class="diet-card-id">#{r[0]}</span><span class="diet-card-date">{html.escape(r[3].split(" ")[0] if r[3] else "")}</span></div><h3 class="diet-card-name">{html.escape(r[1])}</h3><p class="diet-card-desc">{html.escape(r[2] or "Sin descripción")}</p><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;"><a class="action-button action-edit" href="/routines?routine_id={r[0]}">Abrir creador</a><a class="action-button action-edit" href="/export_routine_pdf/rutina_{r[0]}.pdf" target="_blank">PDF</a><form method="post" action="/delete_routine" style="margin:0;"><input type="hidden" name="id" value="{r[0]}" /><button type="submit" class="action-button action-delete">Borrar</button></form></div></div>' for r in routines]) if routines else '<p style="color:#6d7480;">No hay rutinas creadas todavía.</p>'}
+            </div>
+    </section>
+'''
+
+            routine_summary_html = render_routine_series_summary_html(routine_id_i) if selected_routine else ''
 
             page = f'''
 <!doctype html>
@@ -4068,28 +7140,93 @@ class Handler(BaseHTTPRequestHandler):
     .action-edit:hover{{background:#232933;}}
     .action-delete{{border:none;background:#8b1b20;color:#fff;}}
     .action-delete:hover{{background:#6f1116;}}
+        .day-card{{display:flex;flex-direction:column;gap:12px;}}
+        .day-header-row{{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;}}
+        .day-header-actions{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}}
+        .day-title{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}}
+        .routine-items{{display:flex;flex-direction:column;gap:0;margin-top:4px;border-top:1px solid #eef1f5;width:100%;align-self:stretch;}}
+        .routine-item-row{{display:grid;grid-template-columns:18px minmax(0,1fr) auto;column-gap:6px;align-items:center;padding:4px 0;border-bottom:1px solid #eef1f5;width:100%;}}
+        .routine-item-row.dragging{{opacity:.45;}}
+        .routine-drag-handle{{grid-column:1;border:none;background:transparent;box-shadow:none;color:#9aa2ad;cursor:grab;padding:0 1px;font-size:.9rem;line-height:1;align-self:center;justify-self:start;}}
+        .routine-drag-handle:hover{{background:transparent;transform:none;color:#6d7480;}}
+        .routine-item-main{{grid-column:2;display:flex;flex-direction:row;gap:10px;min-width:0;align-items:center;justify-self:start;flex-wrap:wrap;}}
+        .routine-item-name{{margin:0;font-size:.9rem;font-weight:700;color:#101318;line-height:1.15;}}
+        .routine-item-order{{display:inline-block;min-width:1.2em;color:#6d7480;font-weight:800;}}
+        .routine-item-editline{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0;}}
+        .routine-item-label{{display:inline-flex;align-items:center;gap:4px;font-size:.74rem;color:#6d7480;font-weight:700;}}
+        .routine-item-edit{{width:54px;height:24px;min-height:24px;padding:0 5px;border:1px solid #d8dde6;border-radius:7px;background:#fff;color:#101318;font-size:.76rem;line-height:1;}}
+        .routine-item-meta{{display:none;}}
+        .routine-item-delete-form{{grid-column:3;margin:0;display:inline-flex;align-self:center;justify-self:end;}}
+        .routine-item-delete{{background:transparent;border:none;box-shadow:none;color:#8b1b20;font-size:.78rem;font-weight:700;padding:0;cursor:pointer;}}
+        .routine-item-delete:hover{{background:transparent;transform:none;color:#6f1116;}}
+        .routine-summary-card{{margin-top:12px;}}
+        .routine-summary-card h3{{margin:0 0 10px;font-size:1rem;color:#101318;}}
+        .routine-summary-table{{width:100%;border-collapse:collapse;}}
+        .routine-summary-table thead th{{text-align:left;padding:8px 10px;background:#f8fafc;border-bottom:1px solid #e8ebef;font-size:.8rem;color:#6d7480;text-transform:uppercase;letter-spacing:.03em;}}
+        .routine-summary-table tbody td{{padding:8px 10px;border-bottom:1px solid #eef1f5;font-size:.92rem;}}
+        .routine-summary-table tbody td:last-child{{text-align:right;font-weight:800;color:#101318;}}
+        .routine-name-form{{display:grid;grid-template-columns:minmax(280px,1fr) auto;gap:8px;align-items:end;margin:8px 0 2px;}}
+        .routine-name-label{{display:flex;flex-direction:column;gap:6px;font-size:.78rem;color:#6d7480;font-weight:700;}}
+        .routine-name-label input{{padding:10px 12px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;}}
+        .day-status-pill{{display:inline-flex;align-items:center;justify-content:center;padding:4px 10px;border-radius:999px;font-size:.78rem;font-weight:800;}}
+        .day-status-pill.train{{background:#e8f7ed;color:#166534;border:1px solid #b7e3c3;}}
+        .day-status-pill.rest{{background:#fef3e8;color:#9a3412;border:1px solid #f8d9bf;}}
+        .day-type-segment{{display:inline-flex;align-items:center;border:1px solid #d8dde6;border-radius:12px;overflow:hidden;background:#fff;}}
+        .segment-form{{display:block !important;margin:0 !important;}}
+        .segment-form input{{display:none;}}
+        .segment-btn{{border:none !important;box-shadow:none !important;border-radius:0 !important;padding:8px 12px !important;min-width:96px;font-weight:800;font-size:.82rem;opacity:.5;filter:saturate(.25) contrast(.92);transform:none !important;transition:opacity .16s ease,filter .16s ease,background .16s ease,color .16s ease;}}
+        .segment-btn.train{{background:#e7f8ec;color:#166534;}}
+        .segment-btn.rest{{background:#ffe9e9;color:#991b1b;}}
+        .segment-btn.active{{opacity:1;filter:none;}}
+        .segment-btn:not(.active){{background:#edf1f5;color:#6b7280;}}
+        .segment-btn:hover{{opacity:.85;}}
+        .day-name-inline{{display:inline-block;min-width:110px;padding:2px 8px;border-radius:8px;border:1px dashed transparent;cursor:text;color:#101318;background:transparent;}}
+        .day-name-inline:hover{{background:#f5f7fa;border-color:#d8dde6;}}
+        .day-name-inline[contenteditable="true"]{{background:#fff;border-color:#101318;outline:none;}}
+        .open-add-exercise{{display:inline-flex !important;align-items:center;justify-content:center;width:auto !important;min-width:0 !important;white-space:nowrap;box-shadow:none;padding:10px 12px;}}
+        .routine-assign-form{{display:grid;grid-template-columns:minmax(200px,1.2fr) repeat(2,minmax(130px,.8fr)) minmax(180px,1fr) auto;gap:8px;align-items:center;margin-top:6px;}}
+        .routine-assign-form input,.routine-assign-form select{{padding:10px 11px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;}}
+        .routine-assign-form button{{padding:10px 12px;border-radius:10px;box-shadow:none;white-space:nowrap;}}
+        .rest-label{{font-size:.86rem;font-weight:700;color:#9a3412;background:#fef3e8;border:1px solid #f8d9bf;padding:8px 10px;border-radius:10px;}}
+        .exercise-modal{{position:fixed;inset:0;z-index:999;display:flex;align-items:center;justify-content:center;padding:18px;overflow:auto;}}
+        .exercise-modal[hidden]{{display:none;}}
+        .exercise-modal-backdrop{{position:absolute;inset:0;background:rgba(15,23,42,.42);}}
+        .exercise-modal-card{{position:relative;background:#fff;border:1px solid #d8dde6;border-radius:16px;box-shadow:0 18px 40px rgba(16,19,24,.22);max-width:560px;width:min(560px,calc(100vw - 28px));max-height:calc(100vh - 28px);overflow:auto;padding:16px;box-sizing:border-box;}}
+        .exercise-modal-card h3{{margin:0 0 12px;font-size:1.05rem;color:#101318;}}
+        .exercise-modal-form{{display:flex;flex-direction:column;gap:10px;width:100%;min-width:0;}}
+        .exercise-modal-form > *{{min-width:0;}}
+        .exercise-modal-form input,.exercise-modal-form select{{padding:12px 14px;border:1px solid #d8dde6;border-radius:12px;background:#fff;color:#101318;width:100%;max-width:100%;box-sizing:border-box;}}
+        .exercise-search-wrap{{display:flex;flex-direction:column;gap:6px;width:100%;}}
+        .exercise-modal-form #exercise_search{{display:block;width:100% !important;max-width:100% !important;min-height:46px;box-sizing:border-box;}}
+        .exercise-search-results{{display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto;padding:0;border:none;background:transparent;box-shadow:none;}}
+        .exercise-search-results[hidden]{{display:none !important;}}
+        .exercise-search-item{{display:block;width:100%;text-align:left;padding:10px 12px;border:1px solid #d8dde6;background:#f3f5f8;color:#101318;border-radius:12px;cursor:pointer;font-size:.92rem;font-weight:600;box-shadow:none;transform:none !important;}}
+        .exercise-search-item.active{{background:#e8edf5;}}
+        .exercise-search-item:hover{{background:#e3e9f2;}}
+        .exercise-search-empty{{padding:9px 10px;color:#6d7480;font-size:.9rem;font-weight:600;}}
+        .modal-actions{{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;}}
+        .modal-actions button{{padding:10px 14px;width:auto !important;min-width:110px;box-shadow:none;}}
+        @media (max-width:640px){{
+            .exercise-modal{{padding:10px;align-items:flex-start;}}
+            .exercise-modal-card{{width:calc(100vw - 20px);max-height:calc(100vh - 20px);margin-top:8px;padding:14px;}}
+            .modal-actions button{{flex:1 1 auto;min-width:0;}}
+            .routine-assign-form{{grid-template-columns:1fr;}}
+            .routine-name-form{{grid-template-columns:1fr;}}
+            .routine-item-row{{grid-template-columns:16px minmax(0,1fr);row-gap:3px;column-gap:5px;align-items:flex-start;}}
+            .routine-item-main{{grid-column:2;gap:6px;align-items:flex-start;}}
+            .routine-item-delete-form{{grid-column:2;justify-self:start;}}
+            .routine-item-edit{{width:50px;height:23px;min-height:23px;}}
+        }}
   </style>
 </head>
 <body>
   <div class="page">
     {home_link()}
-    <h1>📋 Creación de rutinas</h1>
+        <h1>{'📋 Edición de rutina de cliente' if show_only_selected_editor else '📋 Creación de rutinas'}</h1>
     {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
-    <section class="section-card">
-      <h2>➕ Nueva rutina</h2>
-      <form method="post" action="/add_routine">
-        <input name="name" placeholder="Nombre de la rutina" required />
-        <input name="description" placeholder="Descripción" />
-        <button type="submit">Crear rutina</button>
-      </form>
-    </section>
-    <section class="section-card">
-      <h2>Rutinas existentes</h2>
-      <div class="diet-cards">
-                {''.join([f'<div class="diet-card"><div class="diet-card-head"><span class="diet-card-id">#{r[0]}</span><span class="diet-card-date">{html.escape(r[3].split(" ")[0] if r[3] else "")}</span></div><h3 class="diet-card-name">{html.escape(r[1])}</h3><p class="diet-card-desc">{html.escape(r[2] or "Sin descripción")}</p><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;"><a class="action-button action-edit" href="/routines?routine_id={r[0]}">Abrir creador</a><a class="action-button action-edit" href="/export_routine_pdf/rutina_{r[0]}.pdf" target="_blank">PDF</a><form method="post" action="/delete_routine" style="margin:0;"><input type="hidden" name="id" value="{r[0]}" /><button type="submit" class="action-button action-delete">Borrar</button></form></div></div>' for r in routines]) if routines else '<p style="color:#6d7480;">No hay rutinas creadas todavía.</p>'}
-      </div>
-    </section>
+        {manager_sections_html}
     {routine_editor_html}
+        {routine_summary_html}
   </div>
 </body>
 </html>
@@ -4097,6 +7234,9 @@ class Handler(BaseHTTPRequestHandler):
             body = page.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -4118,19 +7258,20 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             r = rows[0]
-            fid, name, brand, category, cal, prot, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, is_verified_row = r
+            fid, name, brand, category, cal, prot, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, is_verified_row, _has_gluten_row = r
             serving_amount, serving_unit = split_serving_size(serving)
             cats = get_categories()
             brands = get_brands()
             conn_meta = sqlite3.connect(DB_PATH)
             cur_meta = conn_meta.cursor()
-            cur_meta.execute("SELECT COALESCE(barcode,''), COALESCE(keywords,''), COALESCE(is_active,1), COALESCE(is_verified,0) FROM foods WHERE id = ?", (fid,))
-            meta = cur_meta.fetchone() or ('', '', 1, 0)
+            cur_meta.execute("SELECT COALESCE(barcode,''), COALESCE(keywords,''), COALESCE(is_active,1), COALESCE(is_verified,0), has_gluten FROM foods WHERE id = ?", (fid,))
+            meta = cur_meta.fetchone() or ('', '', 1, 0, None)
             conn_meta.close()
             barcode = meta[0]
             keywords = meta[1]
             is_active = 1 if int(meta[2] or 0) else 0
             is_verified = 1 if int(meta[3] or 0) else 0
+            has_gluten = parse_gluten_input(meta[4])
             category_options = ''.join([f'<option value="{c[0]}" {"selected" if c[1]==category else ""}>{html.escape(c[1])}</option>' for c in cats])
             brand_options = ''.join([f'<option value="{html.escape(b[1])}" {"selected" if b[1]==brand else ""}>{html.escape(b[1])}</option>' for b in brands])
             edit_page = f'''
@@ -4193,6 +7334,11 @@ class Handler(BaseHTTPRequestHandler):
                 <select name="category">
                     <option value="">Categoría (opcional)</option>
                     {category_options}
+                </select>
+                <select name="has_gluten">
+                    <option value="" {"selected" if has_gluten is None else ""}>Gluten (no indicado)</option>
+                    <option value="1" {"selected" if has_gluten == 1 else ""}>Con gluten</option>
+                    <option value="0" {"selected" if has_gluten == 0 else ""}>Sin gluten</option>
                 </select>
                 <input name="calories" placeholder="Kcal" value="{cal if cal is not None else ''}" />
                 <input name="protein" placeholder="Proteínas (g)" value="{prot if prot is not None else ''}" />
@@ -4288,10 +7434,14 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             e = rows[0]
-            eid, name, muscle_group, equipment, difficulty, notes, category, video_url = e
+            eid, name, muscle_group, equipment, difficulty, notes, category, video_url, machine_url, category_2 = e
             categories = get_exercise_categories()
             category_options = ''.join([
                 f'<option value="{c[0]}" {"selected" if c[1] == category else ""}>{html.escape(c[1])}</option>'
+                for c in categories
+            ])
+            secondary_category_options = ''.join([
+                f'<option value="{c[0]}" {"selected" if c[1] == category_2 else ""}>{html.escape(c[1])}</option>'
                 for c in categories
             ])
             edit_page = f'''
@@ -4326,14 +7476,16 @@ class Handler(BaseHTTPRequestHandler):
       <form method="post" action="/edit_exercise">
         <input type="hidden" name="id" value="{eid}" />
         <label>Nombre<input name="name" value="{html.escape(name)}" required /></label>
-        <label>Categoría de ejercicio<select name="category_id">
-          <option value="">-- Sin categoría --</option>
+                <label>Grupo muscular<select name="category_id">
+                    <option value="">-- Sin grupo muscular --</option>
           {category_options}
         </select></label>
+                <label>Segundo grupo muscular<select name="category_id_2">
+                    <option value="">-- Sin segundo grupo muscular --</option>
+              {secondary_category_options}
+            </select></label>
                 <label class="full">Link de video<input name="video_url" value="{html.escape(video_url or '')}" placeholder="https://..." /></label>
-        <label>Grupo muscular<input name="muscle_group" value="{html.escape(muscle_group or '')}" /></label>
-        <label>Equipo<input name="equipment" value="{html.escape(equipment or '')}" /></label>
-        <label>Dificultad<input name="difficulty" value="{html.escape(difficulty or '')}" /></label>
+                <label class="full">Link de máquina<input name="machine_url" value="{html.escape(machine_url or '')}" placeholder="https://..." /></label>
         <label class="full">Notas<textarea name="notes">{html.escape(notes or '')}</textarea></label>
         <div class="actions full">
           <button type="submit">Guardar cambios</button>
@@ -4362,6 +7514,102 @@ class Handler(BaseHTTPRequestHandler):
 
         payload = self.read_json() or {}
 
+        if path == '/api/client_fasting_weight':
+            date_text = str(payload.get('date') or '').strip()
+            if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_text):
+                return self.send_json({'error': 'invalid date'}, status=400)
+
+            try:
+                from datetime import datetime
+                datetime.strptime(date_text, '%Y-%m-%d')
+            except Exception:
+                return self.send_json({'error': 'invalid date'}, status=400)
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+
+            client_id_raw = payload.get('client_id')
+            if session_client_id is not None:
+                if client_id_raw is not None:
+                    try:
+                        requested_client_id = int(client_id_raw)
+                    except Exception:
+                        return self.send_json({'error': 'invalid client_id'}, status=400)
+                    if int(requested_client_id) != int(session_client_id):
+                        return self.send_json({'error': 'forbidden'}, status=403)
+                client_id_i = int(session_client_id)
+            else:
+                try:
+                    client_id_i = int(client_id_raw)
+                except Exception:
+                    return self.send_json({'error': 'client_id required'}, status=400)
+
+            weight_raw = payload.get('weight_kg')
+            weight_text = str(weight_raw or '').strip()
+            if not weight_text:
+                upsert_client_fasting_weight(client_id_i, date_text, None)
+                return self.send_json({'ok': True, 'cleared': True})
+
+            weight = parse_numeric_input(weight_text, default=0)
+            if weight <= 0 or weight > 400:
+                return self.send_json({'error': 'invalid weight'}, status=400)
+
+            upsert_client_fasting_weight(client_id_i, date_text, weight)
+            return self.send_json({'ok': True, 'weight_kg': round(weight, 2)})
+
+        if path == '/api/client_daily_steps':
+            date_text = str(payload.get('date') or '').strip()
+            if not re.match(r'^\d{4}-\d{2}-\d{2}$', date_text):
+                return self.send_json({'error': 'invalid date'}, status=400)
+
+            try:
+                from datetime import datetime
+                datetime.strptime(date_text, '%Y-%m-%d')
+            except Exception:
+                return self.send_json({'error': 'invalid date'}, status=400)
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+
+            client_id_raw = payload.get('client_id')
+            if session_client_id is not None:
+                if client_id_raw is not None:
+                    try:
+                        requested_client_id = int(client_id_raw)
+                    except Exception:
+                        return self.send_json({'error': 'invalid client_id'}, status=400)
+                    if int(requested_client_id) != int(session_client_id):
+                        return self.send_json({'error': 'forbidden'}, status=403)
+                client_id_i = int(session_client_id)
+            else:
+                try:
+                    client_id_i = int(client_id_raw)
+                except Exception:
+                    return self.send_json({'error': 'client_id required'}, status=400)
+
+            steps_raw = payload.get('steps')
+            steps_text = str(steps_raw or '').strip()
+            if not steps_text:
+                upsert_client_daily_steps(client_id_i, date_text, None)
+                return self.send_json({'ok': True, 'cleared': True})
+
+            digits = re.sub(r'[^0-9]', '', steps_text)
+            if not digits:
+                return self.send_json({'error': 'invalid steps'}, status=400)
+
+            try:
+                steps_i = int(digits)
+            except Exception:
+                return self.send_json({'error': 'invalid steps'}, status=400)
+
+            if steps_i < 0 or steps_i > 100000:
+                return self.send_json({'error': 'invalid steps'}, status=400)
+
+            upsert_client_daily_steps(client_id_i, date_text, steps_i)
+            return self.send_json({'ok': True, 'steps': steps_i})
+
         # Update food: /api/foods/<id>
         if path.startswith('/api/foods/'):
             try:
@@ -4371,14 +7619,17 @@ class Handler(BaseHTTPRequestHandler):
 
             allowed = [
                 'name', 'brand', 'category_id', 'calories', 'protein', 'carbs', 'fats', 'serving_size',
-                'photo_path', 'nutrition_mode', 'per100_unit', 'barcode', 'keywords', 'is_active', 'is_verified'
+                'photo_path', 'nutrition_mode', 'per100_unit', 'barcode', 'keywords', 'is_active', 'is_verified', 'has_gluten'
             ]
             sets = []
             vals = []
             for k in allowed:
                 if k in payload:
                     sets.append(f"{k} = ?")
-                    vals.append(payload.get(k))
+                    if k == 'has_gluten':
+                        vals.append(parse_gluten_input(payload.get(k)))
+                    else:
+                        vals.append(payload.get(k))
             if not sets:
                 return self.send_json({'error': 'no fields to update'}, status=400)
 
@@ -4392,7 +7643,7 @@ class Handler(BaseHTTPRequestHandler):
             rows = [r for r in get_foods() if r[0] == fid]
             if not rows:
                 return self.send_json({'error': 'not found'}, status=404)
-            keys = ['id', 'name', 'brand', 'category', 'calories', 'protein', 'carbs', 'fats', 'serving_size', 'photo_path', 'nutrition_mode', 'per100_unit', 'is_verified']
+            keys = ['id', 'name', 'brand', 'category', 'calories', 'protein', 'carbs', 'fats', 'serving_size', 'photo_path', 'nutrition_mode', 'per100_unit', 'is_verified', 'has_gluten']
             return self.send_json(dict(zip(keys, rows[0])))
 
         # Update exercise
@@ -4401,7 +7652,7 @@ class Handler(BaseHTTPRequestHandler):
                 eid = int(path.split('/')[-1])
             except Exception:
                 return self.send_json({'error': 'invalid id'}, status=400)
-            allowed = ['name', 'muscle_group', 'equipment', 'difficulty', 'notes', 'exercise_category_id', 'video_url']
+            allowed = ['name', 'muscle_group', 'equipment', 'difficulty', 'notes', 'exercise_category_id', 'exercise_category_id_2', 'video_url', 'machine_url']
             sets = []
             vals = []
             for k in allowed:
@@ -4419,7 +7670,7 @@ class Handler(BaseHTTPRequestHandler):
             rows = [r for r in get_exercises() if r[0] == eid]
             if not rows:
                 return self.send_json({'error': 'not found'}, status=404)
-            keys = ['id', 'name', 'muscle_group', 'equipment', 'difficulty', 'notes', 'category', 'video_url']
+            keys = ['id', 'name', 'muscle_group', 'equipment', 'difficulty', 'notes', 'category', 'video_url', 'machine_url', 'category_2']
             return self.send_json(dict(zip(keys, rows[0])))
 
         # Update category
@@ -4456,7 +7707,7 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r'^/api/diets/(\d+)$', path)
         if m:
             did = int(m.group(1))
-            allowed = ['name', 'description', 'client_diet_name', 'client_weight_kg', 'client_name', 'client_height_cm', 'client_age']
+            allowed = ['name', 'description', 'client_instructions', 'client_diet_name', 'client_weight_kg', 'client_name', 'client_height_cm', 'client_age']
             sets = []
             vals = []
             for k in allowed:
@@ -4473,6 +7724,11 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return self.send_json({'ok': True})
 
+        if path == '/api/settings/diet_instructions_template':
+            value = str(payload.get('value') or '').strip()
+            set_app_setting('diet_instructions_template', value or DEFAULT_DIET_INSTRUCTIONS_TEMPLATE)
+            return self.send_json({'ok': True})
+
         # Update diet item grams
         m = re.match(r'^/api/diet_item_b/(\d+)$', path)
         if m:
@@ -4482,6 +7738,25 @@ class Handler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute("UPDATE diet_items SET quantity_grams=?, quantity_units=? WHERE id=?", (grams, units, iid))
+            conn.commit()
+            conn.close()
+            return self.send_json({'ok': True})
+
+        m = re.match(r'^/api/diet_supplement_b/(\d+)$', path)
+        if m:
+            sid = int(m.group(1))
+            supplement_name = str(payload.get('supplement_name', '')).strip()
+            intake_time = str(payload.get('intake_time', '')).strip()
+            dose = str(payload.get('dose', '')).strip()
+            notes = str(payload.get('notes', '')).strip()
+            if not supplement_name:
+                return self.send_json({'error': 'supplement_name required'}, status=400)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE diet_supplements SET supplement_name=?, intake_time=?, dose=?, notes=? WHERE id=?",
+                (supplement_name, intake_time, dose, notes, sid),
+            )
             conn.commit()
             conn.close()
             return self.send_json({'ok': True})
@@ -4555,6 +7830,16 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return self.send_json({'ok': True})
 
+        m = re.match(r'^/api/diet_supplement_b/(\d+)$', path)
+        if m:
+            sid = int(m.group(1))
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM diet_supplements WHERE id=?", (sid,))
+            conn.commit()
+            conn.close()
+            return self.send_json({'ok': True})
+
         return self.send_json({'error': 'not found'}, status=404)
 
     def do_POST(self):
@@ -4563,7 +7848,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = self.headers.get('Content-Type', '')
 
         # Diet builder JSON API
-        bm = re.match(r'^/api/diet_builder/(\d+)/(meals|items|day_config|copy_day)$', path)
+        bm = re.match(r'^/api/diet_builder/(\d+)/(meals|items|day_config|copy_day|supplements)$', path)
         dup_m = re.match(r'^/api/diet_item_b/(\d+)/duplicate$', path)
         if dup_m:
             item_id = int(dup_m.group(1))
@@ -4633,6 +7918,7 @@ class Handler(BaseHTTPRequestHandler):
                     day = str(payload.get('day', '')).strip()
                     is_training = 1 if payload.get('is_training', True) else 0
                     goal_kcal = float(payload.get('goal_kcal', 0) or 0)
+                    goal_steps = float(payload.get('goal_steps', 0) or 0)
                     goal_protein = float(payload.get('goal_protein', 0) or 0)
                     goal_fat = float(payload.get('goal_fat', 0) or 0)
                     goal_carbs = float(payload.get('goal_carbs', 0) or 0)
@@ -4642,11 +7928,11 @@ class Handler(BaseHTTPRequestHandler):
                     carb_multiplier = float(payload.get('carb_multiplier', 0) or 0)
                     cur.execute("SELECT id FROM diet_day_config WHERE diet_id=? AND day_of_week=?", (diet_id_i, day))
                     if cur.fetchone():
-                        cur.execute("UPDATE diet_day_config SET is_training=?,goal_kcal=?,goal_protein=?,goal_fat=?,goal_carbs=?,goal_fiber=?,protein_multiplier=?,fat_multiplier=?,carb_multiplier=? WHERE diet_id=? AND day_of_week=?",
-                                    (is_training, goal_kcal, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier, diet_id_i, day))
+                        cur.execute("UPDATE diet_day_config SET is_training=?,goal_kcal=?,goal_steps=?,goal_protein=?,goal_fat=?,goal_carbs=?,goal_fiber=?,protein_multiplier=?,fat_multiplier=?,carb_multiplier=? WHERE diet_id=? AND day_of_week=?",
+                                    (is_training, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier, diet_id_i, day))
                     else:
-                        cur.execute("INSERT INTO diet_day_config(diet_id,day_of_week,is_training,goal_kcal,goal_protein,goal_fat,goal_carbs,goal_fiber,protein_multiplier,fat_multiplier,carb_multiplier) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                                    (diet_id_i, day, is_training, goal_kcal, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier))
+                        cur.execute("INSERT INTO diet_day_config(diet_id,day_of_week,is_training,goal_kcal,goal_steps,goal_protein,goal_fat,goal_carbs,goal_fiber,protein_multiplier,fat_multiplier,carb_multiplier) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                                    (diet_id_i, day, is_training, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier))
                     conn.commit()
                     conn.close()
                     return self.send_json({'ok': True})
@@ -4676,6 +7962,31 @@ class Handler(BaseHTTPRequestHandler):
                                               'nutrition_mode': r[11], 'per100_unit': r[12], 'units': r[13] or 1})
                     conn.close()
                     return self.send_json({'items': new_items})
+                elif action == 'supplements':
+                    supplement_name = str(payload.get('supplement_name', '')).strip()
+                    intake_time = str(payload.get('intake_time', '')).strip()
+                    dose = str(payload.get('dose', '')).strip()
+                    notes = str(payload.get('notes', '')).strip()
+                    if not supplement_name:
+                        conn.close()
+                        return self.send_json({'error': 'supplement_name required'}, status=400)
+                    cur.execute("SELECT COALESCE(MAX(order_index),0)+1 FROM diet_supplements WHERE diet_id=?", (diet_id_i,))
+                    oi = cur.fetchone()[0]
+                    cur.execute(
+                        "INSERT INTO diet_supplements(diet_id, supplement_name, intake_time, dose, notes, order_index) VALUES(?,?,?,?,?,?)",
+                        (diet_id_i, supplement_name, intake_time, dose, notes, oi),
+                    )
+                    sid = cur.lastrowid
+                    conn.commit()
+                    conn.close()
+                    return self.send_json({
+                        'id': sid,
+                        'supplement_name': supplement_name,
+                        'intake_time': intake_time,
+                        'dose': dose,
+                        'notes': notes,
+                        'order_index': oi,
+                    })
                 conn.close()
             return self.send_json({'error': 'bad request'}, status=400)
 
@@ -4699,6 +8010,7 @@ class Handler(BaseHTTPRequestHandler):
                 is_verified = 1 if int(is_verified) else 0
             except Exception:
                 is_verified = 0
+            has_gluten = parse_gluten_input(payload.get('has_gluten'))
             calories = parse_numeric_input(payload.get('calories'))
             protein = parse_numeric_input(payload.get('protein'))
             carbs = parse_numeric_input(payload.get('carbs'))
@@ -4716,15 +8028,21 @@ class Handler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO foods(name, brand, category_id, calories, protein, carbs, fats, serving_size, photo_path, nutrition_mode, per100_unit, barcode, keywords, is_active, is_verified) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (name, brand, cat, calories, protein, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, barcode or None, keywords or None, is_active, is_verified),
+                "INSERT INTO foods(name, brand, category_id, calories, protein, carbs, fats, serving_size, photo_path, nutrition_mode, per100_unit, barcode, keywords, is_active, is_verified, has_gluten) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (name, brand, cat, calories, protein, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, barcode or None, keywords or None, is_active, is_verified, has_gluten),
             )
             new_food_id = cur.lastrowid
             refresh_food_search_row(cur, new_food_id)
+            cur.execute(
+                "SELECT f.id, f.name, f.brand, c.name as category, f.calories, f.protein, f.carbs, f.fats, f.serving_size, "
+                "COALESCE(f.photo_path, ''), COALESCE(f.nutrition_mode, 'per100'), COALESCE(f.per100_unit, 'g'), COALESCE(f.is_verified, 0), f.has_gluten "
+                "FROM foods f LEFT JOIN categories c ON f.category_id = c.id WHERE f.id = ?",
+                (new_food_id,),
+            )
+            row = cur.fetchone()
             conn.commit()
             conn.close()
-            row = get_foods()[-1]
-            keys = ['id', 'name', 'brand', 'category', 'calories', 'protein', 'carbs', 'fats', 'serving_size', 'photo_path', 'nutrition_mode', 'per100_unit', 'is_verified']
+            keys = ['id', 'name', 'brand', 'category', 'calories', 'protein', 'carbs', 'fats', 'serving_size', 'photo_path', 'nutrition_mode', 'per100_unit', 'is_verified', 'has_gluten']
             return self.send_json(dict(zip(keys, row)), status=201)
 
         if path == '/api/exercises' and 'application/json' in ctype:
@@ -4736,17 +8054,20 @@ class Handler(BaseHTTPRequestHandler):
             equipment = payload.get('equipment')
             difficulty = payload.get('difficulty')
             notes = payload.get('notes')
+            exercise_category_id = payload.get('exercise_category_id')
+            exercise_category_id_2 = payload.get('exercise_category_id_2')
             video_url = payload.get('video_url')
+            machine_url = payload.get('machine_url')
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO exercises(name, muscle_group, equipment, difficulty, notes, video_url) VALUES(?,?,?,?,?,?)",
-                (name, muscle_group, equipment, difficulty, notes, video_url),
+                "INSERT INTO exercises(name, muscle_group, equipment, difficulty, notes, exercise_category_id, exercise_category_id_2, video_url, machine_url) VALUES(?,?,?,?,?,?,?,?,?)",
+                (name, muscle_group, equipment, difficulty, notes, exercise_category_id, exercise_category_id_2, video_url, machine_url),
             )
             conn.commit()
             conn.close()
             ex = get_exercises()[-1]
-            keys = ['id', 'name', 'muscle_group', 'equipment', 'difficulty', 'notes', 'category', 'video_url']
+            keys = ['id', 'name', 'muscle_group', 'equipment', 'difficulty', 'notes', 'category', 'video_url', 'machine_url', 'category_2']
             return self.send_json(dict(zip(keys, ex)), status=201)
 
         if path == '/api/categories' and 'application/json' in ctype:
@@ -4781,10 +8102,151 @@ class Handler(BaseHTTPRequestHandler):
         def get(field, default=''):
             return params.get(field, [default])[0]
 
+        if path == '/client_login':
+            identifier = get('identifier').strip()
+            password = get('password').strip()
+            access_code = get('access_code').strip()
+            user = get_client_portal_user_by_identifier(identifier)
+            if not user:
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Usuario no encontrado'))
+                self.end_headers()
+                return
+
+            ok = False
+            stored_hash = str(user.get('password_hash') or '').strip()
+            if password and stored_hash:
+                ok = verify_client_password(password, stored_hash)
+            elif access_code:
+                expected_code = str(user.get('access_code') or '').strip()
+                ok = bool(expected_code and access_code == expected_code)
+
+            if not ok:
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Credenciales incorrectas'))
+                self.end_headers()
+                return
+
+            token = make_client_portal_session_token(int(user['id']))
+            self.send_response(303)
+            self.send_header(
+                'Set-Cookie',
+                f'{CLIENT_PORTAL_COOKIE}={urllib.parse.quote(token)}; Path=/; Max-Age={CLIENT_PORTAL_SESSION_TTL_SECONDS}; HttpOnly; SameSite=Lax',
+            )
+            self.send_header('Location', '/client_app')
+            self.end_headers()
+            return
+
+        if path == '/client_register':
+            email = get('email').strip()
+            password = get('password').strip()
+            password_confirm = get('password_confirm').strip()
+
+            if not email or '@' not in email:
+                self.send_response(303)
+                self.send_header('Location', '/client_register?msg=' + urllib.parse.quote('Introduce un email válido'))
+                self.end_headers()
+                return
+            if len(password) < 6:
+                self.send_response(303)
+                self.send_header('Location', '/client_register?msg=' + urllib.parse.quote('La contraseña debe tener al menos 6 caracteres'))
+                self.end_headers()
+                return
+            if password != password_confirm:
+                self.send_response(303)
+                self.send_header('Location', '/client_register?msg=' + urllib.parse.quote('Las contraseñas no coinciden'))
+                self.end_headers()
+                return
+            if find_client_by_email(email):
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Ese email ya existe. Inicia sesión'))
+                self.end_headers()
+                return
+
+            password_hash = hash_client_password(password)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            default_name = email.split('@', 1)[0].strip() or 'Cliente'
+            cur.execute(
+                "INSERT INTO clients(name, email, client_password_hash, created_at) VALUES(?,?,?,datetime('now'))",
+                (default_name, email, password_hash),
+            )
+            client_id = cur.lastrowid
+            cur.execute("UPDATE clients SET client_access_code = ? WHERE id = ?", (f'C{client_id}', client_id))
+            conn.commit()
+            conn.close()
+
+            token = make_client_portal_session_token(client_id)
+            self.send_response(303)
+            self.send_header(
+                'Set-Cookie',
+                f'{CLIENT_PORTAL_COOKIE}={urllib.parse.quote(token)}; Path=/; Max-Age={CLIENT_PORTAL_SESSION_TTL_SECONDS}; HttpOnly; SameSite=Lax',
+            )
+            self.send_header('Location', '/client_onboarding')
+            self.end_headers()
+            return
+
+        if path == '/client_onboarding':
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            client_id = parse_client_portal_session_token(token)
+            if client_id is None:
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Inicia sesión para continuar'))
+                self.end_headers()
+                return
+
+            name = get('name').strip()
+            phone = get('phone').strip()
+            email = get('email').strip()
+            birthdate = get('birthdate').strip()
+            objectives = get('objectives').strip()
+            try:
+                height_cm = float(get('height_cm') or 0)
+            except Exception:
+                height_cm = 0
+            try:
+                weight_kg = float(get('weight_kg') or 0)
+            except Exception:
+                weight_kg = 0
+
+            if not name:
+                self.send_response(303)
+                self.send_header('Location', '/client_onboarding?msg=' + urllib.parse.quote('El nombre es obligatorio'))
+                self.end_headers()
+                return
+            if not email or '@' not in email:
+                self.send_response(303)
+                self.send_header('Location', '/client_onboarding?msg=' + urllib.parse.quote('El email es obligatorio'))
+                self.end_headers()
+                return
+
+            existing = find_client_by_email(email)
+            if existing and int(existing[0]) != int(client_id):
+                self.send_response(303)
+                self.send_header('Location', '/client_onboarding?msg=' + urllib.parse.quote('Ese email ya está en uso'))
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE clients SET name=?, phone=?, email=?, birthdate=?, height_cm=?, weight_kg=?, objectives=? WHERE id=?",
+                (name, phone or None, email, birthdate or None, height_cm, weight_kg, objectives or None, int(client_id)),
+            )
+            conn.commit()
+            conn.close()
+
+            self.send_response(303)
+            self.send_header('Location', '/client_app')
+            self.end_headers()
+            return
+
         if path == '/add':
             name = get('name').strip()
             brand = get('brand').strip()
             cat_param = get('category').strip()
+            has_gluten = parse_gluten_input(get('has_gluten'))
             barcode = get('barcode').strip()
             keywords = get('keywords').strip()
             is_active = 0 if get('is_active').strip() == '0' else 1
@@ -4818,8 +8280,8 @@ class Handler(BaseHTTPRequestHandler):
                     cat_id = row[0] if row else None
 
             cur.execute(
-                "INSERT INTO foods(name, brand, category_id, calories, protein, carbs, fats, serving_size, photo_path, nutrition_mode, per100_unit, barcode, keywords, is_active, is_verified) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (name, brand or None, cat_id, calories, protein, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, barcode or None, keywords or None, is_active, is_verified),
+                "INSERT INTO foods(name, brand, category_id, calories, protein, carbs, fats, serving_size, photo_path, nutrition_mode, per100_unit, barcode, keywords, is_active, is_verified, has_gluten) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (name, brand or None, cat_id, calories, protein, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, barcode or None, keywords or None, is_active, is_verified, has_gluten),
             )
             refresh_food_search_row(cur, cur.lastrowid)
             conn.commit()
@@ -4832,18 +8294,28 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/add_exercise':
             name = get('name').strip()
             category_id = get('category_id').strip()
+            category_id_2 = get('category_id_2').strip()
             video_url = get('video_url').strip()
+            machine_url = get('machine_url').strip()
             cat_id = None
             if category_id:
                 try:
                     cat_id = int(category_id)
                 except Exception:
                     cat_id = None
+            cat_id_2 = None
+            if category_id_2:
+                try:
+                    cat_id_2 = int(category_id_2)
+                except Exception:
+                    cat_id_2 = None
+            if cat_id_2 is not None and cat_id_2 == cat_id:
+                cat_id_2 = None
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
-                "INSERT INTO exercises(name, muscle_group, equipment, difficulty, notes, exercise_category_id, video_url) VALUES(?,?,?,?,?,?,?)",
-                (name, None, None, None, None, cat_id, video_url or None),
+                "INSERT INTO exercises(name, muscle_group, equipment, difficulty, notes, exercise_category_id, exercise_category_id_2, video_url, machine_url) VALUES(?,?,?,?,?,?,?,?,?)",
+                (name, None, None, None, None, cat_id, cat_id_2, video_url or None, machine_url or None),
             )
             conn.commit()
             conn.close()
@@ -4861,13 +8333,16 @@ class Handler(BaseHTTPRequestHandler):
                 client_weight_kg = 0
             new_diet_id = None
             if name:
+                default_instructions = get_diet_instructions_template()
+                ensure_diet_display_number_column()
                 conn = sqlite3.connect(DB_PATH)
                 cur = conn.cursor()
                 cur.execute(
-                    "INSERT INTO diets(name, description, client_weight_kg, created_at) VALUES(?,?,?,datetime('now'))",
-                    (name, description or None, client_weight_kg),
+                    "INSERT INTO diets(name, description, client_instructions, client_weight_kg, created_at) VALUES(?,?,?,?,datetime('now'))",
+                    (name, description or None, default_instructions, client_weight_kg),
                 )
                 new_diet_id = cur.lastrowid
+                cur.execute("UPDATE diets SET display_number = ? WHERE id = ?", (new_diet_id, new_diet_id))
                 conn.commit()
                 conn.close()
             self.send_response(303)
@@ -4881,6 +8356,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/add_client':
             name = get('name').strip()
             phone = get('phone').strip()
+            email = get('email').strip()
+            client_access_code = get('client_access_code').strip()
             birthdate = get('birthdate').strip()
             try:
                 height_cm = float(get('height_cm') or 0)
@@ -4902,10 +8379,12 @@ class Handler(BaseHTTPRequestHandler):
                 conn = sqlite3.connect(DB_PATH)
                 cur = conn.cursor()
                 cur.execute(
-                    "INSERT INTO clients(name, phone, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,datetime('now'))",
-                    (name, phone or None, birthdate or None, height_cm, weight_kg, objectives or None, plan_start_date or None, plan_end_date or None, plan_amount, plan_notes or None),
+                    "INSERT INTO clients(name, phone, email, client_access_code, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
+                    (name, phone or None, email or None, client_access_code or None, birthdate or None, height_cm, weight_kg, objectives or None, plan_start_date or None, plan_end_date or None, plan_amount, plan_notes or None),
                 )
                 client_id = cur.lastrowid
+                if not client_access_code:
+                    cur.execute("UPDATE clients SET client_access_code = ? WHERE id = ?", (f'C{client_id}', client_id))
                 conn.commit()
                 conn.close()
                 sync_client_payment_plan(client_id, plan_start_date or None, plan_end_date or None, plan_amount, plan_notes)
@@ -4957,6 +8436,28 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == '/update_diet_display_number':
+            did = get('diet_id').strip()
+            display_number_raw = get('display_number').strip()
+            try:
+                did_i = int(did)
+                display_number_i = int(display_number_raw)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', '/diets?msg=' + urllib.parse.quote('Número inválido'))
+                self.end_headers()
+                return
+            ensure_diet_display_number_column()
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("UPDATE diets SET display_number = ? WHERE id = ?", (display_number_i, did_i))
+            conn.commit()
+            conn.close()
+            self.send_response(303)
+            self.send_header('Location', '/diets?msg=' + urllib.parse.quote('Número de dieta actualizado'))
+            self.end_headers()
+            return
+
         if path == '/deactivate_client_diet':
             history_id = get('history_id').strip()
             client_id = get('client_id').strip()
@@ -4980,9 +8481,103 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == '/activate_client_diet':
+            history_id = get('history_id').strip()
+            client_id = get('client_id').strip()
+            return_to = get('return_to').strip()
+            try:
+                history_id_i = int(history_id)
+                client_id_i = int(client_id)
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id FROM client_diet_history WHERE id = ? AND client_id = ?",
+                (history_id_i, client_id_i),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.close()
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            cur.execute(
+                "UPDATE client_diet_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), date('now')) WHERE client_id = ? AND is_active = 1 AND id <> ?",
+                (client_id_i, history_id_i),
+            )
+            cur.execute(
+                "UPDATE client_diet_history SET is_active = 1, end_date = NULL WHERE id = ? AND client_id = ?",
+                (history_id_i, client_id_i),
+            )
+            conn.commit()
+            conn.close()
+
+            location_base = return_to or f'/client_profile?id={client_id_i}'
+            location = location_base + ('&' if '?' in location_base else '?') + 'msg=' + urllib.parse.quote('Dieta activada')
+            self.send_response(303)
+            self.send_header('Location', location)
+            self.end_headers()
+            return
+
+        if path == '/update_client_diet_dates':
+            history_id = get('history_id').strip()
+            client_id = get('client_id').strip()
+            start_date = get('start_date').strip()
+            end_date = get('end_date').strip()
+            return_to = get('return_to').strip()
+            try:
+                history_id_i = int(history_id)
+                client_id_i = int(client_id)
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT COALESCE(is_active, 0) FROM client_diet_history WHERE id = ? AND client_id = ?",
+                (history_id_i, client_id_i),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.close()
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            is_active = int(row[0] or 0)
+            if is_active == 1:
+                cur.execute(
+                    "UPDATE client_diet_history SET start_date = ? WHERE id = ? AND client_id = ?",
+                    (start_date or None, history_id_i, client_id_i),
+                )
+                msg = 'Fecha de inicio actualizada'
+            else:
+                cur.execute(
+                    "UPDATE client_diet_history SET start_date = ?, end_date = ? WHERE id = ? AND client_id = ?",
+                    (start_date or None, end_date or None, history_id_i, client_id_i),
+                )
+                msg = 'Fechas actualizadas'
+
+            conn.commit()
+            conn.close()
+            location_base = return_to or f'/client_profile?id={client_id_i}'
+            location = location_base + ('&' if '?' in location_base else '?') + 'msg=' + urllib.parse.quote(msg)
+            self.send_response(303)
+            self.send_header('Location', location)
+            self.end_headers()
+            return
+
         if path == '/assign_client_training':
             client_id = get('client_id').strip()
             exercise_id = get('exercise_id').strip()
+            routine_id = get('routine_id').strip()
             training_name = get('training_name').strip()
             start_date = get('start_date').strip()
             end_date = get('end_date').strip()
@@ -5002,6 +8597,26 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     exercise_id_i = None
 
+            routine_id_i = None
+            if routine_id:
+                try:
+                    routine_id_i = int(routine_id)
+                except Exception:
+                    routine_id_i = None
+
+            template_routine_id_i = None
+            assigned_routine_id_i = None
+            if routine_id_i:
+                client_rows = [r for r in get_clients() if r[0] == client_id_i]
+                client_name = client_rows[0][1] if client_rows else ''
+                assigned_routine_id_i = clone_routine_template_for_client(routine_id_i, client_name)
+                if not assigned_routine_id_i:
+                    self.send_response(303)
+                    self.send_header('Location', '/clients?msg=' + urllib.parse.quote('No se pudo asignar la rutina'))
+                    self.end_headers()
+                    return
+                template_routine_id_i = routine_id_i
+
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
@@ -5009,12 +8624,29 @@ class Handler(BaseHTTPRequestHandler):
                 (client_id_i,),
             )
             cur.execute(
-                "INSERT INTO client_training_history(client_id, exercise_id, training_name, start_date, end_date, is_active, notes, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))",
-                (client_id_i, exercise_id_i, training_name or None, start_date or None, end_date or None, 1, notes or None),
+                """
+                INSERT INTO client_training_history(
+                    client_id, exercise_id, routine_id, template_routine_id, training_name,
+                    start_date, end_date, is_active, notes, created_at
+                )
+                VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))
+                """,
+                (
+                    client_id_i,
+                    exercise_id_i,
+                    assigned_routine_id_i,
+                    template_routine_id_i,
+                    training_name or None,
+                    start_date or None,
+                    end_date or None,
+                    1,
+                    notes or None,
+                ),
             )
             conn.commit()
             conn.close()
-            location = return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Entrenamiento asignado')
+            assigned_label = 'Rutina asignada' if assigned_routine_id_i else 'Entrenamiento asignado'
+            location = return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote(assigned_label)
             self.send_response(303)
             self.send_header('Location', location)
             self.end_headers()
@@ -5023,6 +8655,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/deactivate_client_training':
             history_id = get('history_id').strip()
             client_id = get('client_id').strip()
+            return_to = get('return_to').strip()
             try:
                 history_id_i = int(history_id)
                 client_id_i = int(client_id)
@@ -5038,8 +8671,53 @@ class Handler(BaseHTTPRequestHandler):
             )
             conn.commit()
             conn.close()
+            location_base = return_to or f'/client_profile?id={client_id_i}'
+            location = location_base + ('&' if '?' in location_base else '?') + 'msg=' + urllib.parse.quote('Entrenamiento cerrado')
             self.send_response(303)
-            self.send_header('Location', f'/client_profile?id={client_id_i}&msg=' + urllib.parse.quote('Entrenamiento cerrado'))
+            self.send_header('Location', location)
+            self.end_headers()
+            return
+
+        if path == '/activate_client_training':
+            history_id = get('history_id').strip()
+            client_id = get('client_id').strip()
+            return_to = get('return_to').strip()
+            try:
+                history_id_i = int(history_id)
+                client_id_i = int(client_id)
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id FROM client_training_history WHERE id = ? AND client_id = ?",
+                (history_id_i, client_id_i),
+            )
+            row = cur.fetchone()
+            if row is None:
+                conn.close()
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            cur.execute(
+                "UPDATE client_training_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), date('now')) WHERE client_id = ? AND is_active = 1 AND id <> ?",
+                (client_id_i, history_id_i),
+            )
+            cur.execute(
+                "UPDATE client_training_history SET is_active = 1, end_date = NULL WHERE id = ? AND client_id = ?",
+                (history_id_i, client_id_i),
+            )
+            conn.commit()
+            conn.close()
+
+            location_base = return_to or f'/client_profile?id={client_id_i}'
+            location = location_base + ('&' if '?' in location_base else '?') + 'msg=' + urllib.parse.quote('Rutina activada')
+            self.send_response(303)
+            self.send_header('Location', location)
             self.end_headers()
             return
 
@@ -5111,11 +8789,77 @@ class Handler(BaseHTTPRequestHandler):
                 new_routine_id = cur.lastrowid
                 conn.commit()
                 conn.close()
+                ensure_routine_days_for_routine(new_routine_id)
             self.send_response(303)
             if new_routine_id:
                 self.send_header('Location', f'/routines?routine_id={new_routine_id}&msg=' + urllib.parse.quote('Rutina creada'))
             else:
                 self.send_header('Location', '/routines?msg=' + urllib.parse.quote('Rutina creada'))
+            self.end_headers()
+            return
+
+        if path == '/update_routine_name':
+            routine_id = get('routine_id').strip()
+            name = get('name').strip()
+            return_to = get('return_to').strip() or '/routines'
+            try:
+                routine_id_i = int(routine_id)
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+            if not name:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('El nombre no puede estar vacío'))
+                self.end_headers()
+                return
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("UPDATE routines SET name = ? WHERE id = ?", (name, routine_id_i))
+            conn.commit()
+            conn.close()
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Rutina renombrada'))
+            self.end_headers()
+            return
+
+        if path == '/update_routine_day':
+            routine_id = get('routine_id').strip()
+            day_index = get('day_index').strip()
+            day_name = get('day_name').strip()
+            day_type = get('day_type').strip().lower()
+            try:
+                routine_id_i = int(routine_id)
+                day_index_i = int(day_index)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', '/routines?msg=' + urllib.parse.quote('No se pudo actualizar el día'))
+                self.end_headers()
+                return
+
+            if not day_name:
+                day_name = f'Día {day_index_i + 1}'
+            if day_type not in ('train', 'rest'):
+                day_type = 'train'
+
+            ensure_routine_days_for_routine(routine_id_i)
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE routine_days SET day_name = ?, day_type = ? WHERE routine_id = ? AND day_index = ?",
+                (day_name, day_type, routine_id_i, day_index_i),
+            )
+            cur.execute(
+                "UPDATE routine_items SET day_name = ?, day_index = ? WHERE routine_id = ? AND day_index = ?",
+                (day_name, day_index_i, routine_id_i, day_index_i),
+            )
+            conn.commit()
+            conn.close()
+            self.send_response(303)
+            self.send_header(
+                'Location',
+                f'/routines?routine_id={routine_id_i}&msg=' + urllib.parse.quote('Día actualizado') + f'#routine-day-{day_index_i}'
+            )
             self.end_headers()
             return
 
@@ -5129,7 +8873,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
+            cur.execute("UPDATE client_training_history SET template_routine_id = NULL WHERE template_routine_id = ?", (routine_id_i,))
+            cur.execute("DELETE FROM client_training_history WHERE routine_id = ?", (routine_id_i,))
             cur.execute("DELETE FROM routine_items WHERE routine_id = ?", (routine_id_i,))
+            cur.execute("DELETE FROM routine_days WHERE routine_id = ?", (routine_id_i,))
             cur.execute("DELETE FROM routines WHERE id = ?", (routine_id_i,))
             conn.commit()
             conn.close()
@@ -5141,6 +8888,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/add_routine_item':
             routine_id = get('routine_id').strip()
             day_name = get('day_name').strip()
+            day_index = get('day_index').strip()
             exercise_id = get('exercise_id').strip()
             sets_text = get('sets_text').strip()
             reps_text = get('reps_text').strip()
@@ -5158,13 +8906,29 @@ class Handler(BaseHTTPRequestHandler):
                     exercise_id_i = int(exercise_id)
                 except Exception:
                     exercise_id_i = None
+
+            day_index_i = None
+            if day_index:
+                try:
+                    day_index_i = int(day_index)
+                except Exception:
+                    day_index_i = None
+
+            ensure_routine_days_for_routine(routine_id_i)
+            if day_index_i is None:
+                routine_days_lookup = {str(day_name_row[1] or '').strip(): int(day_name_row[0]) for day_name_row in get_routine_days(routine_id_i)}
+                day_index_i = routine_days_lookup.get(day_name, 0)
+            routine_days_by_idx = {int(row[0]): row for row in get_routine_days(routine_id_i)}
+            selected_day = routine_days_by_idx.get(day_index_i)
+            selected_day_name = str(selected_day[1]).strip() if selected_day else (day_name or 'Lunes')
+
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM routine_items WHERE routine_id = ?", (routine_id_i,))
             next_sort_order = cur.fetchone()[0] or 1
             cur.execute(
-                "INSERT INTO routine_items(routine_id, day_name, exercise_id, sets_text, reps_text, notes, sort_order) VALUES(?,?,?,?,?,?,?)",
-                (routine_id_i, day_name or 'Lunes', exercise_id_i, sets_text or None, reps_text or None, notes or None, next_sort_order),
+                "INSERT INTO routine_items(routine_id, day_name, day_index, exercise_id, sets_text, reps_text, notes, sort_order) VALUES(?,?,?,?,?,?,?,?)",
+                (routine_id_i, selected_day_name, day_index_i, exercise_id_i, sets_text or None, reps_text or None, notes or None, next_sort_order),
             )
             conn.commit()
             conn.close()
@@ -5199,6 +8963,97 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == '/update_routine_item':
+            item_id = get('id').strip()
+            sets_text = get('sets_text').strip()
+            reps_text = get('reps_text').strip()
+            routine_id = get('routine_id').strip()
+            try:
+                item_id_i = int(item_id)
+            except Exception:
+                if self.headers.get('X-Requested-With', '').lower() == 'fetch':
+                    return self.send_json({'error': 'invalid id'}, status=400)
+                self.send_response(303)
+                self.send_header('Location', '/routines?msg=' + urllib.parse.quote('No se pudo actualizar el ejercicio'))
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE routine_items SET sets_text = ?, reps_text = ? WHERE id = ?",
+                (sets_text or None, reps_text or None, item_id_i),
+            )
+            conn.commit()
+            conn.close()
+
+            if self.headers.get('X-Requested-With', '').lower() == 'fetch':
+                return self.send_json({'ok': True})
+
+            if routine_id:
+                self.send_response(303)
+                self.send_header('Location', f'/routines?routine_id={routine_id}&msg=' + urllib.parse.quote('Ejercicio actualizado'))
+                self.end_headers()
+                return
+            self.send_response(303)
+            self.send_header('Location', '/routines?msg=' + urllib.parse.quote('Ejercicio actualizado'))
+            self.end_headers()
+            return
+
+        if path == '/reorder_routine_items':
+            routine_id = get('routine_id').strip()
+            day_index = get('day_index').strip()
+            item_ids_raw = get('item_ids').strip()
+            try:
+                routine_id_i = int(routine_id)
+                day_index_i = int(day_index)
+            except Exception:
+                if self.headers.get('X-Requested-With', '').lower() == 'fetch':
+                    return self.send_json({'error': 'invalid parameters'}, status=400)
+                self.send_response(303)
+                self.send_header('Location', '/routines?msg=' + urllib.parse.quote('No se pudo reordenar'))
+                self.end_headers()
+                return
+
+            parsed_ids = []
+            for token in item_ids_raw.split(','):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    parsed_ids.append(int(token))
+                except Exception:
+                    continue
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id FROM routine_items WHERE routine_id = ? AND day_index = ? ORDER BY sort_order, id",
+                (routine_id_i, day_index_i),
+            )
+            existing_ids = [int(r[0]) for r in cur.fetchall()]
+            valid_set = set(existing_ids)
+            ordered_ids = [iid for iid in parsed_ids if iid in valid_set]
+            for iid in existing_ids:
+                if iid not in ordered_ids:
+                    ordered_ids.append(iid)
+
+            base_sort = (day_index_i + 1) * 100000
+            for idx, iid in enumerate(ordered_ids, start=1):
+                cur.execute(
+                    "UPDATE routine_items SET sort_order = ? WHERE id = ?",
+                    (base_sort + idx, iid),
+                )
+            conn.commit()
+            conn.close()
+
+            if self.headers.get('X-Requested-With', '').lower() == 'fetch':
+                return self.send_json({'ok': True})
+            self.send_response(303)
+            self.send_header('Location', f'/routines?routine_id={routine_id_i}&msg=' + urllib.parse.quote('Orden actualizado'))
+            self.end_headers()
+            return
+
         if path == '/edit_client':
             def getp(k):
                 return params.get(k, [''])[0]
@@ -5211,6 +9066,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             name = getp('name').strip()
             phone = getp('phone').strip()
+            email = getp('email').strip()
+            client_access_code = getp('client_access_code').strip()
             birthdate = getp('birthdate').strip()
             try:
                 height_cm = float(getp('height_cm') or 0)
@@ -5230,15 +9087,61 @@ class Handler(BaseHTTPRequestHandler):
             plan_notes = getp('plan_notes').strip()
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
+            if not client_access_code:
+                cur.execute("SELECT COALESCE(client_access_code, '') FROM clients WHERE id = ?", (cid,))
+                row = cur.fetchone()
+                client_access_code = (row[0] or '').strip() if row else ''
+            if not client_access_code:
+                client_access_code = f'C{cid}'
             cur.execute(
-                "UPDATE clients SET name=?, phone=?, birthdate=?, height_cm=?, weight_kg=?, objectives=?, plan_start_date=?, plan_end_date=?, plan_amount=?, plan_notes=? WHERE id=?",
-                (name, phone or None, birthdate or None, height_cm, weight_kg, objectives or None, plan_start_date or None, plan_end_date or None, plan_amount, plan_notes or None, cid),
+                "UPDATE clients SET name=?, phone=?, email=?, client_access_code=?, birthdate=?, height_cm=?, weight_kg=?, objectives=?, plan_start_date=?, plan_end_date=?, plan_amount=?, plan_notes=? WHERE id=?",
+                (name, phone or None, email or None, client_access_code, birthdate or None, height_cm, weight_kg, objectives or None, plan_start_date or None, plan_end_date or None, plan_amount, plan_notes or None, cid),
             )
             conn.commit()
             conn.close()
             sync_client_payment_plan(cid, plan_start_date or None, plan_end_date or None, plan_amount, plan_notes)
             self.send_response(303)
             self.send_header('Location', '/clients?msg=' + urllib.parse.quote('Cliente actualizado'))
+            self.end_headers()
+            return
+
+        if path == '/set_client_steps_goal':
+            client_id = get('client_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            try:
+                client_id_i = int(client_id)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                self.end_headers()
+                return
+
+            goal_raw = get('daily_steps_goal').strip()
+            if not goal_raw:
+                goal_i = 0
+            else:
+                digits = re.sub(r'[^0-9]', '', goal_raw)
+                if not digits:
+                    self.send_response(303)
+                    self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Objetivo inválido'))
+                    self.end_headers()
+                    return
+                goal_i = int(digits)
+
+            if goal_i < 0 or goal_i > 100000:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Objetivo fuera de rango'))
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("UPDATE clients SET daily_steps_goal = ? WHERE id = ?", (goal_i, client_id_i))
+            conn.commit()
+            conn.close()
+
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Objetivo de pasos actualizado'))
             self.end_headers()
             return
 
@@ -5287,6 +9190,7 @@ class Handler(BaseHTTPRequestHandler):
                 cur.execute("DELETE FROM diet_items WHERE diet_id = ?", (did_i,))
                 cur.execute("DELETE FROM diet_meals WHERE diet_id = ?", (did_i,))
                 cur.execute("DELETE FROM diet_day_config WHERE diet_id = ?", (did_i,))
+                cur.execute("DELETE FROM diet_supplements WHERE diet_id = ?", (did_i,))
                 cur.execute("DELETE FROM diets WHERE id = ?", (did_i,))
                 conn.commit()
                 conn.close()
@@ -5307,15 +9211,27 @@ class Handler(BaseHTTPRequestHandler):
             cur = conn.cursor()
             cur.execute("SELECT diet_id FROM client_diet_history WHERE client_id = ?", (cid_i,))
             client_diet_ids = [int(r[0]) for r in cur.fetchall() if r[0]]
+            cur.execute(
+                "SELECT routine_id FROM client_training_history WHERE client_id = ? AND COALESCE(template_routine_id, 0) > 0",
+                (cid_i,),
+            )
+            client_routine_ids = [int(r[0]) for r in cur.fetchall() if r and r[0]]
             cur.execute("DELETE FROM client_diet_history WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM client_training_history WHERE client_id = ?", (cid_i,))
+            cur.execute("DELETE FROM client_fasting_weights WHERE client_id = ?", (cid_i,))
+            cur.execute("DELETE FROM client_daily_steps WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM payment_plans WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM clients WHERE id = ?", (cid_i,))
             for did in client_diet_ids:
                 cur.execute("DELETE FROM diet_items WHERE diet_id = ?", (did,))
                 cur.execute("DELETE FROM diet_meals WHERE diet_id = ?", (did,))
                 cur.execute("DELETE FROM diet_day_config WHERE diet_id = ?", (did,))
+                cur.execute("DELETE FROM diet_supplements WHERE diet_id = ?", (did,))
                 cur.execute("DELETE FROM diets WHERE id = ? AND COALESCE(is_template, 1) = 0", (did,))
+            for rid in client_routine_ids:
+                cur.execute("DELETE FROM routine_items WHERE routine_id = ?", (rid,))
+                cur.execute("DELETE FROM routine_days WHERE routine_id = ?", (rid,))
+                cur.execute("DELETE FROM routines WHERE id = ?", (rid,))
             conn.commit()
             conn.close()
             self.send_response(303)
@@ -5373,6 +9289,7 @@ class Handler(BaseHTTPRequestHandler):
             name = getp('name').strip()
             brand = getp('brand').strip()
             cat = getp('category').strip()
+            has_gluten = parse_gluten_input(getp('has_gluten'))
             barcode = getp('barcode').strip()
             keywords = getp('keywords').strip()
             is_active = 0 if getp('is_active').strip() == '0' else 1
@@ -5407,8 +9324,8 @@ class Handler(BaseHTTPRequestHandler):
                     cat_id = row[0] if row else None
 
             cur.execute(
-                "UPDATE foods SET name=?, brand=?, category_id=?, calories=?, protein=?, carbs=?, fats=?, serving_size=?, photo_path=?, nutrition_mode=?, per100_unit=?, barcode=?, keywords=?, is_active=?, is_verified=? WHERE id=?",
-                (name, brand or None, cat_id, calories, protein, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, barcode or None, keywords or None, is_active, is_verified, fid),
+                "UPDATE foods SET name=?, brand=?, category_id=?, calories=?, protein=?, carbs=?, fats=?, serving_size=?, photo_path=?, nutrition_mode=?, per100_unit=?, barcode=?, keywords=?, is_active=?, is_verified=?, has_gluten=? WHERE id=?",
+                (name, brand or None, cat_id, calories, protein, carbs, fats, serving, photo_path, nutrition_mode, per100_unit, barcode or None, keywords or None, is_active, is_verified, has_gluten, fid),
             )
             refresh_food_search_row(cur, fid)
             conn.commit()
@@ -5431,10 +9348,9 @@ class Handler(BaseHTTPRequestHandler):
 
             name = getp('name').strip()
             category_id = getp('category_id').strip()
+            category_id_2 = getp('category_id_2').strip()
             video_url = getp('video_url').strip()
-            muscle_group = getp('muscle_group').strip()
-            equipment = getp('equipment').strip()
-            difficulty = getp('difficulty').strip()
+            machine_url = getp('machine_url').strip()
             notes = getp('notes').strip()
             cat_id = None
             if category_id:
@@ -5442,11 +9358,19 @@ class Handler(BaseHTTPRequestHandler):
                     cat_id = int(category_id)
                 except Exception:
                     cat_id = None
+            cat_id_2 = None
+            if category_id_2:
+                try:
+                    cat_id_2 = int(category_id_2)
+                except Exception:
+                    cat_id_2 = None
+            if cat_id_2 is not None and cat_id_2 == cat_id:
+                cat_id_2 = None
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
-                "UPDATE exercises SET name=?, exercise_category_id=?, video_url=?, muscle_group=?, equipment=?, difficulty=?, notes=? WHERE id=?",
-                (name, cat_id, video_url or None, muscle_group or None, equipment or None, difficulty or None, notes or None, eid),
+                "UPDATE exercises SET name=?, exercise_category_id=?, exercise_category_id_2=?, video_url=?, machine_url=?, notes=? WHERE id=?",
+                (name, cat_id, cat_id_2, video_url or None, machine_url or None, notes or None, eid),
             )
             conn.commit()
             conn.close()
@@ -5488,7 +9412,7 @@ class Handler(BaseHTTPRequestHandler):
             cur.execute(
                 """
                 SELECT name, brand, category_id, calories, protein, carbs, fats, serving_size,
-                       photo_path, nutrition_mode, per100_unit, barcode, keywords, is_active, is_verified
+                      photo_path, nutrition_mode, per100_unit, barcode, keywords, is_active, is_verified, has_gluten
                 FROM foods
                 WHERE id = ?
                 """,
@@ -5507,8 +9431,8 @@ class Handler(BaseHTTPRequestHandler):
             cur.execute(
                 """
                 INSERT INTO foods(name, brand, category_id, calories, protein, carbs, fats, serving_size,
-                                  photo_path, nutrition_mode, per100_unit, barcode, keywords, is_active, is_verified)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                  photo_path, nutrition_mode, per100_unit, barcode, keywords, is_active, is_verified, has_gluten)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     duplicate_name,
@@ -5526,6 +9450,7 @@ class Handler(BaseHTTPRequestHandler):
                     row[12],
                     row[13],
                     row[14],
+                    row[15],
                 ),
             )
             refresh_food_search_row(cur, cur.lastrowid)
@@ -5590,7 +9515,7 @@ class Handler(BaseHTTPRequestHandler):
                 conn.commit()
                 conn.close()
             self.send_response(303)
-            self.send_header('Location', '/exercises?msg=' + urllib.parse.quote('Categoría de ejercicio creada'))
+            self.send_header('Location', '/exercises?msg=' + urllib.parse.quote('Grupo muscular creado'))
             self.end_headers()
             return
 
@@ -5605,11 +9530,12 @@ class Handler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute("UPDATE exercises SET exercise_category_id = NULL WHERE exercise_category_id = ?", (cid_i,))
+            cur.execute("UPDATE exercises SET exercise_category_id_2 = NULL WHERE exercise_category_id_2 = ?", (cid_i,))
             cur.execute("DELETE FROM exercise_categories WHERE id = ?", (cid_i,))
             conn.commit()
             conn.close()
             self.send_response(303)
-            self.send_header('Location', '/exercises?msg=' + urllib.parse.quote('Categoría de ejercicio borrada'))
+            self.send_header('Location', '/exercises?msg=' + urllib.parse.quote('Grupo muscular borrado'))
             self.end_headers()
             return
 
@@ -5682,7 +9608,10 @@ def run():
     ensure_clients_table()
     ensure_payment_plans_table()
     ensure_client_history_tables()
+    ensure_fasting_weights_table()
+    ensure_client_daily_steps_table()
     ensure_diet_builder_tables()
+    ensure_app_settings_table()
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(STATIC_BASE_DIR, exist_ok=True)
     os.makedirs(UPLOADS_FOODS_DIR, exist_ok=True)
