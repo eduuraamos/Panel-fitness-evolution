@@ -1,2 +1,3 @@
 # Dependencies for server/PDF export
 reportlab>=5.0.0
+psycopg2-binary>=2.9.9

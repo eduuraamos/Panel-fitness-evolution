@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """Crear y poblar una base de datos SQLite de ejemplo para alimentos."""
 from pathlib import Path
-import sqlite3
+from db_adapter import sqlite3_compat as sqlite3
+from food_schema import (
+    ensure_catalog_schema,
+    ensure_exercise_schema,
+    rebuild_foods_search_index,
+)
 
 
 BASE = Path(__file__).resolve().parents[1]
@@ -35,72 +40,8 @@ EXERCISES = [
 def ensure_db():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS categories (
-            id INTEGER PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS brands (
-            id INTEGER PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS foods (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            brand TEXT,
-            category_id INTEGER,
-            barcode TEXT,
-            keywords TEXT,
-            is_active INTEGER DEFAULT 1,
-            is_verified INTEGER DEFAULT 0,
-            calories REAL,
-            protein REAL,
-            carbs REAL,
-            fats REAL,
-            serving_size TEXT,
-            FOREIGN KEY(category_id) REFERENCES categories(id)
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS exercise_categories (
-            id INTEGER PRIMARY KEY,
-            name TEXT UNIQUE NOT NULL
-        )
-        """
-    )
-
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS exercises (
-            id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            muscle_group TEXT,
-            equipment TEXT,
-            difficulty TEXT,
-            notes TEXT,
-            exercise_category_id INTEGER,
-            FOREIGN KEY(exercise_category_id) REFERENCES exercise_categories(id)
-        )
-        """
-    )
-
-    conn.commit()
+    ensure_catalog_schema(conn)
+    ensure_exercise_schema(conn)
     return conn
 
 
@@ -143,6 +84,7 @@ def seed(conn):
 def main():
     conn = ensure_db()
     seed(conn)
+    rebuild_foods_search_index(conn.cursor())
     cur = conn.cursor()
     cur.execute("SELECT COUNT(*) FROM categories")
     categories = cur.fetchone()[0]

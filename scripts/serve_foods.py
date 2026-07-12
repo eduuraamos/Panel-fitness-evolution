@@ -2,7 +2,15 @@
 """Servidor HTTP simple para gestionar alimentos y ejercicios (UI + JSON API).
 """
 from http.server import HTTPServer, BaseHTTPRequestHandler
-import sqlite3
+from db_adapter import sqlite3_compat as sqlite3
+from food_schema import (
+    ensure_catalog_schema,
+    ensure_default_food_categories as bootstrap_default_food_categories,
+    ensure_exercise_schema as bootstrap_exercise_schema,
+    rebuild_foods_search_index as catalog_rebuild_foods_search_index,
+    refresh_food_search_row as catalog_refresh_food_search_row,
+    supports_foods_search_fts,
+)
 import html
 import os
 import re
@@ -108,62 +116,11 @@ def build_fts_query(query):
 
 
 def rebuild_foods_search_index(cur):
-    try:
-        cur.execute("DELETE FROM foods_search")
-        cur.execute(
-            """
-            INSERT INTO foods_search (food_id, name, brand, category, barcode, keywords, searchable)
-            SELECT
-                f.id,
-                COALESCE(f.name, ''),
-                COALESCE(f.brand, ''),
-                COALESCE(c.name, ''),
-                COALESCE(f.barcode, ''),
-                COALESCE(f.keywords, ''),
-                TRIM(
-                    COALESCE(f.name, '') || ' ' ||
-                    COALESCE(f.brand, '') || ' ' ||
-                    COALESCE(c.name, '') || ' ' ||
-                    COALESCE(f.barcode, '') || ' ' ||
-                    COALESCE(f.keywords, '')
-                )
-            FROM foods f
-            LEFT JOIN categories c ON f.category_id = c.id
-            """
-        )
-    except Exception:
-        # FTS extension may be unavailable on some SQLite builds.
-        pass
+    catalog_rebuild_foods_search_index(cur)
 
 
 def refresh_food_search_row(cur, food_id):
-    try:
-        cur.execute("DELETE FROM foods_search WHERE food_id = ?", (food_id,))
-        cur.execute(
-            """
-            INSERT INTO foods_search (food_id, name, brand, category, barcode, keywords, searchable)
-            SELECT
-                f.id,
-                COALESCE(f.name, ''),
-                COALESCE(f.brand, ''),
-                COALESCE(c.name, ''),
-                COALESCE(f.barcode, ''),
-                COALESCE(f.keywords, ''),
-                TRIM(
-                    COALESCE(f.name, '') || ' ' ||
-                    COALESCE(f.brand, '') || ' ' ||
-                    COALESCE(c.name, '') || ' ' ||
-                    COALESCE(f.barcode, '') || ' ' ||
-                    COALESCE(f.keywords, '')
-                )
-            FROM foods f
-            LEFT JOIN categories c ON f.category_id = c.id
-            WHERE f.id = ?
-            """,
-            (food_id,),
-        )
-    except Exception:
-        pass
+    catalog_refresh_food_search_row(cur, food_id)
 
 
 def ensure_brand_column():
@@ -171,6 +128,7 @@ def ensure_brand_column():
     if _schema_checked:
         return
     conn = sqlite3.connect(DB_PATH)
+    ensure_catalog_schema(conn)
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(foods)")
     cols = [r[1] for r in cur.fetchall()]
@@ -231,45 +189,7 @@ def ensure_brand_column():
         except Exception:
             pass
 
-    cur.execute(
-        """
-    CREATE TABLE IF NOT EXISTS brands (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL
-    )
-    """
-    )
-
     try:
-        cur.execute("SELECT DISTINCT TRIM(brand) FROM foods WHERE brand IS NOT NULL AND TRIM(brand) != ''")
-        for (brand_name,) in cur.fetchall():
-            cur.execute("INSERT OR IGNORE INTO brands(name) VALUES(?)", (brand_name,))
-        conn.commit()
-    except Exception:
-        pass
-
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_foods_name ON foods(name)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_foods_brand ON foods(brand)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_foods_category_id ON foods(category_id)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_foods_barcode ON foods(barcode)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_foods_is_active ON foods(is_active)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_foods_calories ON foods(calories)")
-
-    try:
-        cur.execute(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS foods_search USING fts5(
-                food_id UNINDEXED,
-                name,
-                brand,
-                category,
-                barcode,
-                keywords,
-                searchable,
-                tokenize = 'unicode61 remove_diacritics 2'
-            )
-            """
-        )
         rebuild_foods_search_index(cur)
         conn.commit()
     except Exception:
@@ -280,45 +200,7 @@ def ensure_brand_column():
 
 
 def ensure_exercises_table():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-    CREATE TABLE IF NOT EXISTS exercises (
-        id INTEGER PRIMARY KEY,
-        name TEXT NOT NULL,
-        muscle_group TEXT,
-        equipment TEXT,
-        difficulty TEXT,
-        notes TEXT,
-        exercise_category_id INTEGER
-    )
-    """
-    )
-    cur.execute(
-        """
-    CREATE TABLE IF NOT EXISTS exercise_categories (
-        id INTEGER PRIMARY KEY,
-        name TEXT UNIQUE NOT NULL
-    )
-    """
-    )
-    conn.commit()
-    cur.execute("PRAGMA table_info(exercises)")
-    cols = [r[1] for r in cur.fetchall()]
-    if 'exercise_category_id' not in cols:
-        cur.execute("ALTER TABLE exercises ADD COLUMN exercise_category_id INTEGER")
-        conn.commit()
-    if 'exercise_category_id_2' not in cols:
-        cur.execute("ALTER TABLE exercises ADD COLUMN exercise_category_id_2 INTEGER")
-        conn.commit()
-    if 'video_url' not in cols:
-        cur.execute("ALTER TABLE exercises ADD COLUMN video_url TEXT")
-        conn.commit()
-    if 'machine_url' not in cols:
-        cur.execute("ALTER TABLE exercises ADD COLUMN machine_url TEXT")
-        conn.commit()
-    conn.close()
+    bootstrap_exercise_schema(DB_PATH)
 
 
 def ensure_routines_table():
@@ -1146,16 +1028,8 @@ def get_categories():
     return rows
 
 
-def ensure_default_food_categories():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM categories")
-    count = int(cur.fetchone()[0] or 0)
-    if count == 0:
-        for name in DEFAULT_FOOD_CATEGORIES:
-            cur.execute("INSERT OR IGNORE INTO categories(name) VALUES(?)", (name,))
-        conn.commit()
-    conn.close()
+def ensure_default_food_categories(conn_or_path=DB_PATH):
+    bootstrap_default_food_categories(conn_or_path)
 
 
 def get_brands():
@@ -2243,7 +2117,7 @@ def search_foods_db(query, limit=25, category='', brand='', status='all', kcal_m
 
     candidates = {}
 
-    if q_norm:
+    if q_norm and supports_foods_search_fts():
         fts_q = build_fts_query(query)
         if fts_q:
             try:
@@ -5792,7 +5666,6 @@ class Handler(BaseHTTPRequestHandler):
 
         # Foods page
         if path == '/foods':
-            ensure_default_food_categories()
             foods = get_foods()
             categories = get_categories()
             brands = get_brands()
@@ -9601,6 +9474,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run():
+    print("Using PostgreSQL" if os.environ.get('DATABASE_URL', '').strip() else "Using SQLite", flush=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(STATIC_BASE_DIR, exist_ok=True)
+    os.makedirs(UPLOADS_FOODS_DIR, exist_ok=True)
+    ensure_catalog_schema(DB_PATH)
+    ensure_default_food_categories(DB_PATH)
     ensure_brand_column()
     ensure_exercises_table()
     ensure_routines_table()
@@ -9612,9 +9491,6 @@ def run():
     ensure_client_daily_steps_table()
     ensure_diet_builder_tables()
     ensure_app_settings_table()
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(STATIC_BASE_DIR, exist_ok=True)
-    os.makedirs(UPLOADS_FOODS_DIR, exist_ok=True)
     port = PORT
     server = HTTPServer((HOST, port), Handler)
     print(f"Servidor iniciado en http://{HOST}:{port} — Ctrl-C para detener")

@@ -1,4 +1,4 @@
-import sqlite3
+from db_adapter import sqlite3_compat as sqlite3
 
 
 def _asegurar_columna_status(cur):
