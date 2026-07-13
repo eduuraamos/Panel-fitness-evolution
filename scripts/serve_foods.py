@@ -383,6 +383,9 @@ def ensure_diets_table(conn_or_path=None):
         cur.execute("ALTER TABLE diet_items ADD COLUMN quantity_grams REAL DEFAULT 100")
     if 'quantity_units' not in cols:
         cur.execute("ALTER TABLE diet_items ADD COLUMN quantity_units REAL DEFAULT 1")
+    if 'option_group' not in cols:
+        cur.execute("ALTER TABLE diet_items ADD COLUMN option_group INTEGER DEFAULT 1")
+    cur.execute("UPDATE diet_items SET option_group = 1 WHERE option_group IS NULL OR option_group NOT IN (1,2)")
     conn.commit()
     if should_close:
         conn.close()
@@ -1596,7 +1599,7 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
         )
 
     cur.execute(
-        "SELECT food_id, quantity, note, day_of_week, meal_time, COALESCE(meal_id, 0), COALESCE(quantity_grams, 100), COALESCE(quantity_units, 1) "
+        "SELECT food_id, quantity, note, day_of_week, meal_time, COALESCE(meal_id, 0), COALESCE(quantity_grams, 100), COALESCE(quantity_units, 1), COALESCE(option_group, 1) "
         "FROM diet_items WHERE diet_id = ?",
         (template_diet_id,),
     )
@@ -1604,9 +1607,9 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
     for item in source_items:
         mapped_meal = meal_map.get(item[5]) if item[5] else None
         cur.execute(
-            "INSERT INTO diet_items(diet_id, food_id, quantity, note, day_of_week, meal_time, meal_id, quantity_grams, quantity_units) "
-            "VALUES(?,?,?,?,?,?,?,?,?)",
-            (new_diet_id, item[0], item[1], item[2], item[3], item[4], mapped_meal, item[6], item[7]),
+            "INSERT INTO diet_items(diet_id, food_id, quantity, note, day_of_week, meal_time, meal_id, quantity_grams, quantity_units, option_group) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (new_diet_id, item[0], item[1], item[2], item[3], item[4], mapped_meal, item[6], item[7], item[8]),
         )
 
     cur.execute(
@@ -1912,6 +1915,9 @@ def ensure_diet_builder_tables(conn_or_path=None):
         cur.execute("ALTER TABLE diet_items ADD COLUMN quantity_grams REAL DEFAULT 100")
     if 'quantity_units' not in cols:
         cur.execute("ALTER TABLE diet_items ADD COLUMN quantity_units REAL DEFAULT 1")
+    if 'option_group' not in cols:
+        cur.execute("ALTER TABLE diet_items ADD COLUMN option_group INTEGER DEFAULT 1")
+    cur.execute("UPDATE diet_items SET option_group = 1 WHERE option_group IS NULL OR option_group NOT IN (1,2)")
     conn.commit()
     if should_close:
         conn.close()
@@ -1973,7 +1979,7 @@ def get_diet_builder_data(diet_id):
          SELECT di.id, di.day_of_week, di.meal_id, di.food_id,
              f.name, COALESCE(f.brand,''), di.quantity_grams,
              COALESCE(f.calories,0), COALESCE(f.protein,0), COALESCE(f.fats,0), COALESCE(f.carbs,0),
-             COALESCE(f.nutrition_mode,'per100'), COALESCE(f.per100_unit,'g'), COALESCE(di.quantity_units,1)
+             COALESCE(f.nutrition_mode,'per100'), COALESCE(f.per100_unit,'g'), COALESCE(di.quantity_units,1), COALESCE(di.option_group,1)
         FROM diet_items di
         JOIN foods f ON di.food_id = f.id
         WHERE di.diet_id=? AND di.meal_id IS NOT NULL
@@ -1988,6 +1994,7 @@ def get_diet_builder_data(diet_id):
             'kcal_per100': r[7], 'protein_per100': r[8], 'fat_per100': r[9], 'carbs_per100': r[10],
             'nutrition_mode': r[11] or 'per100', 'per100_unit': r[12] or 'g',
             'units': r[13] if r[13] is not None else 1,
+            'option_group': r[14] if r[14] in (1, 2) else 1,
         })
 
     cur.execute(
@@ -2500,6 +2507,13 @@ def build_diet_pdf(diet_id):
         key = (food, brand)
         if key not in shopping:
             shopping[key] = {'units': {}, 'raw': []}
+        option_group = item.get('option_group')
+        try:
+            option_group = int(option_group or 1)
+        except Exception:
+            option_group = 1
+        if option_group not in (1, 2):
+            option_group = 1
         nutrition_mode = (item.get('nutrition_mode') or 'per100').strip().lower()
         per100_unit = (item.get('per100_unit') or 'g').strip().lower()
         if per100_unit not in ('g', 'ml'):
@@ -2522,13 +2536,16 @@ def build_diet_pdf(diet_id):
                 label += f' {fmt_num(max(units, 1.0))} ud'
             elif grams > 0:
                 label += f' {fmt_num(grams)}{per100_unit}'
+            if option_group == 2:
+                label = f"Opción 2: {label}"
             schedule[meal_name][day].append(label)
 
-            factor = max(units, 1.0) if nutrition_mode == 'unit' else (grams / 100.0)
-            totals_by_day[day]['kcal'] += to_float(item.get('kcal_per100')) * factor
-            totals_by_day[day]['p'] += to_float(item.get('protein_per100')) * factor
-            totals_by_day[day]['f'] += to_float(item.get('fat_per100')) * factor
-            totals_by_day[day]['c'] += to_float(item.get('carbs_per100')) * factor
+            if option_group == 1:
+                factor = max(units, 1.0) if nutrition_mode == 'unit' else (grams / 100.0)
+                totals_by_day[day]['kcal'] += to_float(item.get('kcal_per100')) * factor
+                totals_by_day[day]['p'] += to_float(item.get('protein_per100')) * factor
+                totals_by_day[day]['f'] += to_float(item.get('fat_per100')) * factor
+                totals_by_day[day]['c'] += to_float(item.get('carbs_per100')) * factor
 
     meal_name_set = {m['name'] for m in meals}
     for item in get_diet_items(diet_id):
@@ -7751,17 +7768,17 @@ class Handler(BaseHTTPRequestHandler):
             item_id = int(dup_m.group(1))
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
-            cur.execute("SELECT diet_id, food_id, meal_id, day_of_week, quantity_grams, quantity_units, note FROM diet_items WHERE id=?", (item_id,))
+            cur.execute("SELECT diet_id, food_id, meal_id, day_of_week, quantity_grams, quantity_units, note, COALESCE(option_group,1) FROM diet_items WHERE id=?", (item_id,))
             r = cur.fetchone()
             if not r:
                 conn.close()
                 return self.send_json({'error': 'not found'}, status=404)
-            cur.execute("INSERT INTO diet_items(diet_id, food_id, meal_id, day_of_week, quantity_grams, quantity_units, note) VALUES(?,?,?,?,?,?,?)", r)
+            cur.execute("INSERT INTO diet_items(diet_id, food_id, meal_id, day_of_week, quantity_grams, quantity_units, note, option_group) VALUES(?,?,?,?,?,?,?,?)", r)
             new_id = cur.lastrowid
             conn.commit()
             cur.execute("""SELECT di.id, di.day_of_week, di.meal_id, di.food_id, f.name, COALESCE(f.brand,''), di.quantity_grams,
                                   COALESCE(f.calories,0), COALESCE(f.protein,0), COALESCE(f.fats,0), COALESCE(f.carbs,0),
-                                  COALESCE(f.nutrition_mode,'per100'), COALESCE(f.per100_unit,'g'), COALESCE(di.quantity_units,1)
+                                  COALESCE(f.nutrition_mode,'per100'), COALESCE(f.per100_unit,'g'), COALESCE(di.quantity_units,1), COALESCE(di.option_group,1)
                            FROM diet_items di JOIN foods f ON di.food_id=f.id WHERE di.id=?""", (new_id,))
             r2 = cur.fetchone()
             conn.close()
@@ -7770,7 +7787,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json({'id': r2[0], 'day': r2[1], 'meal_id': r2[2], 'food_id': r2[3],
                                    'food_name': r2[4], 'food_brand': r2[5], 'grams': r2[6] or 100,
                                    'kcal_per100': r2[7], 'protein_per100': r2[8], 'fat_per100': r2[9], 'carbs_per100': r2[10],
-                                   'nutrition_mode': r2[11], 'per100_unit': r2[12], 'units': r2[13] or 1})
+                                   'nutrition_mode': r2[11], 'per100_unit': r2[12], 'units': r2[13] or 1,
+                                   'option_group': r2[14] if r2[14] in (1, 2) else 1})
 
         if bm and 'application/json' in ctype:
             payload = self.read_json() or {}
@@ -7794,11 +7812,17 @@ class Handler(BaseHTTPRequestHandler):
                     day = str(payload.get('day_of_week', '')).strip()
                     grams = float(payload.get('grams', 100) or 100)
                     units = float(payload.get('units', 1) or 1)
+                    try:
+                        option_group = int(payload.get('option_group', 1) or 1)
+                    except Exception:
+                        option_group = 1
+                    if option_group not in (1, 2):
+                        option_group = 1
                     if not food_id or not meal_id:
                         conn.close()
                         return self.send_json({'error': 'food_id and meal_id required'}, status=400)
-                    cur.execute("INSERT INTO diet_items(diet_id, food_id, meal_id, day_of_week, quantity_grams, quantity_units) VALUES(?,?,?,?,?,?)",
-                                (diet_id_i, food_id, meal_id, day, grams, units))
+                    cur.execute("INSERT INTO diet_items(diet_id, food_id, meal_id, day_of_week, quantity_grams, quantity_units, option_group) VALUES(?,?,?,?,?,?,?)",
+                                (diet_id_i, food_id, meal_id, day, grams, units, option_group))
                     item_id = cur.lastrowid
                     cur.execute(
                         "SELECT COALESCE(nutrition_mode,'per100'), COALESCE(per100_unit,'g') FROM foods WHERE id=?",
@@ -7810,6 +7834,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({
                         'id': item_id, 'food_id': food_id, 'meal_id': meal_id, 'day': day,
                         'grams': grams, 'units': units, 'nutrition_mode': fm[0], 'per100_unit': fm[1],
+                        'option_group': option_group,
                     })
                 elif action == 'day_config':
                     day = str(payload.get('day', '')).strip()
@@ -7837,26 +7862,27 @@ class Handler(BaseHTTPRequestHandler):
                     from_day = str(payload.get('from_day', '')).strip()
                     to_day = str(payload.get('to_day', '')).strip()
                     cur.execute("DELETE FROM diet_items WHERE diet_id=? AND day_of_week=? AND meal_id IS NOT NULL", (diet_id_i, to_day))
-                    cur.execute("SELECT food_id, meal_id, quantity_grams, quantity_units, note FROM diet_items WHERE diet_id=? AND day_of_week=? AND meal_id IS NOT NULL", (diet_id_i, from_day))
+                    cur.execute("SELECT food_id, meal_id, quantity_grams, quantity_units, note, COALESCE(option_group,1) FROM diet_items WHERE diet_id=? AND day_of_week=? AND meal_id IS NOT NULL", (diet_id_i, from_day))
                     src = cur.fetchall()
                     new_ids = []
                     for s in src:
-                        cur.execute("INSERT INTO diet_items(diet_id, food_id, meal_id, day_of_week, quantity_grams, quantity_units, note) VALUES(?,?,?,?,?,?,?)",
-                                    (diet_id_i, s[0], s[1], to_day, s[2], s[3], s[4]))
+                        cur.execute("INSERT INTO diet_items(diet_id, food_id, meal_id, day_of_week, quantity_grams, quantity_units, note, option_group) VALUES(?,?,?,?,?,?,?,?)",
+                                    (diet_id_i, s[0], s[1], to_day, s[2], s[3], s[4], s[5]))
                         new_ids.append(cur.lastrowid)
                     conn.commit()
                     new_items = []
                     for nid in new_ids:
                         cur.execute("""SELECT di.id, di.day_of_week, di.meal_id, di.food_id, f.name, COALESCE(f.brand,''), di.quantity_grams,
                                               COALESCE(f.calories,0), COALESCE(f.protein,0), COALESCE(f.fats,0), COALESCE(f.carbs,0),
-                                              COALESCE(f.nutrition_mode,'per100'), COALESCE(f.per100_unit,'g'), COALESCE(di.quantity_units,1)
+                                              COALESCE(f.nutrition_mode,'per100'), COALESCE(f.per100_unit,'g'), COALESCE(di.quantity_units,1), COALESCE(di.option_group,1)
                                        FROM diet_items di JOIN foods f ON di.food_id=f.id WHERE di.id=?""", (nid,))
                         r = cur.fetchone()
                         if r:
                             new_items.append({'id': r[0], 'day': r[1], 'meal_id': r[2], 'food_id': r[3],
                                               'food_name': r[4], 'food_brand': r[5], 'grams': r[6] or 100,
                                               'kcal_per100': r[7], 'protein_per100': r[8], 'fat_per100': r[9], 'carbs_per100': r[10],
-                                              'nutrition_mode': r[11], 'per100_unit': r[12], 'units': r[13] or 1})
+                                              'nutrition_mode': r[11], 'per100_unit': r[12], 'units': r[13] or 1,
+                                              'option_group': r[14] if r[14] in (1, 2) else 1})
                     conn.close()
                     return self.send_json({'items': new_items})
                 elif action == 'supplements':
