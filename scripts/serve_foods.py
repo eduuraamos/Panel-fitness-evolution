@@ -115,6 +115,14 @@ def build_fts_query(query):
     return ' '.join([f'"{t}"*' for t in terms])
 
 
+def _coerce_schema_connection(conn_or_path=None):
+    if conn_or_path is None:
+        conn_or_path = DB_PATH
+    if hasattr(conn_or_path, 'cursor'):
+        return conn_or_path, False
+    return sqlite3.connect(conn_or_path), True
+
+
 def rebuild_foods_search_index(cur):
     catalog_rebuild_foods_search_index(cur)
 
@@ -123,11 +131,11 @@ def refresh_food_search_row(cur, food_id):
     catalog_refresh_food_search_row(cur, food_id)
 
 
-def ensure_brand_column():
+def ensure_brand_column(conn_or_path=None):
     global _schema_checked
     if _schema_checked:
         return
-    conn = sqlite3.connect(DB_PATH)
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     ensure_catalog_schema(conn)
     cur = conn.cursor()
     cur.execute("PRAGMA table_info(foods)")
@@ -195,16 +203,17 @@ def ensure_brand_column():
     except Exception:
         pass
 
-    conn.close()
+    if should_close:
+        conn.close()
     _schema_checked = True
 
 
-def ensure_exercises_table():
-    bootstrap_exercise_schema(DB_PATH)
+def ensure_exercises_table(conn_or_path=None):
+    bootstrap_exercise_schema(conn_or_path or DB_PATH)
 
 
-def ensure_routines_table():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_routines_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute(
         """
@@ -270,7 +279,8 @@ def ensure_routines_table():
             (idx, day_name),
         )
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
 def get_default_routine_days():
@@ -310,8 +320,8 @@ def get_routine_days(routine_id):
     return rows
 
 
-def ensure_diets_table():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_diets_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute(
         """
@@ -367,12 +377,19 @@ def ensure_diets_table():
         cur.execute("ALTER TABLE diet_items ADD COLUMN day_of_week TEXT")
     if 'meal_time' not in cols:
         cur.execute("ALTER TABLE diet_items ADD COLUMN meal_time TEXT")
+    if 'meal_id' not in cols:
+        cur.execute("ALTER TABLE diet_items ADD COLUMN meal_id INTEGER")
+    if 'quantity_grams' not in cols:
+        cur.execute("ALTER TABLE diet_items ADD COLUMN quantity_grams REAL DEFAULT 100")
+    if 'quantity_units' not in cols:
+        cur.execute("ALTER TABLE diet_items ADD COLUMN quantity_units REAL DEFAULT 1")
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
-def ensure_app_settings_table():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_app_settings_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute(
         """
@@ -387,7 +404,8 @@ def ensure_app_settings_table():
         ('diet_instructions_template', DEFAULT_DIET_INSTRUCTIONS_TEMPLATE),
     )
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
 def get_app_setting(key, default_value=''):
@@ -417,8 +435,8 @@ def get_diet_instructions_template():
     return (value or '').strip() or DEFAULT_DIET_INSTRUCTIONS_TEMPLATE
 
 
-def ensure_clients_table():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_clients_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute(
         """
@@ -463,11 +481,12 @@ def ensure_clients_table():
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_email ON clients(email)")
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
-def ensure_payment_plans_table():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_payment_plans_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute(
         """
@@ -484,11 +503,12 @@ def ensure_payment_plans_table():
     """
     )
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
-def ensure_client_history_tables():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_client_history_tables(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute(
         """
@@ -548,11 +568,12 @@ def ensure_client_history_tables():
         """
     )
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
-def ensure_fasting_weights_table():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_fasting_weights_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute(
         """
@@ -570,11 +591,12 @@ def ensure_fasting_weights_table():
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_fasting_weights_client_date ON client_fasting_weights(client_id, date_text)")
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
-def ensure_client_daily_steps_table():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_client_daily_steps_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute(
         """
@@ -592,7 +614,8 @@ def ensure_client_daily_steps_table():
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_client_daily_steps_client_date ON client_daily_steps(client_id, date_text)")
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
 def get_fasting_weight_slots():
@@ -1834,8 +1857,8 @@ def get_food_options():
     return rows
 
 
-def ensure_diet_builder_tables():
-    conn = sqlite3.connect(DB_PATH)
+def ensure_diet_builder_tables(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
     cur = conn.cursor()
     cur.execute("""
     CREATE TABLE IF NOT EXISTS diet_meals (
@@ -1890,7 +1913,8 @@ def ensure_diet_builder_tables():
     if 'quantity_units' not in cols:
         cur.execute("ALTER TABLE diet_items ADD COLUMN quantity_units REAL DEFAULT 1")
     conn.commit()
-    conn.close()
+    if should_close:
+        conn.close()
 
 
 def get_diet_builder_data(diet_id):

@@ -1209,13 +1209,31 @@ document.getElementById('srch').addEventListener('input', function() {
 
 async function doSearch(q) {
   try {
-    const foods = await (await fetch('/api/foods/search?q=' + encodeURIComponent(q))).json();
-    SR = foods;
-    if (!foods.length) {
+    const res = await fetch('/api/foods?q=' + encodeURIComponent(q));
+    const raw = await res.text();
+    let foods = [];
+    try {
+      foods = JSON.parse(raw);
+    } catch (_e) {
+      throw new Error('Respuesta no JSON en /api/foods: ' + raw.slice(0, 140));
+    }
+    if (!Array.isArray(foods)) {
+      throw new Error('Formato inesperado de /api/foods (se esperaba array)');
+    }
+    SR = foods.map((f) => ({
+      ...f,
+      kcal: parseFoodNumber(f.kcal ?? f.calories),
+      fat: parseFoodNumber(f.fat ?? f.fats),
+      protein: parseFoodNumber(f.protein),
+      carbs: parseFoodNumber(f.carbs),
+      nutrition_mode: f.nutrition_mode || 'per100',
+      per100_unit: f.per100_unit || 'g',
+    }));
+    if (!SR.length) {
       document.getElementById('sres').innerHTML = '<div class="mempty">Sin resultados para "' + esc(q) + '"<br><br><button class="btn" onclick="toggleQuickCreate(true)">Crear "' + esc(q) + '" ahora</button></div>';
       return;
     }
-    document.getElementById('sres').innerHTML = foods.map((f, i) => `
+    document.getElementById('sres').innerHTML = SR.map((f, i) => `
       <div class="fresult" onclick="selFood(${i})">
         <div class="fiinfo">
           <div class="finame">${esc(f.name)}${f.brand ? ` <span style="color:var(--c400);font-weight:400">(${esc(f.brand)})</span>` : ''}</div>
@@ -1228,7 +1246,10 @@ async function doSearch(q) {
         </div>
         <div class="fikcal">${rnd(f.kcal)} kcal</div>
       </div>`).join('');
-  } catch (e) { toast('Error en búsqueda'); }
+  } catch (e) {
+    console.error('Error en búsqueda de alimentos', e);
+    toast('Error en búsqueda');
+  }
 }
 
 async function addFoodToCurrentCell(food) {

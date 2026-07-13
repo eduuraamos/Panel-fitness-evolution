@@ -114,14 +114,26 @@ class PostgresCursor:
         self._raw.close()
 
     def _refresh_lastrowid(self):
+        probe = None
         try:
             probe = self._conn_wrapper._raw.cursor()
-            probe.execute("SELECT LASTVAL()")
-            row = probe.fetchone()
-            probe.close()
-            self.lastrowid = int(row[0]) if row and row[0] is not None else None
+            probe.execute("SAVEPOINT copilot_lastrowid")
+            try:
+                probe.execute("SELECT LASTVAL()")
+                row = probe.fetchone()
+                self.lastrowid = int(row[0]) if row and row[0] is not None else None
+            finally:
+                # Ensure any LASTVAL error does not poison the caller transaction.
+                probe.execute("ROLLBACK TO SAVEPOINT copilot_lastrowid")
+                probe.execute("RELEASE SAVEPOINT copilot_lastrowid")
         except Exception:
             self.lastrowid = None
+        finally:
+            if probe is not None:
+                try:
+                    probe.close()
+                except Exception:
+                    pass
 
     def _build_pragma_table_info_rows(self, table_name):
         cur = self._conn_wrapper._raw.cursor()

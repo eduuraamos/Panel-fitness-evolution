@@ -51,6 +51,7 @@ def ensure_catalog_schema(conn_or_path):
             keywords TEXT,
             is_active INTEGER DEFAULT 1,
             is_verified INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'pending',
             calories REAL,
             protein REAL,
             carbs REAL,
