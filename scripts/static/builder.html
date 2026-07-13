@@ -156,9 +156,6 @@ body.modal-open{overflow:hidden}
 /* Cell total */
 .ctot{font-size:.65rem;color:var(--c400);border-top:1px dashed var(--c200);padding-top:4px;margin-top:1px}
 .ctot strong{color:var(--c600)}
-.ctot.opt2{border-top:none;padding-top:0;margin-top:0}
-.optsec{display:flex;flex-direction:column;gap:5px;padding:5px;border:1px dashed var(--c200);border-radius:8px;background:#fcfdff}
-.optlabel{font-size:.64rem;font-weight:800;color:var(--c500);text-transform:uppercase;letter-spacing:.06em}
 /* Add button */
 .addbtn{
   display:flex;align-items:center;justify-content:center;gap:4px;
@@ -167,7 +164,6 @@ body.modal-open{overflow:hidden}
   cursor:pointer;transition:all .14s;width:100%;margin-top:1px
 }
 .addbtn:hover{border-color:var(--b);background:var(--bll);color:var(--b)}
-.addbtn.alt{font-size:.7rem;padding:3px 8px;border-color:var(--c200);color:var(--c500)}
 /* Add meal row */
 .amrow{grid-column:1/-1;border-top:var(--border);padding:10px 14px;position:sticky;left:0}
 /* Overlay */
@@ -511,7 +507,7 @@ body.modal-open{overflow:hidden}
 const DAYS = ['Lunes','Martes','Miércoles','Jueves','Viernes','Sábado','Domingo'];
 const DIET_ID = parseInt(new URLSearchParams(location.search).get('diet_id'));
 let S = { diet:{}, meals:[], dayConfigs:{}, items:[], supplements:[] };
-let PC = { day:'', mealId:0, optionGroup:1 };   // pending cell for food search
+let PC = { day:'', mealId:0 };   // pending cell for food search
 let activeDay = null;             // day panel open for
 let ST = null;                    // search debounce timer
 let SR = [];                      // last search results
@@ -602,16 +598,11 @@ function cloneItemForClip(i) {
     carbs_per100: i.carbs_per100,
     nutrition_mode: i.nutrition_mode,
     per100_unit: i.per100_unit,
-    option_group: normalizeOptionGroup(i.option_group),
   };
 }
 function parseFoodNumber(v) {
   const n = parseFloat(v);
   return Number.isFinite(n) ? n : 0;
-}
-function normalizeOptionGroup(v) {
-  const n = parseInt(v, 10);
-  return n === 2 ? 2 : 1;
 }
 function hydrateCreatedItem(created, sourceItem) {
   created.food_name = sourceItem.food_name || created.food_name || '';
@@ -622,7 +613,6 @@ function hydrateCreatedItem(created, sourceItem) {
   created.carbs_per100 = sourceItem.carbs_per100 || created.carbs_per100 || 0;
   created.nutrition_mode = sourceItem.nutrition_mode || created.nutrition_mode || 'per100';
   created.per100_unit = sourceItem.per100_unit || created.per100_unit || 'g';
-  created.option_group = normalizeOptionGroup(sourceItem.option_group || created.option_group || 1);
   created.units = sourceItem.units || created.units || 1;
   created.grams = sourceItem.grams || created.grams || 100;
   return created;
@@ -682,11 +672,7 @@ function refreshMacroCalculator() {
 // ── Load ──────────────────────────────────────────────────────────────────────
 async function load() {
   const d = await api('GET', '/api/diet_builder/' + DIET_ID);
-  S.diet = d.diet;
-  S.meals = d.meals;
-  S.dayConfigs = d.day_configs;
-  S.items = (d.items || []).map(it => ({ ...it, option_group: normalizeOptionGroup(it.option_group) }));
-  S.supplements = d.supplements || [];
+  S.diet = d.diet; S.meals = d.meals; S.dayConfigs = d.day_configs; S.items = d.items; S.supplements = d.supplements || [];
   S.instructionsTemplate = d.instructions_template || '';
   await loadQuickCategories();
   document.getElementById('ttitle').textContent = 'Constructor de dieta';
@@ -732,31 +718,12 @@ function calcItem(i) {
     c:(i.carbs_per100||0)*factor,
   };
 }
-function calcCell(day, mid, optionGroup) {
-  const opt = normalizeOptionGroup(optionGroup || 1);
-  return S.items.filter(i => i.day === day && i.meal_id === mid && normalizeOptionGroup(i.option_group) === opt)
+function calcCell(day, mid) {
+  return S.items.filter(i=>i.day===day&&i.meal_id===mid)
     .reduce((a,i)=>{const c=calcItem(i);return{kcal:a.kcal+c.kcal,p:a.p+c.p,f:a.f+c.f,c:a.c+c.c};},{kcal:0,p:0,f:0,c:0});
 }
 function calcDay(day) {
-  return S.meals.reduce((a,m)=>{const c=calcCell(day,m.id,1);return{kcal:a.kcal+c.kcal,p:a.p+c.p,f:a.f+c.f,c:a.c+c.c};},{kcal:0,p:0,f:0,c:0});
-}
-
-function renderFoodCard(item) {
-  const mode = (item.nutrition_mode || 'per100');
-  const baseUnit = item.per100_unit === 'ml' ? 'ml' : 'g';
-  const qtyValue = mode === 'unit' ? (item.units || 1) : (item.grams || 100);
-  const qtyLabel = mode === 'unit' ? `${qtyValue} ud` : `${qtyValue}${baseUnit}`;
-  return `<div class="fc" id="fc${item.id}" draggable="true" ondragstart="onFoodDragStart(${item.id},event)" ondragend="onFoodDragEnd(event)">
-    <div class="fcn">${esc(item.food_name)}</div>
-    ${item.food_brand ? `<div class="fcb">${esc(item.food_brand)}</div>` : ''}
-    <div class="fcg" id="fg${item.id}" onclick="startEG(${item.id},this)">${qtyLabel}</div>
-    <div class="fcm"><strong>${rnd(calcItem(item).kcal)}</strong> kcal · P:<strong>${fd(calcItem(item).p)}</strong> · G:<strong>${fd(calcItem(item).f)}</strong> · C:<strong>${fd(calcItem(item).c)}</strong></div>
-    <div class="fca">
-      <button class="ib" onclick="openFoodEditByItem(${item.id})" title="Editar alimento">✎</button>
-      <button class="ib" onclick="dupItem(${item.id})" title="Duplicar">⧉</button>
-      <button class="ib rd" onclick="delItem(${item.id})" title="Eliminar">✕</button>
-    </div>
-  </div>`;
+  return S.meals.reduce((a,m)=>{const c=calcCell(day,m.id);return{kcal:a.kcal+c.kcal,p:a.p+c.p,f:a.f+c.f,c:a.c+c.c};},{kcal:0,p:0,f:0,c:0});
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -822,27 +789,32 @@ function render() {
     </div>`;
 
     for (const day of DAYS) {
-      const itemsOpt1 = S.items.filter(i => i.day === day && i.meal_id === meal.id && normalizeOptionGroup(i.option_group) === 1);
-      const itemsOpt2 = S.items.filter(i => i.day === day && i.meal_id === meal.id && normalizeOptionGroup(i.option_group) === 2);
-      const ct1 = calcCell(day, meal.id, 1);
-      const ct2 = calcCell(day, meal.id, 2);
+      const items = S.items.filter(i => i.day === day && i.meal_id === meal.id);
+      const ct = calcCell(day, meal.id);
       h += `<div class="cell" ondragover="onCellDragOver(event)" ondrop="onCellDrop('${day}',${meal.id},event)" ondragleave="onCellDragLeave(event)">`;
 
-      h += `<div class="optsec"><div class="optlabel">Opción 1</div>`;
-      for (const item of itemsOpt1) h += renderFoodCard(item);
-      if (itemsOpt1.length > 0) {
-        h += `<div class="ctot"><strong>${rnd(ct1.kcal)}</strong> kcal · P:<strong>${fd(ct1.p)}</strong> · G:<strong>${fd(ct1.f)}</strong> · C:<strong>${fd(ct1.c)}</strong></div>`;
+      for (const item of items) {
+        const mode = (item.nutrition_mode || 'per100');
+        const baseUnit = item.per100_unit === 'ml' ? 'ml' : 'g';
+        const qtyLabel = mode === 'unit' ? `${item.units || 1} ud` : `${item.grams}${baseUnit}`;
+        h += `<div class="fc" id="fc${item.id}" draggable="true" ondragstart="onFoodDragStart(${item.id},event)" ondragend="onFoodDragEnd(event)">
+          <div class="fcn">${esc(item.food_name)}</div>
+          ${item.food_brand ? `<div class="fcb">${esc(item.food_brand)}</div>` : ''}
+          <div class="fcg" id="fg${item.id}" onclick="startEG(${item.id},this)">${qtyLabel}</div>
+          <div class="fcm"><strong>${rnd(calcItem(item).kcal)}</strong> kcal · P:<strong>${fd(calcItem(item).p)}</strong> · G:<strong>${fd(calcItem(item).f)}</strong> · C:<strong>${fd(calcItem(item).c)}</strong></div>
+          <div class="fca">
+            <button class="ib" onclick="openFoodEditByItem(${item.id})" title="Editar alimento">✎</button>
+            <button class="ib" onclick="dupItem(${item.id})" title="Duplicar">⧉</button>
+            <button class="ib rd" onclick="delItem(${item.id})" title="Eliminar">✕</button>
+          </div>
+        </div>`;
       }
-      h += `<button class="addbtn" onclick="openSM('${day}',${meal.id},1)"><span style="font-size:1rem;line-height:1">+</span> Añadir en opción 1</button></div>`;
 
-      if (itemsOpt2.length > 0) {
-        h += `<div class="optsec"><div class="optlabel">Opción 2</div>`;
-        for (const item of itemsOpt2) h += renderFoodCard(item);
-        h += `<div class="ctot opt2"><strong>${rnd(ct2.kcal)}</strong> kcal · P:<strong>${fd(ct2.p)}</strong> · G:<strong>${fd(ct2.f)}</strong> · C:<strong>${fd(ct2.c)}</strong></div>`;
-        h += `<button class="addbtn alt" onclick="openSM('${day}',${meal.id},2)">+ Añadir en opción 2</button></div>`;
-      } else {
-        h += `<button class="addbtn alt" onclick="openSM('${day}',${meal.id},2)">+ Añadir opción 2</button>`;
+      if (items.length > 0) {
+        h += `<div class="ctot"><strong>${rnd(ct.kcal)}</strong> kcal · P:<strong>${fd(ct.p)}</strong> · G:<strong>${fd(ct.f)}</strong> · C:<strong>${fd(ct.c)}</strong></div>`;
       }
+
+      h += `<button class="addbtn" onclick="openSM('${day}',${meal.id})"><span style="font-size:1rem;line-height:1">+</span> Añadir alimento</button>`;
       h += '</div>';
     }
   }
@@ -951,11 +923,10 @@ async function dupItem(id) {
 }
 
 // ── Search modal ──────────────────────────────────────────────────────────────
-function openSM(day, mid, optionGroup) {
-  const opt = normalizeOptionGroup(optionGroup || 1);
-  PC = { day, mealId: mid, optionGroup: opt };
+function openSM(day, mid) {
+  PC = { day, mealId: mid };
   const meal = S.meals.find(m => m.id === mid);
-  document.getElementById('sm-cell').textContent = day + ' · ' + (meal ? meal.name : '') + ' · Opción ' + opt;
+  document.getElementById('sm-cell').textContent = day + ' · ' + (meal ? meal.name : '');
   document.getElementById('srch').value = '';
   document.getElementById('quick-create').style.display = 'none';
   document.getElementById('qc-name').value = '';
@@ -1249,6 +1220,7 @@ async function doSearch(q) {
     if (!Array.isArray(foods)) {
       throw new Error('Formato inesperado de /api/foods (se esperaba array)');
     }
+    const qNorm = (q || '').trim().toLowerCase();
     SR = foods.map((f) => ({
       ...f,
       kcal: parseFoodNumber(f.kcal ?? f.calories),
@@ -1257,7 +1229,13 @@ async function doSearch(q) {
       carbs: parseFoodNumber(f.carbs),
       nutrition_mode: f.nutrition_mode || 'per100',
       per100_unit: f.per100_unit || 'g',
-    }));
+    })).filter((f) => {
+      if (!qNorm) return true;
+      const name = String(f.name || '').toLowerCase();
+      const brand = String(f.brand || '').toLowerCase();
+      const category = String(f.category || '').toLowerCase();
+      return name.includes(qNorm) || brand.includes(qNorm) || category.includes(qNorm);
+    }).slice(0, 120);
     if (!SR.length) {
       document.getElementById('sres').innerHTML = '<div class="mempty">Sin resultados para "' + esc(q) + '"<br><br><button class="btn" onclick="toggleQuickCreate(true)">Crear "' + esc(q) + '" ahora</button></div>';
       return;
@@ -1283,14 +1261,12 @@ async function doSearch(q) {
 
 async function addFoodToCurrentCell(food) {
   const isUnit = food.nutrition_mode === 'unit';
-  const optionGroup = normalizeOptionGroup(PC.optionGroup || 1);
   const ni = await api('POST', '/api/diet_builder/' + DIET_ID + '/items', {
     food_id: food.id,
     meal_id: PC.mealId,
     day_of_week: PC.day,
     grams: isUnit ? 100 : 100,
     units: isUnit ? 1 : 1,
-    option_group: optionGroup,
   });
   ni.food_name = food.name;
   ni.food_brand = food.brand || '';
@@ -1300,23 +1276,20 @@ async function addFoodToCurrentCell(food) {
   ni.carbs_per100 = parseFoodNumber(food.carbs);
   ni.nutrition_mode = food.nutrition_mode || 'per100';
   ni.per100_unit = food.per100_unit || 'g';
-  ni.option_group = optionGroup;
   ni.units = ni.units || 1;
   S.items.push(ni);
 }
 
-async function addFoodToCell(food, day, mealId, gramsOverride, unitsOverride, optionGroupOverride) {
+async function addFoodToCell(food, day, mealId, gramsOverride, unitsOverride) {
   const isUnit = food.nutrition_mode === 'unit';
   const grams = parseFoodNumber(gramsOverride);
   const units = parseFoodNumber(unitsOverride);
-  const optionGroup = normalizeOptionGroup(optionGroupOverride || food.option_group || 1);
   const ni = await api('POST', '/api/diet_builder/' + DIET_ID + '/items', {
     food_id: food.id,
     meal_id: mealId,
     day_of_week: day,
     grams: grams > 0 ? grams : 100,
     units: units > 0 ? units : (isUnit ? 1 : 1),
-    option_group: optionGroup,
   });
   ni.food_name = food.name;
   ni.food_brand = food.brand || '';
@@ -1326,7 +1299,6 @@ async function addFoodToCell(food, day, mealId, gramsOverride, unitsOverride, op
   ni.carbs_per100 = parseFoodNumber(food.carbs);
   ni.nutrition_mode = food.nutrition_mode || 'per100';
   ni.per100_unit = food.per100_unit || 'g';
-  ni.option_group = optionGroup;
   ni.units = ni.units || 1;
   ni.day = day;
   ni.meal_id = mealId;
@@ -1348,7 +1320,6 @@ function onFoodDragStart(itemId, evt) {
     per100_unit: item.per100_unit,
     units: item.units,
     grams: item.grams,
-    option_group: normalizeOptionGroup(item.option_group),
   };
   evt.dataTransfer.effectAllowed = 'copy';
   evt.dataTransfer.setData('text/plain', String(itemId));
@@ -1392,8 +1363,7 @@ async function onCellDrop(day, mealId, evt) {
       carbs: DRAG.carbs,
       nutrition_mode: DRAG.nutrition_mode,
       per100_unit: DRAG.per100_unit,
-      option_group: normalizeOptionGroup(DRAG.option_group),
-    }, day, mealId, DRAG.grams, DRAG.units, DRAG.option_group);
+    }, day, mealId, DRAG.grams, DRAG.units);
     render();
     toast('Alimento pegado en ' + day + ' ✓');
   } catch (e) {
@@ -1758,7 +1728,6 @@ async function pasteDayClip(targetDay) {
         day_of_week: targetDay,
         grams: src.grams || 100,
         units: src.units || 1,
-        option_group: normalizeOptionGroup(src.option_group),
       });
       created.day = targetDay;
       S.items.push(hydrateCreatedItem(created, src));
@@ -1803,7 +1772,6 @@ async function pasteMealRow(targetMealId) {
         day_of_week: src.day,
         grams: src.grams || 100,
         units: src.units || 1,
-        option_group: normalizeOptionGroup(src.option_group),
       });
       created.meal_id = targetMealId;
       created.day = src.day;

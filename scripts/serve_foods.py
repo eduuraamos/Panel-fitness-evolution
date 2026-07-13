@@ -2507,13 +2507,6 @@ def build_diet_pdf(diet_id):
         key = (food, brand)
         if key not in shopping:
             shopping[key] = {'units': {}, 'raw': []}
-        option_group = item.get('option_group')
-        try:
-            option_group = int(option_group or 1)
-        except Exception:
-            option_group = 1
-        if option_group not in (1, 2):
-            option_group = 1
         nutrition_mode = (item.get('nutrition_mode') or 'per100').strip().lower()
         per100_unit = (item.get('per100_unit') or 'g').strip().lower()
         if per100_unit not in ('g', 'ml'):
@@ -2536,16 +2529,13 @@ def build_diet_pdf(diet_id):
                 label += f' {fmt_num(max(units, 1.0))} ud'
             elif grams > 0:
                 label += f' {fmt_num(grams)}{per100_unit}'
-            if option_group == 2:
-                label = f"Opción 2: {label}"
             schedule[meal_name][day].append(label)
 
-            if option_group == 1:
-                factor = max(units, 1.0) if nutrition_mode == 'unit' else (grams / 100.0)
-                totals_by_day[day]['kcal'] += to_float(item.get('kcal_per100')) * factor
-                totals_by_day[day]['p'] += to_float(item.get('protein_per100')) * factor
-                totals_by_day[day]['f'] += to_float(item.get('fat_per100')) * factor
-                totals_by_day[day]['c'] += to_float(item.get('carbs_per100')) * factor
+            factor = max(units, 1.0) if nutrition_mode == 'unit' else (grams / 100.0)
+            totals_by_day[day]['kcal'] += to_float(item.get('kcal_per100')) * factor
+            totals_by_day[day]['p'] += to_float(item.get('protein_per100')) * factor
+            totals_by_day[day]['f'] += to_float(item.get('fat_per100')) * factor
+            totals_by_day[day]['c'] += to_float(item.get('carbs_per100')) * factor
 
     meal_name_set = {m['name'] for m in meals}
     for item in get_diet_items(diet_id):
