@@ -1,9 +1,89 @@
 import os
 import re
 import sqlite3 as _sqlite3
+import threading
+import time
 
 
 _connection_log_emitted = False
+_perf_seq = 0
+_pg_pool = None
+_pool_lock = threading.Lock()
+_request_state = threading.local()
+
+
+def _db_perf_enabled():
+    return os.environ.get("DB_PERF_LOG", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _next_perf_seq():
+    global _perf_seq
+    _perf_seq += 1
+    return _perf_seq
+
+
+def _trim_sql(sql, limit=180):
+    compact = re.sub(r"\s+", " ", str(sql or "")).strip()
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3] + "..."
+
+
+def _log_perf(event, **fields):
+    if not _db_perf_enabled():
+        return
+    payload = " ".join([f"{key}={fields[key]}" for key in sorted(fields)])
+    print(f"[db-perf] event={event} {payload}".strip(), flush=True)
+
+
+def _request_depth():
+    return int(getattr(_request_state, "depth", 0) or 0)
+
+
+def _request_conn_wrapper():
+    return getattr(_request_state, "conn_wrapper", None)
+
+
+def _set_request_conn_wrapper(conn_wrapper):
+    _request_state.conn_wrapper = conn_wrapper
+
+
+def _clear_request_conn_wrapper():
+    if hasattr(_request_state, "conn_wrapper"):
+        delattr(_request_state, "conn_wrapper")
+
+
+def _is_request_active():
+    return _request_depth() > 0
+
+
+def _pool_bounds():
+    minconn = int(os.environ.get("PG_POOL_MIN", "1") or 1)
+    maxconn = int(os.environ.get("PG_POOL_MAX", "8") or 8)
+    if minconn < 1:
+        minconn = 1
+    if maxconn < minconn:
+        maxconn = minconn
+    return minconn, maxconn
+
+
+def _get_postgres_pool(dsn):
+    global _pg_pool
+    if _pg_pool is not None:
+        return _pg_pool
+    with _pool_lock:
+        if _pg_pool is not None:
+            return _pg_pool
+        try:
+            from psycopg2.pool import ThreadedConnectionPool
+        except Exception as exc:
+            raise RuntimeError(
+                "DATABASE_URL está definida pero psycopg2 no está instalado. "
+                "Añade psycopg2-binary a requirements.txt"
+            ) from exc
+        minconn, maxconn = _pool_bounds()
+        _pg_pool = ThreadedConnectionPool(minconn, maxconn, dsn)
+        return _pg_pool
 
 
 def _env_database_url():
@@ -65,31 +145,67 @@ class PostgresCursor:
         self._conn_wrapper = conn_wrapper
         self._raw = raw_cursor
         self._buffer = None
-        self.lastrowid = None
+        self._lastrowid_value = None
+        self._lastrowid_pending = False
+        self._last_query_seq = None
+        self._last_query_sql = ""
+        self._last_query_started_at = None
 
     def execute(self, sql, params=None):
         params = params or ()
         table_name = _parse_pragma_table_info(sql)
         if table_name:
             self._buffer = self._build_pragma_table_info_rows(table_name)
-            self.lastrowid = None
+            self._lastrowid_value = None
+            self._lastrowid_pending = False
             return self
 
         translated = _translate_sql(sql)
         self._buffer = None
-        self.lastrowid = None
+        self._lastrowid_value = None
+        self._lastrowid_pending = False
+        query_seq = _next_perf_seq()
+        started_at = time.perf_counter()
         self._raw.execute(translated, params)
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        self._last_query_seq = query_seq
+        self._last_query_sql = translated
+        self._last_query_started_at = started_at
+        _log_perf(
+            "execute",
+            engine="postgres",
+            query_id=query_seq,
+            duration_ms=f"{elapsed_ms:.3f}",
+            params=len(params),
+            sql=_trim_sql(translated),
+        )
 
         if translated.lstrip().upper().startswith("INSERT"):
-            self._refresh_lastrowid()
+            self._lastrowid_pending = True
 
         return self
 
     def executemany(self, sql, seq_of_params):
         translated = _translate_sql(sql)
         self._buffer = None
-        self.lastrowid = None
-        self._raw.executemany(translated, seq_of_params)
+        self._lastrowid_value = None
+        self._lastrowid_pending = False
+        batch = list(seq_of_params)
+        query_seq = _next_perf_seq()
+        started_at = time.perf_counter()
+        self._raw.executemany(translated, batch)
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        self._last_query_seq = query_seq
+        self._last_query_sql = translated
+        self._last_query_started_at = started_at
+        _log_perf(
+            "executemany",
+            engine="postgres",
+            query_id=query_seq,
+            duration_ms=f"{elapsed_ms:.3f}",
+            batch_size=len(batch),
+            sql=_trim_sql(translated),
+        )
         return self
 
     def fetchone(self):
@@ -97,18 +213,52 @@ class PostgresCursor:
             if not self._buffer:
                 return None
             return self._buffer.pop(0)
-        return self._raw.fetchone()
+        started_at = time.perf_counter()
+        row = self._raw.fetchone()
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        _log_perf(
+            "fetchone",
+            engine="postgres",
+            query_id=self._last_query_seq or 0,
+            duration_ms=f"{elapsed_ms:.3f}",
+            has_row=1 if row is not None else 0,
+            sql=_trim_sql(self._last_query_sql),
+        )
+        return row
 
     def fetchall(self):
         if self._buffer is not None:
             rows = self._buffer
             self._buffer = []
             return rows
-        return self._raw.fetchall()
+        started_at = time.perf_counter()
+        rows = self._raw.fetchall()
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        _log_perf(
+            "fetchall",
+            engine="postgres",
+            query_id=self._last_query_seq or 0,
+            duration_ms=f"{elapsed_ms:.3f}",
+            rowcount=len(rows),
+            sql=_trim_sql(self._last_query_sql),
+        )
+        return rows
 
     @property
     def rowcount(self):
         return self._raw.rowcount
+
+    @property
+    def lastrowid(self):
+        if self._lastrowid_pending:
+            self._refresh_lastrowid()
+            self._lastrowid_pending = False
+        return self._lastrowid_value
+
+    @lastrowid.setter
+    def lastrowid(self, value):
+        self._lastrowid_value = value
+        self._lastrowid_pending = False
 
     def close(self):
         self._raw.close()
@@ -121,13 +271,13 @@ class PostgresCursor:
             try:
                 probe.execute("SELECT LASTVAL()")
                 row = probe.fetchone()
-                self.lastrowid = int(row[0]) if row and row[0] is not None else None
+                self._lastrowid_value = int(row[0]) if row and row[0] is not None else None
             finally:
                 # Ensure any LASTVAL error does not poison the caller transaction.
                 probe.execute("ROLLBACK TO SAVEPOINT copilot_lastrowid")
                 probe.execute("RELEASE SAVEPOINT copilot_lastrowid")
         except Exception:
-            self.lastrowid = None
+            self._lastrowid_value = None
         finally:
             if probe is not None:
                 try:
@@ -177,8 +327,11 @@ class PostgresCursor:
 
 
 class PostgresConnection:
-    def __init__(self, raw_conn):
+    def __init__(self, raw_conn, pool=None, managed_by_request=False):
         self._raw = raw_conn
+        self._pool = pool
+        self._managed_by_request = managed_by_request
+        self._returned = False
 
     def cursor(self):
         return PostgresCursor(self, self._raw.cursor())
@@ -190,36 +343,90 @@ class PostgresConnection:
         self._raw.rollback()
 
     def close(self):
-        self._raw.close()
+        if self._managed_by_request:
+            return
+        if self._returned:
+            return
+        try:
+            self._raw.rollback()
+        except Exception:
+            pass
+        if self._pool is not None:
+            self._pool.putconn(self._raw)
+        else:
+            self._raw.close()
+        self._returned = True
 
 
 class SqliteCompatModule:
     def __init__(self):
         self.Error = Exception
 
+    def begin_request(self):
+        _request_state.depth = _request_depth() + 1
+
+    def end_request(self):
+        depth = _request_depth()
+        if depth <= 0:
+            return
+        depth -= 1
+        _request_state.depth = depth
+        if depth > 0:
+            return
+
+        conn_wrapper = _request_conn_wrapper()
+        if conn_wrapper is None:
+            _clear_request_conn_wrapper()
+            return
+
+        _clear_request_conn_wrapper()
+        if is_postgres_enabled():
+            try:
+                conn_wrapper._raw.rollback()
+            except Exception:
+                pass
+            if conn_wrapper._pool is not None and not conn_wrapper._returned:
+                conn_wrapper._pool.putconn(conn_wrapper._raw)
+                conn_wrapper._returned = True
+            return
+
+        try:
+            conn_wrapper.close()
+        except Exception:
+            pass
+
     def connect(self, db_path):
         global _connection_log_emitted
         if is_postgres_enabled():
             dsn = _env_database_url()
-            try:
-                import psycopg2
-            except Exception as exc:
-                raise RuntimeError(
-                    "DATABASE_URL está definida pero psycopg2 no está instalado. "
-                    "Añade psycopg2-binary a requirements.txt"
-                ) from exc
-            raw = psycopg2.connect(dsn)
+            request_conn = _request_conn_wrapper() if _is_request_active() else None
+            if request_conn is not None:
+                _log_perf("reuse", engine="postgres", scope="request")
+                return request_conn
+
+            pool = _get_postgres_pool(dsn)
+            started_at = time.perf_counter()
+            raw = pool.getconn()
+            elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+            _log_perf("connect", engine="postgres", duration_ms=f"{elapsed_ms:.3f}")
             if not _connection_log_emitted:
                 print("Using PostgreSQL", flush=True)
                 print("First connection opened with PostgreSQL", flush=True)
                 _connection_log_emitted = True
-            return PostgresConnection(raw)
+            conn_wrapper = PostgresConnection(raw, pool=pool, managed_by_request=_is_request_active())
+            if _is_request_active():
+                _set_request_conn_wrapper(conn_wrapper)
+            return conn_wrapper
 
         if not _connection_log_emitted:
             print("Using SQLite", flush=True)
             print("First connection opened with SQLite", flush=True)
             _connection_log_emitted = True
-        return _sqlite3.connect(str(db_path))
+        started_at = time.perf_counter()
+        conn = _sqlite3.connect(str(db_path))
+        elapsed_ms = (time.perf_counter() - started_at) * 1000.0
+        _log_perf("connect", engine="sqlite", duration_ms=f"{elapsed_ms:.3f}")
+        return conn
 
 
 sqlite3_compat = SqliteCompatModule()

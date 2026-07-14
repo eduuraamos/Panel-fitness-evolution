@@ -45,6 +45,11 @@ PORT = int(os.environ.get("PORT", "8005"))
 CLIENT_PORTAL_SECRET = os.environ.get("CLIENT_PORTAL_SECRET", "nutrition-app-client-portal")
 CLIENT_PORTAL_COOKIE = "client_portal_session"
 CLIENT_PORTAL_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+ADMIN_PORTAL_SECRET = os.environ.get("ADMIN_PORTAL_SECRET", "nutrition-app-admin-portal")
+ADMIN_PORTAL_COOKIE = "admin_portal_session"
+ADMIN_PORTAL_SESSION_TTL_SECONDS = 60 * 60 * 24 * 30
+ADMIN_PORTAL_USERNAME = os.environ.get("ADMIN_PORTAL_USERNAME", "admin")
+ADMIN_PORTAL_PASSWORD = os.environ.get("ADMIN_PORTAL_PASSWORD", "change-me-now")
 
 # migrations
 _schema_checked = False
@@ -371,6 +376,9 @@ def ensure_diets_table(conn_or_path=None):
         cur.execute("ALTER TABLE diets ADD COLUMN client_age INTEGER DEFAULT 0")
     if 'client_instructions' not in diet_cols:
         cur.execute("ALTER TABLE diets ADD COLUMN client_instructions TEXT")
+    if 'display_number' not in diet_cols:
+        cur.execute("ALTER TABLE diets ADD COLUMN display_number INTEGER")
+    cur.execute("UPDATE diets SET display_number = id WHERE display_number IS NULL")
     cur.execute("PRAGMA table_info(diet_items)")
     cols = [r[1] for r in cur.fetchall()]
     if 'day_of_week' not in cols:
@@ -405,6 +413,14 @@ def ensure_app_settings_table(conn_or_path=None):
     cur.execute(
         "INSERT OR IGNORE INTO app_settings(key, value) VALUES(?, ?)",
         ('diet_instructions_template', DEFAULT_DIET_INSTRUCTIONS_TEMPLATE),
+    )
+    cur.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value) VALUES(?, ?)",
+        ('admin_portal_username', str(ADMIN_PORTAL_USERNAME or 'admin').strip() or 'admin'),
+    )
+    cur.execute(
+        "INSERT OR IGNORE INTO app_settings(key, value) VALUES(?, ?)",
+        ('admin_portal_password_hash', hash_admin_password(str(ADMIN_PORTAL_PASSWORD or 'change-me-now'))),
     )
     conn.commit()
     if should_close:
@@ -1184,7 +1200,6 @@ def get_routine_items(routine_id):
 
 
 def get_diets():
-    ensure_diet_display_number_column()
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
@@ -1217,6 +1232,18 @@ def get_clients():
     rows = cur.fetchall()
     conn.close()
     return rows
+
+
+def get_client_by_id(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, name, phone, COALESCE(email, ''), birthdate, COALESCE(height_cm, 0), COALESCE(weight_kg, 0), COALESCE(objectives, ''), COALESCE(plan_start_date, ''), COALESCE(plan_end_date, ''), COALESCE(plan_amount, 0), COALESCE(plan_notes, ''), created_at FROM clients WHERE id = ?",
+        (int(client_id),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return row
 
 
 def normalize_login_identifier(value):
@@ -1395,6 +1422,96 @@ def parse_client_portal_session_token(token):
     return int(client_id_raw)
 
 
+def hash_admin_password(password):
+    raw = str(password or '')
+    if not raw:
+        return ''
+    salt = uuid.uuid4().hex
+    digest = hashlib.sha256((salt + '|' + raw).encode('utf-8')).hexdigest()
+    return f"sha256${salt}${digest}"
+
+
+def verify_admin_password(password, stored_hash):
+    raw = str(password or '')
+    saved = str(stored_hash or '').strip()
+    if not raw or not saved:
+        return False
+    parts = saved.split('$', 2)
+    if len(parts) != 3 or parts[0] != 'sha256':
+        return False
+    _algo, salt, expected = parts
+    digest = hashlib.sha256((salt + '|' + raw).encode('utf-8')).hexdigest()
+    return hmac.compare_digest(digest, expected)
+
+
+def get_admin_portal_username():
+    value = str(get_app_setting('admin_portal_username', ADMIN_PORTAL_USERNAME) or '').strip()
+    if value:
+        return value
+    fallback = str(ADMIN_PORTAL_USERNAME or '').strip()
+    return fallback or 'admin'
+
+
+def get_admin_portal_password_hash():
+    return str(get_app_setting('admin_portal_password_hash', '') or '').strip()
+
+
+def verify_admin_portal_credentials(username, password):
+    entered_user = str(username or '').strip()
+    entered_pass = str(password or '')
+    expected_user = get_admin_portal_username()
+    if not entered_user or not entered_pass or not expected_user:
+        return False
+    if not hmac.compare_digest(entered_user, expected_user):
+        return False
+
+    stored_hash = get_admin_portal_password_hash()
+    if stored_hash:
+        return verify_admin_password(entered_pass, stored_hash)
+
+    # Backward compatibility fallback when hash setting is not yet initialized.
+    expected_pass = str(ADMIN_PORTAL_PASSWORD or '')
+    return bool(expected_pass) and hmac.compare_digest(entered_pass, expected_pass)
+
+
+def make_admin_portal_session_token(username):
+    issued_at = int(time.time())
+    user = str(username or '').strip()
+    payload = f"{user}:{issued_at}"
+    signature = hmac.new(
+        ADMIN_PORTAL_SECRET.encode('utf-8'),
+        payload.encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{payload}:{signature}"
+
+
+def parse_admin_portal_session_token(token):
+    parts = str(token or '').split(':')
+    if len(parts) != 3:
+        return None
+    username, issued_at_raw, signature = parts
+    if not username or not issued_at_raw.isdigit():
+        return None
+
+    payload = f"{username}:{issued_at_raw}"
+    expected_signature = hmac.new(
+        ADMIN_PORTAL_SECRET.encode('utf-8'),
+        payload.encode('utf-8'),
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected_signature):
+        return None
+
+    issued_at = int(issued_at_raw)
+    if (int(time.time()) - issued_at) > ADMIN_PORTAL_SESSION_TTL_SECONDS:
+        return None
+
+    if not hmac.compare_digest(username, get_admin_portal_username()):
+        return None
+    return username
+
+
 def get_client_diet_history(client_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -1553,7 +1670,6 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
     copy_name = f"{template_name} · {client_name}".strip() if client_name else f"{template_name} · Cliente"
     copy_client_name = src_client_name or client_name or ''
 
-    ensure_diet_display_number_column()
     cur.execute(
         "INSERT INTO diets(name, description, client_instructions, is_template, client_diet_name, client_weight_kg, client_name, client_height_cm, client_age, created_at) "
         "VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))",
@@ -1573,55 +1689,78 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
     cur.execute("UPDATE diets SET display_number = ? WHERE id = ?", (new_diet_id, new_diet_id))
 
     cur.execute(
-        "SELECT id, name, order_index FROM diet_meals WHERE diet_id = ? ORDER BY order_index, id",
-        (template_diet_id,),
+        """
+        INSERT INTO diet_meals(diet_id, name, order_index)
+        SELECT ?, name, order_index
+        FROM diet_meals
+        WHERE diet_id = ?
+        ORDER BY order_index, id
+        """,
+        (new_diet_id, template_diet_id),
     )
-    source_meals = cur.fetchall()
-    meal_map = {}
-    for old_meal_id, meal_name, order_index in source_meals:
-        cur.execute(
-            "INSERT INTO diet_meals(diet_id, name, order_index) VALUES(?,?,?)",
-            (new_diet_id, meal_name, order_index),
-        )
-        meal_map[old_meal_id] = cur.lastrowid
 
     cur.execute(
-        "SELECT day_of_week, is_training, goal_kcal, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier "
-        "FROM diet_day_config WHERE diet_id = ?",
-        (template_diet_id,),
-    )
-    day_rows = cur.fetchall()
-    for r in day_rows:
-        cur.execute(
-            "INSERT INTO diet_day_config(diet_id, day_of_week, is_training, goal_kcal, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            (new_diet_id, r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9]),
+        """
+        INSERT INTO diet_day_config(
+            diet_id, day_of_week, is_training, goal_kcal, goal_protein, goal_fat,
+            goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier
         )
+        SELECT ?, day_of_week, is_training, goal_kcal, goal_protein, goal_fat,
+               goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier
+        FROM diet_day_config
+        WHERE diet_id = ?
+        """,
+        (new_diet_id, template_diet_id),
+    )
 
     cur.execute(
-        "SELECT food_id, quantity, note, day_of_week, meal_time, COALESCE(meal_id, 0), COALESCE(quantity_grams, 100), COALESCE(quantity_units, 1), COALESCE(option_group, 1) "
-        "FROM diet_items WHERE diet_id = ?",
-        (template_diet_id,),
-    )
-    source_items = cur.fetchall()
-    for item in source_items:
-        mapped_meal = meal_map.get(item[5]) if item[5] else None
-        cur.execute(
-            "INSERT INTO diet_items(diet_id, food_id, quantity, note, day_of_week, meal_time, meal_id, quantity_grams, quantity_units, option_group) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (new_diet_id, item[0], item[1], item[2], item[3], item[4], mapped_meal, item[6], item[7], item[8]),
+        """
+        WITH src_meals AS (
+            SELECT id AS old_meal_id, ROW_NUMBER() OVER (ORDER BY order_index, id) AS rn
+            FROM diet_meals
+            WHERE diet_id = ?
+        ),
+        dst_meals AS (
+            SELECT id AS new_meal_id, ROW_NUMBER() OVER (ORDER BY order_index, id) AS rn
+            FROM diet_meals
+            WHERE diet_id = ?
+        ),
+        meal_map AS (
+            SELECT src_meals.old_meal_id, dst_meals.new_meal_id
+            FROM src_meals
+            JOIN dst_meals ON dst_meals.rn = src_meals.rn
         )
+        INSERT INTO diet_items(
+            diet_id, food_id, quantity, note, day_of_week, meal_time,
+            meal_id, quantity_grams, quantity_units, option_group
+        )
+        SELECT
+            ?,
+            di.food_id,
+            di.quantity,
+            di.note,
+            di.day_of_week,
+            di.meal_time,
+            meal_map.new_meal_id,
+            COALESCE(di.quantity_grams, 100),
+            COALESCE(di.quantity_units, 1),
+            COALESCE(di.option_group, 1)
+        FROM diet_items di
+        LEFT JOIN meal_map ON meal_map.old_meal_id = di.meal_id
+        WHERE di.diet_id = ?
+        """,
+        (template_diet_id, new_diet_id, new_diet_id, template_diet_id),
+    )
 
     cur.execute(
-        "SELECT supplement_name, intake_time, dose, notes, COALESCE(order_index, 0) FROM diet_supplements WHERE diet_id = ? ORDER BY COALESCE(order_index, 0), id",
-        (template_diet_id,),
+        """
+        INSERT INTO diet_supplements(diet_id, supplement_name, intake_time, dose, notes, order_index)
+        SELECT ?, supplement_name, intake_time, dose, notes, COALESCE(order_index, 0)
+        FROM diet_supplements
+        WHERE diet_id = ?
+        """,
+        (new_diet_id, template_diet_id),
     )
-    source_supplements = cur.fetchall()
-    for s in source_supplements:
-        cur.execute(
-            "INSERT INTO diet_supplements(diet_id, supplement_name, intake_time, dose, notes, order_index) VALUES(?,?,?,?,?,?)",
-            (new_diet_id, s[0], s[1], s[2], s[3], s[4]),
-        )
 
     conn.commit()
     conn.close()
@@ -3394,10 +3533,20 @@ def logo_html():
 
 def home_link():
     logo = logo_html()
-    return f'<div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:28px;">{logo}<a href="/" style="display:inline-flex;align-items:center;justify-content:center;padding:14px 20px;background:#ffffff;border:1px solid #d8dde6;border-radius:14px;box-shadow:0 12px 30px rgba(16,19,24,.06);color:#101318;font-weight:700;text-decoration:none;min-width:220px;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease;">Panel principal</a></div>'
+    return f'<div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-bottom:28px;">{logo}<a href="/admin" style="display:inline-flex;align-items:center;justify-content:center;padding:14px 20px;background:#ffffff;border:1px solid #d8dde6;border-radius:14px;box-shadow:0 12px 30px rgba(16,19,24,.06);color:#101318;font-weight:700;text-decoration:none;min-width:220px;transition:transform .18s ease,border-color .18s ease,box-shadow .18s ease;">Panel principal</a></div>'
 
 
 class Handler(BaseHTTPRequestHandler):
+    def is_admin_authenticated(self):
+        cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+        token = cookies.get(ADMIN_PORTAL_COOKIE, '')
+        return parse_admin_portal_session_token(token) is not None
+
+    def redirect_admin_login(self, next_path='/admin'):
+        self.send_response(303)
+        self.send_header('Location', '/admin_login?next=' + urllib.parse.quote(next_path or '/admin'))
+        self.end_headers()
+
     def read_json(self):
         length = int(self.headers.get('Content-Length', 0))
         if length == 0:
@@ -3465,6 +3614,141 @@ class Handler(BaseHTTPRequestHandler):
                 body = f.read()
             self.send_response(200)
             self.send_header('Content-Type', ctype)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path in ('/', '/index.html'):
+            self.send_response(303)
+            self.send_header('Location', '/client_login')
+            self.end_headers()
+            return
+
+        if path == '/admin_logout':
+            self.send_response(303)
+            self.send_header('Set-Cookie', f'{ADMIN_PORTAL_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
+            self.send_header('Location', '/admin_login?msg=' + urllib.parse.quote('Sesión cerrada'))
+            self.end_headers()
+            return
+
+        if path == '/admin_login':
+            if self.is_admin_authenticated():
+                self.send_response(303)
+                self.send_header('Location', '/admin')
+                self.end_headers()
+                return
+            msg = q.get('msg', [''])[0] if 'msg' in q else ''
+            next_path = q.get('next', ['/admin'])[0] if 'next' in q else '/admin'
+            page = f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Acceso administrador</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:560px;margin:0 auto;padding:28px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
+        h1{{margin:0 0 10px;font-size:2rem;}}
+        p{{margin:0 0 18px;color:#6d7480;}}
+        form{{display:grid;gap:12px;}}
+        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
+        button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
+        .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
+        .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
+        .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            <h1>Acceso nutricionista</h1>
+            <p>Solo personal autorizado puede entrar al panel maestro.</p>
+            {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
+            <form method="post" action="/admin_login">
+                <input type="hidden" name="next" value="{html.escape(next_path or '/admin')}" />
+                <input name="username" placeholder="Usuario" required />
+                <input name="password" type="password" placeholder="Contraseña" required />
+                <button type="submit">Entrar al panel</button>
+            </form>
+            <div class="helper"><a href="/client_login">Ir al acceso de clientes</a></div>
+        </div>
+    </div>
+</body>
+</html>
+            '''
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        public_get_exact = {
+            '/client_register', '/client_onboarding', '/client_login', '/client_app', '/client_logout',
+            '/api/client_fasting_weight', '/api/client_daily_steps',
+        }
+        public_get_prefixes = ('/static/', '/export_diet_pdf', '/export_routine_pdf')
+        is_public_get = path in public_get_exact or any(path.startswith(pref) for pref in public_get_prefixes)
+        if not is_public_get and not self.is_admin_authenticated():
+            next_path = path + (('?' + parsed.query) if parsed.query else '')
+            self.redirect_admin_login(next_path)
+            return
+
+        if path == '/admin_security':
+            msg = q.get('msg', [''])[0] if 'msg' in q else ''
+            current_username = get_admin_portal_username()
+            page = f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Seguridad administrador</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:700px;margin:0 auto;padding:28px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
+        h1{{margin:0 0 10px;font-size:2rem;}}
+        p{{margin:0 0 18px;color:#6d7480;}}
+        form{{display:grid;gap:12px;}}
+        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
+        button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
+        .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
+        .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
+        .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            <h1>Seguridad de administrador</h1>
+            <p>Modifica aquí tu usuario y contraseña para el panel maestro.</p>
+            {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
+            <form method="post" action="/admin_security">
+                <input name="current_username" value="{html.escape(current_username)}" readonly />
+                <input name="current_password" type="password" placeholder="Contraseña actual" required />
+                <input name="new_username" value="{html.escape(current_username)}" placeholder="Nuevo usuario" required />
+                <input name="new_password" type="password" placeholder="Nueva contraseña (mínimo 6)" />
+                <input name="new_password_confirm" type="password" placeholder="Repite nueva contraseña" />
+                <button type="submit">Guardar credenciales</button>
+            </form>
+            <div class="helper"><a href="/admin">← Volver al panel</a></div>
+        </div>
+    </div>
+</body>
+</html>
+            '''
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
             self.send_header('Content-Length', str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -4075,7 +4359,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(data)
 
         # UI: dashboard
-        if path in ('/', '/index.html'):
+        if path == '/admin':
             logo = logo_html()
             dash = '''
 <!doctype html>
@@ -4105,6 +4389,7 @@ class Handler(BaseHTTPRequestHandler):
       __LOGO_PLACEHOLDER__
     <h1>🧭 Panel</h1>
       <p class="sub">Accede rápido a tus bases de datos y a las APIs del sistema.</p>
+            <p class="sub" style="margin-top:10px;"><a href="/admin_logout" style="color:#101318;font-weight:700;text-decoration:none;">Cerrar sesión</a></p>
     </section>
 
     <section class="grid">
@@ -4132,6 +4417,10 @@ class Handler(BaseHTTPRequestHandler):
                 <h2>📲 App de cliente</h2>
                 <p>Acceso del cliente para consultar dieta activa y rutina activa.</p>
             </a>
+            <a class="card" href="/admin_security">
+                <h2>🔐 Seguridad administrador</h2>
+                <p>Cambia usuario y contraseña del panel maestro.</p>
+            </a>
     </section>
 
     <div class="footer">
@@ -4154,7 +4443,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/diets':
             diets = get_diets()
             clients = get_clients()
-            foods = get_food_options()
+            foods = []
             diet_id = q.get('diet_id', [''])[0]
             selected_diet = None
             diet_items = []
@@ -4166,6 +4455,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     selected_diet = next((d for d in diets if d[0] == diet_id_i), None)
                     if selected_diet:
+                        foods = get_food_options()
                         diet_items = get_diet_items(diet_id_i)
 
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
@@ -4922,6 +5212,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/client_profile':
             cid = q.get('id', [''])[0]
             assign_diet_id = q.get('assign_diet_id', [''])[0]
+            selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
             try:
                 cid_i = int(cid)
             except Exception:
@@ -4929,25 +5220,34 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            rows = [r for r in get_clients() if r[0] == cid_i]
-            if not rows:
+            c = get_client_by_id(cid_i)
+            if not c:
                 self.send_response(404)
                 self.end_headers()
                 return
 
-            c = rows[0]
             _, name, phone, email, birthdate, _height_cm, _weight_kg, objectives, _plan_start_date, _plan_end_date, _plan_amount, _plan_notes, _created_at = c
             age = calculate_age(birthdate)
-            diets = get_diets()
-            routines_all = get_routines()
-            diet_history = get_client_diet_history(cid_i)
-            training_history = get_client_training_history(cid_i)
+            active_diet = get_active_client_diet(cid_i)
+            active_routine = get_active_client_routine(cid_i)
+            daily_steps_goal = get_client_daily_steps_goal(cid_i)
+            diets = []
+            routines_all = []
+            diet_history = []
+            training_history = []
 
             selected_diet_id = ''
             try:
                 selected_diet_id = str(int(assign_diet_id)) if assign_diet_id else ''
             except Exception:
                 selected_diet_id = ''
+
+            if selected_section == 'diet':
+                diets = get_diets()
+                diet_history = get_client_diet_history(cid_i)
+            elif selected_section == 'training':
+                routines_all = get_routines()
+                training_history = get_client_training_history(cid_i)
 
             diet_options = ''.join([
                 f'<option value="{d[0]}" {"selected" if selected_diet_id == str(d[0]) else ""}>{html.escape(d[1])}</option>'
@@ -5061,14 +5361,17 @@ class Handler(BaseHTTPRequestHandler):
             old_diets_html = ''.join([diet_item_html(h) for h in old_diets]) or '<p class="empty">Sin dietas antiguas.</p>'
             active_training_html = ''.join([training_item_html(h) for h in active_training]) or '<p class="empty">Sin entrenamientos activos.</p>'
             old_training_html = ''.join([training_item_html(h) for h in old_training]) or '<p class="empty">Sin entrenamientos antiguos.</p>'
-            fasting_weights_html = render_fasting_weights_panel(cid_i, panel_id=f'fw-admin-{cid_i}', include_client_id=True)
-            daily_steps_goal = get_client_daily_steps_goal(cid_i)
-            daily_steps_html = render_client_daily_steps_panel(
-                cid_i,
-                panel_id=f'steps-admin-{cid_i}',
-                include_client_id=True,
-                daily_goal=daily_steps_goal,
-            )
+            fasting_weights_html = ''
+            daily_steps_html = ''
+            if selected_section == 'weight':
+                fasting_weights_html = render_fasting_weights_panel(cid_i, panel_id=f'fw-admin-{cid_i}', include_client_id=True)
+            if selected_section == 'steps':
+                daily_steps_html = render_client_daily_steps_panel(
+                    cid_i,
+                    panel_id=f'steps-admin-{cid_i}',
+                    include_client_id=True,
+                    daily_goal=daily_steps_goal,
+                )
 
             diet_panel_html = f'''
             <section class="panel">
@@ -5157,8 +5460,8 @@ class Handler(BaseHTTPRequestHandler):
                 'steps': 'Objetivo y seguimiento de pasos diarios.',
             }
             section_status = {
-                'diet': 'Activa' if active_diets else 'Sin dieta activa',
-                'training': 'Activa' if active_training else 'Sin entrenamiento activo',
+                'diet': 'Activa' if active_diet else 'Sin dieta activa',
+                'training': 'Activa' if active_routine else 'Sin entrenamiento activo',
                 'weight': 'Seguimiento activo',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
             }
@@ -5169,7 +5472,6 @@ class Handler(BaseHTTPRequestHandler):
                 'steps': steps_panel_html,
             }
 
-            selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
             if selected_section not in section_content:
                 selected_section = ''
 
@@ -7416,6 +7718,10 @@ class Handler(BaseHTTPRequestHandler):
         if 'application/json' not in ctype:
             return self.send_json({'error': 'Content-Type must be application/json'}, status=415)
 
+        public_put_paths = {'/api/client_fasting_weight', '/api/client_daily_steps'}
+        if path not in public_put_paths and not self.is_admin_authenticated():
+            return self.send_json({'error': 'unauthorized'}, status=401)
+
         payload = self.read_json() or {}
 
         if path == '/api/client_fasting_weight':
@@ -7671,6 +7977,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
+        if not self.is_admin_authenticated():
+            return self.send_json({'error': 'unauthorized'}, status=401)
+
         if path.startswith('/api/foods/'):
             try:
                 fid = int(path.split('/')[-1])
@@ -7750,6 +8059,11 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         ctype = self.headers.get('Content-Type', '')
+
+        public_post_paths = {'/client_login', '/client_register', '/client_onboarding', '/admin_login'}
+        if path not in public_post_paths and not self.is_admin_authenticated():
+            self.redirect_admin_login(path)
+            return
 
         # Diet builder JSON API
         bm = re.match(r'^/api/diet_builder/(\d+)/(meals|items|day_config|copy_day|supplements)$', path)
@@ -8015,6 +8329,77 @@ class Handler(BaseHTTPRequestHandler):
         def get(field, default=''):
             return params.get(field, [default])[0]
 
+        if path == '/admin_login':
+            username = get('username').strip()
+            password = get('password').strip()
+            next_path = get('next').strip() or '/admin'
+            if not next_path.startswith('/'):
+                next_path = '/admin'
+
+            if not verify_admin_portal_credentials(username, password):
+                self.send_response(303)
+                self.send_header(
+                    'Location',
+                    '/admin_login?msg=' + urllib.parse.quote('Credenciales inválidas') + '&next=' + urllib.parse.quote(next_path),
+                )
+                self.end_headers()
+                return
+
+            token = make_admin_portal_session_token(username)
+            self.send_response(303)
+            self.send_header(
+                'Set-Cookie',
+                f'{ADMIN_PORTAL_COOKIE}={urllib.parse.quote(token)}; Path=/; Max-Age={ADMIN_PORTAL_SESSION_TTL_SECONDS}; HttpOnly; SameSite=Lax',
+            )
+            self.send_header('Location', next_path)
+            self.end_headers()
+            return
+
+        if path == '/admin_security':
+            current_password = get('current_password').strip()
+            new_username = get('new_username').strip()
+            new_password = get('new_password').strip()
+            new_password_confirm = get('new_password_confirm').strip()
+            current_username = get_admin_portal_username()
+
+            if not verify_admin_portal_credentials(current_username, current_password):
+                self.send_response(303)
+                self.send_header('Location', '/admin_security?msg=' + urllib.parse.quote('Contraseña actual incorrecta'))
+                self.end_headers()
+                return
+
+            if not new_username:
+                self.send_response(303)
+                self.send_header('Location', '/admin_security?msg=' + urllib.parse.quote('El usuario no puede estar vacío'))
+                self.end_headers()
+                return
+
+            if new_password and len(new_password) < 6:
+                self.send_response(303)
+                self.send_header('Location', '/admin_security?msg=' + urllib.parse.quote('La nueva contraseña debe tener al menos 6 caracteres'))
+                self.end_headers()
+                return
+
+            if new_password != new_password_confirm:
+                self.send_response(303)
+                self.send_header('Location', '/admin_security?msg=' + urllib.parse.quote('Las nuevas contraseñas no coinciden'))
+                self.end_headers()
+                return
+
+            set_app_setting('admin_portal_username', new_username)
+            if new_password:
+                set_app_setting('admin_portal_password_hash', hash_admin_password(new_password))
+
+            refreshed_token = make_admin_portal_session_token(new_username)
+            self.send_response(303)
+            self.send_header(
+                'Set-Cookie',
+                f'{ADMIN_PORTAL_COOKIE}={urllib.parse.quote(refreshed_token)}; Path=/; Max-Age={ADMIN_PORTAL_SESSION_TTL_SECONDS}; HttpOnly; SameSite=Lax',
+            )
+            self.send_header('Location', '/admin_security?msg=' + urllib.parse.quote('Credenciales actualizadas'))
+            self.end_headers()
+            return
+
         if path == '/client_login':
             identifier = get('identifier').strip()
             password = get('password').strip()
@@ -8247,7 +8632,6 @@ class Handler(BaseHTTPRequestHandler):
             new_diet_id = None
             if name:
                 default_instructions = get_diet_instructions_template()
-                ensure_diet_display_number_column()
                 conn = sqlite3.connect(DB_PATH)
                 cur = conn.cursor()
                 cur.execute(
@@ -8307,12 +8691,24 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == '/assign_client_diet':
+            assign_perf_enabled = str(os.environ.get('ASSIGN_DIET_PERF_LOG', '')).strip().lower() in ('1', 'true', 'yes', 'on')
+
+            def assign_mark(stage_name, stage_started_at):
+                if not assign_perf_enabled:
+                    return
+                elapsed_ms = (time.perf_counter() - stage_started_at) * 1000.0
+                print(
+                    f"[assign-diet] stage={stage_name} ms={elapsed_ms:.3f} client_id={client_id} template_diet_id={template_diet_id}",
+                    flush=True,
+                )
+
             client_id = get('client_id').strip()
             template_diet_id = get('diet_id').strip()
             start_date = get('start_date').strip()
             end_date = get('end_date').strip()
             notes = get('notes').strip()
             return_to = get('return_to').strip() or '/clients'
+            assign_t0 = time.perf_counter()
             try:
                 client_id_i = int(client_id)
                 template_diet_id_i = int(template_diet_id)
@@ -8321,28 +8717,63 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Location', '/clients?msg=' + urllib.parse.quote('No se pudo asignar la dieta'))
                 self.end_headers()
                 return
+            assign_mark('parse_ids', assign_t0)
 
-            client_rows = [r for r in get_clients() if r[0] == client_id_i]
-            client_name = client_rows[0][1] if client_rows else ''
+            lookup_t0 = time.perf_counter()
+            client_row = get_client_by_id(client_id_i)
+            client_name = client_row[1] if client_row else ''
+            assign_mark('client_lookup', lookup_t0)
+
+            clone_t0 = time.perf_counter()
             assigned_diet_id = clone_diet_template_for_client(template_diet_id_i, client_name)
+            assign_mark('clone_template', clone_t0)
             if not assigned_diet_id:
                 self.send_response(303)
                 self.send_header('Location', '/clients?msg=' + urllib.parse.quote('No se pudo clonar la plantilla'))
                 self.end_headers()
                 return
 
+            tx_t0 = time.perf_counter()
             conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE client_diet_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), date('now')) WHERE client_id = ? AND is_active = 1",
-                (client_id_i,),
-            )
-            cur.execute(
-                "INSERT INTO client_diet_history(client_id, diet_id, template_diet_id, start_date, end_date, is_active, notes, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))",
-                (client_id_i, assigned_diet_id, template_diet_id_i, start_date or None, end_date or None, 1, notes or None),
-            )
-            conn.commit()
-            conn.close()
+            try:
+                cur = conn.cursor()
+                deactivate_t0 = time.perf_counter()
+                cur.execute(
+                    "UPDATE client_diet_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), CAST(date('now') AS TEXT)) WHERE client_id = ? AND is_active = 1",
+                    (client_id_i,),
+                )
+                assign_mark('deactivate_active_history', deactivate_t0)
+                history_insert_t0 = time.perf_counter()
+                cur.execute(
+                    "INSERT INTO client_diet_history(client_id, diet_id, template_diet_id, start_date, end_date, is_active, notes, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))",
+                    (client_id_i, assigned_diet_id, template_diet_id_i, start_date or None, end_date or None, 1, notes or None),
+                )
+                assign_mark('insert_history', history_insert_t0)
+                commit_t0 = time.perf_counter()
+                conn.commit()
+                assign_mark('commit_history_tx', commit_t0)
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                try:
+                    cleanup_conn = sqlite3.connect(DB_PATH)
+                    cleanup_cur = cleanup_conn.cursor()
+                    cleanup_cur.execute("DELETE FROM diet_supplements WHERE diet_id = ?", (assigned_diet_id,))
+                    cleanup_cur.execute("DELETE FROM diet_items WHERE diet_id = ?", (assigned_diet_id,))
+                    cleanup_cur.execute("DELETE FROM diet_day_config WHERE diet_id = ?", (assigned_diet_id,))
+                    cleanup_cur.execute("DELETE FROM diet_meals WHERE diet_id = ?", (assigned_diet_id,))
+                    cleanup_cur.execute("DELETE FROM diets WHERE id = ?", (assigned_diet_id,))
+                    cleanup_conn.commit()
+                    cleanup_conn.close()
+                except Exception:
+                    pass
+                raise
+            finally:
+                conn.close()
+            assign_mark('history_transaction_total', tx_t0)
+            assign_mark('request_total', assign_t0)
             location = return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Dieta asignada')
             self.send_response(303)
             self.send_header('Location', location)
@@ -8360,7 +8791,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header('Location', '/diets?msg=' + urllib.parse.quote('Número inválido'))
                 self.end_headers()
                 return
-            ensure_diet_display_number_column()
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute("UPDATE diets SET display_number = ? WHERE id = ?", (display_number_i, did_i))
@@ -8384,7 +8814,7 @@ class Handler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
-                "UPDATE client_diet_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), date('now')) WHERE id = ?",
+                "UPDATE client_diet_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), CAST(date('now') AS TEXT)) WHERE id = ?",
                 (history_id_i,),
             )
             conn.commit()
@@ -8420,7 +8850,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             cur.execute(
-                "UPDATE client_diet_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), date('now')) WHERE client_id = ? AND is_active = 1 AND id <> ?",
+                "UPDATE client_diet_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), CAST(date('now') AS TEXT)) WHERE client_id = ? AND is_active = 1 AND id <> ?",
                 (client_id_i, history_id_i),
             )
             cur.execute(
@@ -8531,33 +8961,52 @@ class Handler(BaseHTTPRequestHandler):
                 template_routine_id_i = routine_id_i
 
             conn = sqlite3.connect(DB_PATH)
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE client_training_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), date('now')) WHERE client_id = ? AND is_active = 1",
-                (client_id_i,),
-            )
-            cur.execute(
-                """
-                INSERT INTO client_training_history(
-                    client_id, exercise_id, routine_id, template_routine_id, training_name,
-                    start_date, end_date, is_active, notes, created_at
+            try:
+                cur = conn.cursor()
+                cur.execute(
+                    "UPDATE client_training_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), CAST(date('now') AS TEXT)) WHERE client_id = ? AND is_active = 1",
+                    (client_id_i,),
                 )
-                VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))
-                """,
-                (
-                    client_id_i,
-                    exercise_id_i,
-                    assigned_routine_id_i,
-                    template_routine_id_i,
-                    training_name or None,
-                    start_date or None,
-                    end_date or None,
-                    1,
-                    notes or None,
-                ),
-            )
-            conn.commit()
-            conn.close()
+                cur.execute(
+                    """
+                    INSERT INTO client_training_history(
+                        client_id, exercise_id, routine_id, template_routine_id, training_name,
+                        start_date, end_date, is_active, notes, created_at
+                    )
+                    VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))
+                    """,
+                    (
+                        client_id_i,
+                        exercise_id_i,
+                        assigned_routine_id_i,
+                        template_routine_id_i,
+                        training_name or None,
+                        start_date or None,
+                        end_date or None,
+                        1,
+                        notes or None,
+                    ),
+                )
+                conn.commit()
+            except Exception:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                if assigned_routine_id_i:
+                    try:
+                        cleanup_conn = sqlite3.connect(DB_PATH)
+                        cleanup_cur = cleanup_conn.cursor()
+                        cleanup_cur.execute("DELETE FROM routine_items WHERE routine_id = ?", (assigned_routine_id_i,))
+                        cleanup_cur.execute("DELETE FROM routine_days WHERE routine_id = ?", (assigned_routine_id_i,))
+                        cleanup_cur.execute("DELETE FROM routines WHERE id = ?", (assigned_routine_id_i,))
+                        cleanup_conn.commit()
+                        cleanup_conn.close()
+                    except Exception:
+                        pass
+                raise
+            finally:
+                conn.close()
             assigned_label = 'Rutina asignada' if assigned_routine_id_i else 'Entrenamiento asignado'
             location = return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote(assigned_label)
             self.send_response(303)
@@ -8579,7 +9028,7 @@ class Handler(BaseHTTPRequestHandler):
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute(
-                "UPDATE client_training_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), date('now')) WHERE id = ?",
+                "UPDATE client_training_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), CAST(date('now') AS TEXT)) WHERE id = ?",
                 (history_id_i,),
             )
             conn.commit()
@@ -8617,7 +9066,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             cur.execute(
-                "UPDATE client_training_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), date('now')) WHERE client_id = ? AND is_active = 1 AND id <> ?",
+                "UPDATE client_training_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), CAST(date('now') AS TEXT)) WHERE client_id = ? AND is_active = 1 AND id <> ?",
                 (client_id_i, history_id_i),
             )
             cur.execute(
@@ -9502,6 +9951,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # keep server robust
     def handle_one_request(self):
+        sqlite3.begin_request()
         try:
             super().handle_one_request()
         except Exception as e:
@@ -9511,6 +9961,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(500, f'Internal server error: {e}')
             except Exception:
                 pass
+        finally:
+            try:
+                sqlite3.end_request()
+            except Exception:
+                pass
 
 
 def run():
@@ -9518,19 +9973,23 @@ def run():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(STATIC_BASE_DIR, exist_ok=True)
     os.makedirs(UPLOADS_FOODS_DIR, exist_ok=True)
-    ensure_catalog_schema(DB_PATH)
-    ensure_default_food_categories(DB_PATH)
-    ensure_brand_column()
-    ensure_exercises_table()
-    ensure_routines_table()
-    ensure_diets_table()
-    ensure_clients_table()
-    ensure_payment_plans_table()
-    ensure_client_history_tables()
-    ensure_fasting_weights_table()
-    ensure_client_daily_steps_table()
-    ensure_diet_builder_tables()
-    ensure_app_settings_table()
+    sqlite3.begin_request()
+    try:
+        ensure_catalog_schema(DB_PATH)
+        ensure_default_food_categories(DB_PATH)
+        ensure_brand_column()
+        ensure_exercises_table()
+        ensure_routines_table()
+        ensure_diets_table()
+        ensure_clients_table()
+        ensure_payment_plans_table()
+        ensure_client_history_tables()
+        ensure_fasting_weights_table()
+        ensure_client_daily_steps_table()
+        ensure_diet_builder_tables()
+        ensure_app_settings_table()
+    finally:
+        sqlite3.end_request()
     port = PORT
     server = HTTPServer((HOST, port), Handler)
     print(f"Servidor iniciado en http://{HOST}:{port} — Ctrl-C para detener")
