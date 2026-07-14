@@ -3573,6 +3573,19 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path.strip()
         q = urllib.parse.parse_qs(parsed.query)
 
+        # Mobile browsers probe these icon paths automatically.
+        # Return 204 to avoid useless auth redirects and log noise.
+        if path in (
+            '/favicon.ico',
+            '/apple-touch-icon.png',
+            '/apple-touch-icon-precomposed.png',
+            '/apple-touch-icon-120x120.png',
+            '/apple-touch-icon-120x120-precomposed.png',
+        ):
+            self.send_response(204)
+            self.end_headers()
+            return
+
         if path.startswith('/static/'):
             rel_path = urllib.parse.unquote(path[len('/static/'):]).strip()
             safe_path = os.path.normpath(rel_path)
@@ -4018,17 +4031,33 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == '/client_app':
-            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
-            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
-            client_id = parse_client_portal_session_token(token)
+            admin_preview = False
+            requested_client_id = (q.get('client_id', [''])[0] if 'client_id' in q else '').strip()
+            client_id = None
+            if requested_client_id and self.is_admin_authenticated():
+                try:
+                    client_id = int(requested_client_id)
+                    admin_preview = True
+                except Exception:
+                    client_id = None
+
             if client_id is None:
-                self.send_response(303)
-                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Inicia sesión para continuar'))
-                self.end_headers()
-                return
+                cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+                token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+                client_id = parse_client_portal_session_token(token)
+                if client_id is None:
+                    self.send_response(303)
+                    self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Inicia sesión para continuar'))
+                    self.end_headers()
+                    return
 
             client_rows = [r for r in get_clients() if int(r[0]) == int(client_id)]
             if not client_rows:
+                if admin_preview:
+                    self.send_response(303)
+                    self.send_header('Location', '/clients?msg=' + urllib.parse.quote('Cliente no encontrado'))
+                    self.end_headers()
+                    return
                 self.send_response(303)
                 self.send_header('Set-Cookie', f'{CLIENT_PORTAL_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
                 self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Cliente no encontrado'))
@@ -4101,12 +4130,12 @@ class Handler(BaseHTTPRequestHandler):
                     '</div>'
                 )
 
-            fasting_weights_html = render_fasting_weights_panel(client_id, panel_id=f'fw-client-{client_id}', include_client_id=False)
+            fasting_weights_html = render_fasting_weights_panel(client_id, panel_id=f'fw-client-{client_id}', include_client_id=admin_preview)
             daily_steps_goal = get_client_daily_steps_goal(client_id)
             daily_steps_html = render_client_daily_steps_panel(
                 client_id,
                 panel_id=f'steps-client-{client_id}',
-                include_client_id=False,
+                include_client_id=admin_preview,
                 daily_goal=daily_steps_goal,
             )
             selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
@@ -4139,8 +4168,9 @@ class Handler(BaseHTTPRequestHandler):
                 'steps': daily_steps_html,
             }
 
+            preview_qs = f'&client_id={client_id}' if admin_preview else ''
             cards_html = ''.join([
-                f'<a class="client-home-card" href="/client_app?section={key}">'
+                f'<a class="client-home-card" href="/client_app?section={key}{preview_qs}">'
                 f'<div class="chip">{html.escape(section_status[key])}</div>'
                 f'<h3>{html.escape(section_titles[key])}</h3>'
                 f'<p>{html.escape(section_descriptions[key])}</p>'
@@ -4150,9 +4180,10 @@ class Handler(BaseHTTPRequestHandler):
 
             detail_html = ''
             if selected_section:
+                back_href = f'/client_app?client_id={client_id}' if admin_preview else '/client_app'
                 detail_html = (
                     '<section class="detail-wrap">'
-                    '<a class="back-btn" href="/client_app">← Volver al panel</a>'
+                    f'<a class="back-btn" href="{back_href}">← Volver al panel</a>'
                     '<details class="accordion" open>'
                     f'<summary>{html.escape(section_titles[selected_section])}</summary>'
                     f'<div class="accordion-body">{section_content[selected_section]}</div>'
@@ -4160,15 +4191,24 @@ class Handler(BaseHTTPRequestHandler):
                     '</section>'
                 )
 
+            top_action_html = '<a class="logout" href="/client_logout">Cerrar sesión</a>'
+            if admin_preview:
+                top_action_html = f'<a class="logout" href="/client_profile?id={client_id}">← Volver como admin</a>'
+
+            welcome_subtitle = 'Selecciona un apartado para ver todo el detalle de tu progreso.'
+            if admin_preview:
+                welcome_subtitle = 'Vista previa como cliente desde admin. Puedes navegar y revisar cómo lo verá el cliente en móvil.'
+
             page = f'''
 <!doctype html>
 <html>
 <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Mi app</title>
     <style>
         body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
-        .page{{max-width:1040px;margin:0 auto;padding:28px;}}
+        .page{{max-width:1040px;margin:0 auto;padding:22px;}}
         .top{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px;}}
         .top h1{{margin:0;font-size:2rem;}}
         .mail{{color:#6d7480;font-size:.95rem;}}
@@ -4226,10 +4266,24 @@ class Handler(BaseHTTPRequestHandler):
         .fw-steps-input.goal-met{{background:#ecfdf5;border-color:#86efac;color:#166534;font-weight:700;}}
         .fw-steps-input.goal-missed{{background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700;}}
         .fw-foot{{margin-top:8px;color:#6d7480;font-size:.82rem;}}
+        input, button, select, textarea{{font-size:16px;}}
         @media (max-width: 1280px){{ .fw-grid{{grid-template-columns:repeat(5,minmax(0,1fr));}} }}
         @media (max-width: 1100px){{ .fw-grid{{grid-template-columns:repeat(4,minmax(0,1fr));}} }}
         @media (max-width: 900px){{ .cards{{grid-template-columns:1fr;}} .fw-grid{{grid-template-columns:repeat(3,minmax(0,1fr));}} }}
         @media (max-width: 720px){{ .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} }}
+        @media (max-width: 640px){{
+            .page{{padding:14px;}}
+            .top{{align-items:flex-start;}}
+            .top h1{{font-size:1.55rem;}}
+            .welcome{{padding:16px;}}
+            .welcome h2{{font-size:1.15rem;}}
+            .card{{padding:14px;}}
+            .accordion-body{{padding:10px;}}
+            .btn{{width:100%;justify-content:center;}}
+            .day table{{display:block;overflow-x:auto;white-space:nowrap;}}
+            .fw-row{{grid-template-columns:24px minmax(0,1fr);}}
+            .fw-input,.fw-steps-input{{width:100%;max-width:none;min-width:0;height:30px;padding:4px 6px;}}
+        }}
         @media (max-width: 560px){{ .fw-grid{{grid-template-columns:1fr;}} }}
     </style>
 </head>
@@ -4240,11 +4294,11 @@ class Handler(BaseHTTPRequestHandler):
                 <h1>Hola, {html.escape(client_name or 'Cliente')}</h1>
                 <div class="mail">{html.escape(client_email or '')}</div>
             </div>
-            <a class="logout" href="/client_logout">Cerrar sesión</a>
+            {top_action_html}
         </div>
         <section class="welcome">
             <h2>Bienvenido/a a tu panel</h2>
-            <p>Selecciona un apartado para ver todo el detalle de tu progreso.</p>
+            <p>{html.escape(welcome_subtitle)}</p>
         </section>
         <section class="cards">{cards_html}</section>
         {detail_html}
@@ -5562,6 +5616,7 @@ class Handler(BaseHTTPRequestHandler):
                 </div>
             </div>
             <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+                <a class="back" href="/client_app?client_id={cid_i}">📱 Ver vista cliente</a>
                 <a class="back" href="/edit_client?id={cid_i}">✏️ Editar cliente</a>
                 <a class="back" href="/clients">← Volver a clientes</a>
             </div>
@@ -9926,6 +9981,9 @@ class Handler(BaseHTTPRequestHandler):
         sqlite3.begin_request()
         try:
             super().handle_one_request()
+        except ConnectionResetError:
+            # Client disconnected before completing the request.
+            return
         except Exception as e:
             import traceback
             traceback.print_exc()
