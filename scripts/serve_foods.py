@@ -759,10 +759,13 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
     month_columns = []
     for year, month in slots:
         max_day = calendar.monthrange(year, month)[1]
+        filled_days = 0
         rows = []
         for day in range(1, max_day + 1):
             date_key = f"{year:04d}-{month:02d}-{day:02d}"
             value = weights_map.get(date_key)
+            if value is not None:
+                filled_days += 1
             value_text = '' if value is None else f"{value:.2f}".replace('.', ',')
             rows.append(
                 f'<label class="fw-row fw-day-row" data-date="{date_key}">'
@@ -770,11 +773,16 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
                 f'<input class="fw-input" type="text" inputmode="decimal" data-date="{date_key}" value="{html.escape(value_text)}" placeholder="-" />'
                 '</label>'
             )
+        is_current_slot = (year == last_year and month == last_month)
+        open_attr = ' open' if is_current_slot else ''
         month_columns.append(
-            '<div class="fw-month">'
-            f'<div class="fw-month-title">{SPANISH_MONTHS[month - 1]}</div>'
+            f'<details class="fw-month-card"{open_attr}>'
+            '<summary class="fw-month-summary">'
+            f'<span class="fw-month-title">{SPANISH_MONTHS[month - 1]} {year}</span>'
+            f'<span class="fw-month-meta">{filled_days}/{max_day} días</span>'
+            '</summary>'
             f'<div class="fw-month-days">{"".join(rows)}</div>'
-            '</div>'
+            '</details>'
         )
 
     client_payload = f"client_id: {int(client_id)}," if include_client_id else ''
@@ -790,6 +798,17 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
         if (!root) return;
         const inputs = Array.from(root.querySelectorAll('.fw-input'));
         const dayRows = Array.from(root.querySelectorAll('.fw-day-row'));
+        const monthCards = Array.from(root.querySelectorAll('.fw-month-card'));
+
+        // Keep accordion behavior simple on mobile: only one month open at a time.
+        monthCards.forEach((card) => {{
+            card.addEventListener('toggle', () => {{
+                if (!card.open) return;
+                monthCards.forEach((other) => {{
+                    if (other !== card) other.open = false;
+                }});
+            }});
+        }});
 
         function parseIsoDate(dateText) {{
             const parts = String(dateText || '').split('-');
@@ -937,22 +956,30 @@ def render_client_daily_steps_panel(client_id, panel_id='client-steps-panel', in
     month_columns = []
     for year, month in slots:
         max_day = calendar.monthrange(year, month)[1]
+        filled_days = 0
         rows = []
         for day in range(1, max_day + 1):
             date_key = f"{year:04d}-{month:02d}-{day:02d}"
             value = steps_map.get(date_key)
+            if value is not None:
+                filled_days += 1
             value_text = '' if value is None else str(int(value))
             rows.append(
-                f'<label class="fw-row" data-date="{date_key}">'
+                f'<label class="fw-row fw-day-row" data-date="{date_key}">'
                 f'<span>{day}:</span>'
                 f'<input class="fw-steps-input" type="text" inputmode="numeric" data-date="{date_key}" value="{html.escape(value_text)}" placeholder="-" />'
                 '</label>'
             )
+        is_current_slot = (year == last_year and month == last_month)
+        open_attr = ' open' if is_current_slot else ''
         month_columns.append(
-            '<div class="fw-month">'
-            f'<div class="fw-month-title">{SPANISH_MONTHS[month - 1]}</div>'
+            f'<details class="fw-month-card"{open_attr}>'
+            '<summary class="fw-month-summary">'
+            f'<span class="fw-month-title">{SPANISH_MONTHS[month - 1]} {year}</span>'
+            f'<span class="fw-month-meta">{filled_days}/{max_day} días</span>'
+            '</summary>'
             f'<div class="fw-month-days">{"".join(rows)}</div>'
-            '</div>'
+            '</details>'
         )
 
     goal_value = int(daily_goal or 0)
@@ -971,6 +998,17 @@ def render_client_daily_steps_panel(client_id, panel_id='client-steps-panel', in
         if (!root) return;
         const inputs = Array.from(root.querySelectorAll('.fw-steps-input'));
         const dailyGoal = {goal_value};
+        const monthCards = Array.from(root.querySelectorAll('.fw-month-card'));
+
+        // Keep accordion behavior simple on mobile: only one month open at a time.
+        monthCards.forEach((card) => {{
+            card.addEventListener('toggle', () => {{
+                if (!card.open) return;
+                monthCards.forEach((other) => {{
+                    if (other !== card) other.open = false;
+                }});
+            }});
+        }});
 
         function normalizeSteps(raw) {{
             const text = String(raw || '').trim();
@@ -1252,7 +1290,21 @@ def normalize_login_identifier(value):
 
 
 def normalize_phone(value):
-    return re.sub(r'[^0-9+]', '', str(value or '').strip())
+    # Keep only digits so +34 / spaces / dashes do not break matching.
+    return re.sub(r'[^0-9]', '', str(value or '').strip())
+
+
+def phones_match(a, b):
+    pa = normalize_phone(a)
+    pb = normalize_phone(b)
+    if not pa or not pb:
+        return False
+    if pa == pb:
+        return True
+    # Tolerate country-prefix differences (common in mobile login input).
+    if len(pa) >= 9 and len(pb) >= 9:
+        return pa[-9:] == pb[-9:]
+    return False
 
 
 def get_client_portal_user_by_identifier(identifier):
@@ -1274,9 +1326,10 @@ def get_client_portal_user_by_identifier(identifier):
 
     for row in rows:
         cid, name, email, phone, access_code, password_hash = row
+        name_norm = normalize_login_identifier(name)
         email_norm = normalize_login_identifier(email)
         phone_row_norm = normalize_phone(phone)
-        if ident_norm == email_norm or (phone_norm and phone_norm == phone_row_norm):
+        if ident_norm == name_norm or ident_norm == email_norm or phones_match(phone_norm, phone_row_norm):
             return {
                 'id': int(cid),
                 'name': name,
@@ -1285,6 +1338,37 @@ def get_client_portal_user_by_identifier(identifier):
                 'access_code': str(access_code or ''),
                 'password_hash': str(password_hash or ''),
             }
+    return None
+
+
+def get_client_portal_user_by_access_code(access_code):
+    code = str(access_code or '').strip()
+    if not code:
+        return None
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, COALESCE(name, ''), COALESCE(email, ''), COALESCE(phone, ''), COALESCE(client_access_code, ''), COALESCE(client_password_hash, '')
+        FROM clients
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    for row in rows:
+        cid, name, email, phone, row_access_code, password_hash = row
+        if str(row_access_code or '').strip() != code:
+            continue
+        return {
+            'id': int(cid),
+            'name': name,
+            'email': email,
+            'phone': phone,
+            'access_code': str(row_access_code or ''),
+            'password_hash': str(password_hash or ''),
+        }
     return None
 
 
@@ -3861,10 +3945,13 @@ class Handler(BaseHTTPRequestHandler):
     <title>Registro cliente</title>
     <style>
         *{{box-sizing:border-box;}}
-        html,body{{height:100%;}}
+        :root{{--login-vh:100svh;}}
+        @supports (min-height: 100dvh){{
+            :root{{--login-vh:100dvh;}}
+        }}
+        html,body{{min-height:100%;height:auto;}}
         body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
-        .page{{max-width:560px;margin:0 auto;padding:clamp(14px, 3.5vw, 28px);min-height:100svh;display:flex;align-items:center;}}
-        @supports (min-height: 100dvh){{.page{{min-height:100dvh;}}}}
+        .page{{max-width:560px;margin:0 auto;padding:clamp(12px, 3.5vw, 28px);min-height:var(--login-vh);display:flex;align-items:center;}}
         .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
         h1{{margin:0 0 10px;font-size:2rem;}}
         p{{margin:0 0 18px;color:#6d7480;}}
@@ -3875,6 +3962,7 @@ class Handler(BaseHTTPRequestHandler):
         .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
         .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
         @media (max-width:640px){{
+            .page{{padding-top:max(12px, env(safe-area-inset-top));padding-bottom:max(12px, env(safe-area-inset-bottom));}}
             .card{{padding:18px;border-radius:14px;}}
             h1{{font-size:1.75rem;}}
         }}
@@ -4005,10 +4093,13 @@ class Handler(BaseHTTPRequestHandler):
     <title>Acceso</title>
     <style>
         *{{box-sizing:border-box;}}
-        html,body{{height:100%;}}
+        :root{{--login-vh:100svh;}}
+        @supports (min-height: 100dvh){{
+            :root{{--login-vh:100dvh;}}
+        }}
+        html,body{{min-height:100%;height:auto;}}
         body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
-        .page{{max-width:560px;margin:0 auto;padding:clamp(14px, 3.5vw, 28px);min-height:100svh;display:flex;align-items:center;}}
-        @supports (min-height: 100dvh){{.page{{min-height:100dvh;}}}}
+        .page{{max-width:560px;margin:0 auto;padding:clamp(12px, 3.5vw, 28px);min-height:var(--login-vh);display:flex;align-items:center;}}
         .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
         h1{{margin:0 0 10px;font-size:2rem;}}
         p{{margin:0 0 18px;color:#6d7480;}}
@@ -4019,6 +4110,7 @@ class Handler(BaseHTTPRequestHandler):
         .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
         .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
         @media (max-width:640px){{
+            .page{{padding-top:max(12px, env(safe-area-inset-top));padding-bottom:max(12px, env(safe-area-inset-bottom));}}
             .card{{padding:18px;border-radius:14px;}}
             h1{{font-size:1.75rem;}}
         }}
@@ -4268,11 +4360,15 @@ class Handler(BaseHTTPRequestHandler):
         th{{background:#f3f5f8;}}
         .fw-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:8px;overflow:hidden;}}
         .fw-head{{font-size:.98rem;font-weight:800;color:#b91c1c;text-align:center;margin:1px 0 8px;}}
-        .fw-grid{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;align-items:start;width:100%;min-width:0;}}
-        .fw-month{{border:1px solid #d8dde6;border-radius:9px;background:#f8fafc;min-height:220px;min-width:0;overflow:hidden;}}
-        .fw-month-title{{padding:5px 4px;border-bottom:1px solid #d8dde6;text-align:center;font-weight:800;color:#101318;font-size:.78rem;line-height:1.1;overflow-wrap:anywhere;}}
-        .fw-month-days{{padding:5px;display:flex;flex-direction:column;gap:3px;max-height:none;overflow:visible;min-width:0;}}
-        .fw-row{{display:grid;grid-template-columns:20px 58px;gap:4px;align-items:center;font-size:.74rem;color:#111827;min-width:0;justify-content:start;}}
+        .fw-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:start;width:100%;min-width:0;}}
+        .fw-month-card{{border:1px solid #d8dde6;border-radius:12px;background:#f8fafc;min-width:0;overflow:hidden;}}
+        .fw-month-card[open]{{border-color:#c4ccda;box-shadow:0 8px 20px rgba(16,19,24,.06);background:#fff;}}
+        .fw-month-summary{{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 12px;cursor:pointer;list-style:none;}}
+        .fw-month-summary::-webkit-details-marker{{display:none;}}
+        .fw-month-title{{font-weight:800;color:#101318;font-size:.9rem;line-height:1.1;overflow-wrap:anywhere;}}
+        .fw-month-meta{{font-size:.78rem;color:#6d7480;font-weight:700;background:#eef2f7;border-radius:999px;padding:3px 8px;white-space:nowrap;}}
+        .fw-month-days{{padding:8px 10px 10px;display:flex;flex-direction:column;gap:6px;max-height:56svh;overflow:auto;min-width:0;border-top:1px solid #e8ebef;}}
+        .fw-row{{display:grid;grid-template-columns:28px minmax(0,1fr);gap:7px;align-items:center;font-size:.82rem;color:#111827;min-width:0;justify-content:start;}}
         .fw-mean-row{{padding:2px 0 4px;}}
         .fw-mean-row span{{font-weight:800;color:#991b1b;}}
         .fw-mean-value{{color:#991b1b;font-weight:800;font-size:.74rem;line-height:1.15;}}
@@ -4280,8 +4376,8 @@ class Handler(BaseHTTPRequestHandler):
         .fw-mean-value.down em{{color:#15803d;}}
         .fw-mean-value.up em{{color:#b91c1c;}}
         .fw-mean-value.neutral em{{color:#6d7480;}}
-        .fw-input{{width:58px;max-width:58px;min-width:58px;padding:2px 4px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.72rem;height:24px;}}
-        .fw-steps-input{{width:58px;max-width:58px;min-width:58px;padding:2px 4px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.72rem;height:24px;}}
+        .fw-input{{width:100%;max-width:none;min-width:0;padding:5px 7px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.82rem;height:30px;}}
+        .fw-steps-input{{width:100%;max-width:none;min-width:0;padding:5px 7px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.82rem;height:30px;}}
         .fw-input.is-saving{{background:#fff7ed;border-color:#fdba74;}}
         .fw-steps-input.is-saving{{background:#fff7ed;border-color:#fdba74;}}
         .fw-input.is-saved{{background:#ecfdf5;border-color:#86efac;}}
@@ -4292,10 +4388,7 @@ class Handler(BaseHTTPRequestHandler):
         .fw-steps-input.goal-missed{{background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700;}}
         .fw-foot{{margin-top:8px;color:#6d7480;font-size:.82rem;}}
         input, button, select, textarea{{font-size:16px;}}
-        @media (max-width: 1280px){{ .fw-grid{{grid-template-columns:repeat(5,minmax(0,1fr));}} }}
-        @media (max-width: 1100px){{ .fw-grid{{grid-template-columns:repeat(4,minmax(0,1fr));}} }}
-        @media (max-width: 900px){{ .cards{{grid-template-columns:1fr;}} .fw-grid{{grid-template-columns:repeat(3,minmax(0,1fr));}} }}
-        @media (max-width: 720px){{ .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} }}
+        @media (max-width: 900px){{ .cards{{grid-template-columns:1fr;}} .fw-grid{{grid-template-columns:1fr;}} }}
         @media (max-width: 640px){{
             .page{{padding:14px;}}
             .top{{align-items:flex-start;}}
@@ -4307,9 +4400,10 @@ class Handler(BaseHTTPRequestHandler):
             .btn{{width:100%;justify-content:center;}}
             .day table{{display:block;overflow-x:auto;white-space:nowrap;}}
             .fw-row{{grid-template-columns:24px minmax(0,1fr);}}
-            .fw-input,.fw-steps-input{{width:100%;max-width:none;min-width:0;height:30px;padding:4px 6px;}}
+            .fw-month-summary{{padding:11px 10px;}}
+            .fw-month-days{{max-height:none;overflow:visible;}}
+            .fw-input,.fw-steps-input{{width:100%;max-width:none;min-width:0;height:34px;padding:5px 7px;}}
         }}
-        @media (max-width: 560px){{ .fw-grid{{grid-template-columns:1fr;}} }}
     </style>
 </head>
 <body>
@@ -8458,17 +8552,28 @@ class Handler(BaseHTTPRequestHandler):
 
             user = get_client_portal_user_by_identifier(identifier)
             if not user:
+                # Compatibility fallback: some clients use access code as the main identifier.
+                user = get_client_portal_user_by_access_code(identifier)
+            if not user and password:
+                # Backward compatibility: some users typed access code in password field.
+                user = get_client_portal_user_by_access_code(password)
+            if not user and access_code:
+                user = get_client_portal_user_by_access_code(access_code)
+            if not user:
                 self.send_response(303)
                 self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Usuario no encontrado'))
                 self.end_headers()
                 return
 
             ok = False
+            expected_code = str(user.get('access_code') or '').strip()
             stored_hash = str(user.get('password_hash') or '').strip()
             if password and stored_hash:
                 ok = verify_client_password(password, stored_hash)
-            elif access_code:
-                expected_code = str(user.get('access_code') or '').strip()
+            # Backward compatibility: many clients used their access code in the password field.
+            if (not ok) and password and expected_code:
+                ok = bool(password == expected_code)
+            if (not ok) and access_code:
                 ok = bool(expected_code and access_code == expected_code)
 
             if not ok:
