@@ -637,14 +637,62 @@ def ensure_client_daily_steps_table(conn_or_path=None):
         conn.close()
 
 
-def get_fasting_weight_slots():
+def ensure_client_notice_events_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_notice_events (
+        id INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL,
+        date_text TEXT NOT NULL,
+        title TEXT NOT NULL,
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(client_id) REFERENCES clients(id)
+    )
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_notice_events_client_date ON client_notice_events(client_id, date_text)")
+    conn.commit()
+    if should_close:
+        conn.close()
+
+
+def ensure_client_notice_rules_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_notice_rules (
+        id INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL,
+        month_days TEXT NOT NULL,
+        title TEXT NOT NULL,
+        notes TEXT,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(client_id) REFERENCES clients(id)
+    )
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_notice_rules_client ON client_notice_rules(client_id)")
+    conn.commit()
+    if should_close:
+        conn.close()
+
+
+def get_fasting_weight_slots(excluded_months=None):
     from datetime import date
     today = date.today()
+    excluded = set(int(m) for m in (excluded_months or []))
     slots = []
     for delta in range(-2, 6):
         month_raw = today.month + delta
         year = today.year + ((month_raw - 1) // 12)
         month = ((month_raw - 1) % 12) + 1
+        if month in excluded:
+            continue
         slots.append((year, month))
     return slots
 
@@ -666,6 +714,33 @@ def get_client_fasting_weights_map(client_id, start_date_text, end_date_text):
     out = {}
     for date_text, weight_kg in rows:
         out[str(date_text)] = float(weight_kg or 0)
+    return out
+
+
+def get_client_fasting_weights_series(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT date_text, weight_kg
+        FROM client_fasting_weights
+        WHERE client_id = ?
+        ORDER BY date_text ASC
+        """,
+        (int(client_id),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for date_text, weight_kg in rows:
+        date_norm = normalize_iso_date_text(date_text)
+        if not date_norm:
+            continue
+        try:
+            value = float(weight_kg or 0)
+        except Exception:
+            continue
+        out.append((date_norm, value))
     return out
 
 
@@ -701,6 +776,426 @@ def get_client_daily_steps_map(client_id, start_date_text, end_date_text):
     for date_text, steps in rows:
         out[str(date_text)] = int(steps or 0)
     return out
+
+
+def get_client_notice_events(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, date_text, COALESCE(title, ''), COALESCE(notes, ''), created_at
+        FROM client_notice_events
+        WHERE client_id = ?
+        ORDER BY date_text ASC, id ASC
+        """,
+        (int(client_id),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_client_notice_rules(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, COALESCE(month_days, ''), COALESCE(title, ''), COALESCE(notes, ''), COALESCE(is_active, 1), created_at
+        FROM client_notice_rules
+        WHERE client_id = ?
+        ORDER BY id ASC
+        """,
+        (int(client_id),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def create_client_notice_event(client_id, date_text, title, notes):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_notice_events(client_id, date_text, title, notes, created_at)
+        VALUES(?,?,?,?,datetime('now'))
+        """,
+        (int(client_id), str(date_text), str(title), str(notes or '')),
+    )
+    conn.commit()
+    conn.close()
+
+
+def create_client_notice_rule(client_id, month_days, title, notes):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_notice_rules(client_id, month_days, title, notes, is_active, created_at)
+        VALUES(?,?,?,?,1,datetime('now'))
+        """,
+        (int(client_id), str(month_days), str(title), str(notes or '')),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_client_notice_event(event_id, client_id=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if client_id is None:
+        cur.execute("DELETE FROM client_notice_events WHERE id = ?", (int(event_id),))
+    else:
+        cur.execute("DELETE FROM client_notice_events WHERE id = ? AND client_id = ?", (int(event_id), int(client_id)))
+    conn.commit()
+    conn.close()
+
+
+def delete_client_notice_rule(rule_id, client_id=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if client_id is None:
+        cur.execute("DELETE FROM client_notice_rules WHERE id = ?", (int(rule_id),))
+    else:
+        cur.execute("DELETE FROM client_notice_rules WHERE id = ? AND client_id = ?", (int(rule_id), int(client_id)))
+    conn.commit()
+    conn.close()
+
+
+def normalize_iso_date_text(value):
+    text = str(value or '').strip()
+    return text if re.match(r'^\d{4}-\d{2}-\d{2}$', text) else ''
+
+
+def format_dmy(value):
+    text = str(value or '').strip()
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})$', text)
+    if not m:
+        return text or '-'
+    return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
+
+
+def parse_month_days(value):
+    tokens = re.split(r'[^0-9]+', str(value or '').strip())
+    out = []
+    for token in tokens:
+        if not token:
+            continue
+        try:
+            day = int(token)
+        except Exception:
+            continue
+        if day < 1 or day > 31:
+            continue
+        if day not in out:
+            out.append(day)
+    return sorted(out)
+
+
+def month_days_text(days):
+    return ','.join([str(int(d)) for d in days])
+
+
+def build_client_notice_calendar_events(client_row, manual_events, recurring_rules=None):
+    events = []
+    plan_start = normalize_iso_date_text(client_row[8] if len(client_row) > 8 else '')
+    plan_end = normalize_iso_date_text(client_row[9] if len(client_row) > 9 else '')
+
+    if plan_start:
+        events.append({
+            'id': None,
+            'date': plan_start,
+            'title': 'Inicio del plan',
+            'notes': 'Fecha de alta del plan actual.',
+            'kind': 'auto',
+        })
+    if plan_end:
+        events.append({
+            'id': None,
+            'date': plan_end,
+            'title': 'Fin del plan y renovación',
+            'notes': 'Último día del plan. Revisar renovación y pago.',
+            'kind': 'auto',
+        })
+
+    for row in manual_events:
+        eid, date_text, title, notes, _created_at = row
+        date_norm = normalize_iso_date_text(date_text)
+        if not date_norm:
+            continue
+        events.append({
+            'id': int(eid),
+            'date': date_norm,
+            'title': str(title or 'Aviso importante'),
+            'notes': str(notes or ''),
+            'kind': 'manual',
+        })
+
+    recurring_rules = recurring_rules or []
+    for row in recurring_rules:
+        rid, month_days_raw, title, notes, is_active, _created_at = row
+        if int(is_active or 0) != 1:
+            continue
+        days = parse_month_days(month_days_raw)
+        if not days:
+            continue
+        for year, month in get_fasting_weight_slots():
+            max_day = calendar.monthrange(year, month)[1]
+            for day in days:
+                if day > max_day:
+                    continue
+                date_text = f"{year:04d}-{month:02d}-{day:02d}"
+                events.append({
+                    'id': None,
+                    'rule_id': int(rid),
+                    'month_days': month_days_text(days),
+                    'date': date_text,
+                    'title': str(title or 'Aviso recurrente'),
+                    'notes': str(notes or ''),
+                    'kind': 'recurring',
+                })
+
+    kind_order = {'auto': 0, 'recurring': 1, 'manual': 2}
+    events.sort(key=lambda e: (e['date'], kind_order.get(e['kind'], 9), e.get('rule_id') or 0, e.get('id') or 0))
+    return events
+
+
+def render_client_notice_calendar_panel(client_row, manual_events, recurring_rules=None, admin_mode=False, client_id=None, return_to=''):
+    recurring_rules = recurring_rules or []
+    events = build_client_notice_calendar_events(client_row, manual_events, recurring_rules)
+    grouped = {}
+    for event in events:
+        month_key = event['date'][:7]
+        grouped.setdefault(month_key, []).append(event)
+
+    ordered_months = sorted(grouped.keys())
+    current_month = time.strftime('%Y-%m')
+    open_month = current_month if current_month in grouped else (ordered_months[0] if ordered_months else '')
+
+    month_cards = []
+    for month_key in ordered_months:
+        year = int(month_key[:4])
+        month = int(month_key[5:7])
+        month_name = f"{SPANISH_MONTHS[month - 1]} {year}"
+        open_attr = ' open' if month_key == open_month else ''
+        items_html = []
+        for item in grouped[month_key]:
+            if item['kind'] == 'auto':
+                kind_chip = '<span class="cal-chip cal-chip-auto">Plan</span>'
+            elif item['kind'] == 'recurring':
+                kind_chip = '<span class="cal-chip cal-chip-recurring">Recurrente</span>'
+            else:
+                kind_chip = '<span class="cal-chip">Aviso</span>'
+            delete_html = ''
+            if admin_mode and item['id']:
+                delete_html = (
+                    '<form method="post" action="/delete_client_notice_event" class="cal-inline-form">'
+                    f'<input type="hidden" name="event_id" value="{item["id"]}" />'
+                    f'<input type="hidden" name="client_id" value="{int(client_id or 0)}" />'
+                    f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+                    '<button type="submit" class="cal-delete-btn">Borrar</button>'
+                    '</form>'
+                )
+            items_html.append(
+                '<article class="cal-item">'
+                '<div class="cal-item-head">'
+                f'<div class="cal-date">{html.escape(format_dmy(item["date"]))}</div>'
+                f'{kind_chip}'
+                '</div>'
+                f'<h4>{html.escape(item["title"])}</h4>'
+                f'<p>{html.escape(item["notes"] or "Sin nota")}</p>'
+                f'<p class="cal-meta">{html.escape("Días: " + item.get("month_days", "") if item["kind"] == "recurring" else "")}</p>'
+                f'{delete_html}'
+                '</article>'
+            )
+
+        month_cards.append(
+            f'<details class="cal-month"{open_attr}>'
+            '<summary>'
+            f'<span>{html.escape(month_name)}</span>'
+            f'<span class="cal-count">{len(grouped[month_key])} avisos</span>'
+            '</summary>'
+            f'<div class="cal-items">{"".join(items_html)}</div>'
+            '</details>'
+        )
+
+    add_form_html = ''
+    recurring_form_html = ''
+    recurring_list_html = ''
+    if admin_mode and client_id:
+        add_form_html = (
+            '<form method="post" action="/add_client_notice_event" class="cal-add-form">'
+            f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+            f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+            '<label>Fecha<input name="date_text" type="date" required /></label>'
+            '<label>Título<input name="title" placeholder="Ej: Revisión mensual" required /></label>'
+            '<label class="full">Nota<input name="notes" placeholder="Detalles del aviso" /></label>'
+            '<button type="submit" class="full">Añadir aviso</button>'
+            '</form>'
+        )
+
+        recurring_form_html = (
+            '<form method="post" action="/add_client_notice_rule" class="cal-rule-form">'
+            f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+            f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+            '<label>Días del mes (ej: 1,15)<input name="month_days" placeholder="1,15" required /></label>'
+            '<label>Título<input name="title" placeholder="Ej: Revisión quincenal" required /></label>'
+            '<label class="full">Nota<input name="notes" placeholder="Detalles de la revisión" /></label>'
+            '<button type="submit" class="full">Añadir aviso recurrente</button>'
+            '</form>'
+        )
+
+        rule_items = []
+        for row in recurring_rules:
+            rid, month_days_raw, title, notes, is_active, _created_at = row
+            if int(is_active or 0) != 1:
+                continue
+            days = parse_month_days(month_days_raw)
+            if not days:
+                continue
+            rule_items.append(
+                '<article class="cal-item">'
+                '<div class="cal-item-head">'
+                f'<div class="cal-date">Días: {html.escape(month_days_text(days))}</div>'
+                '<span class="cal-chip cal-chip-recurring">Regla activa</span>'
+                '</div>'
+                f'<h4>{html.escape(title or "Aviso recurrente")}</h4>'
+                f'<p>{html.escape(notes or "Sin nota")}</p>'
+                '<form method="post" action="/delete_client_notice_rule" class="cal-inline-form">'
+                f'<input type="hidden" name="rule_id" value="{int(rid)}" />'
+                f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+                f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+                '<button type="submit" class="cal-delete-btn">Borrar regla</button>'
+                '</form>'
+                '</article>'
+            )
+        if rule_items:
+            recurring_list_html = '<div class="cal-rules-list">' + ''.join(rule_items) + '</div>'
+
+    if not month_cards:
+        month_cards.append('<p class="empty">No hay avisos todavía.</p>')
+
+    return (
+        '<div class="cal-wrap">'
+        '<div class="cal-head">Calendario de avisos</div>'
+        f'{add_form_html}'
+        f'{recurring_form_html}'
+        f'{recurring_list_html}'
+        f'<div class="cal-months">{"".join(month_cards)}</div>'
+        '</div>'
+    )
+
+
+def render_client_weight_trend_chart(client_id, panel_id='weight-trend-chart'):
+    series = get_client_fasting_weights_series(client_id)
+    if not series:
+        return '<div class="weight-chart-empty">Aun no hay datos de peso para mostrar la evolucion.</div>'
+
+    data = [{'date': d, 'weight': round(float(w), 3)} for d, w in series]
+    first_date, first_weight = series[0]
+    last_date, last_weight = series[-1]
+    delta = float(last_weight) - float(first_weight)
+    delta_sign = '+' if delta > 0 else ''
+    delta_text = f"{delta_sign}{delta:.2f}".replace('.', ',')
+    first_text = f"{float(first_weight):.2f}".replace('.', ',')
+    last_text = f"{float(last_weight):.2f}".replace('.', ',')
+
+    return f'''
+    <section class="weight-chart-wrap" id="{panel_id}">
+        <div class="weight-chart-head">
+            <div><strong>Evolucion del peso</strong></div>
+            <div class="weight-chart-meta">Desde {html.escape(format_dmy(first_date))} hasta {html.escape(format_dmy(last_date))}</div>
+            <div class="weight-chart-meta">Inicio: {html.escape(first_text)} kg · Actual: {html.escape(last_text)} kg · Cambio: {html.escape(delta_text)} kg</div>
+        </div>
+        <canvas class="weight-chart-canvas" height="220"></canvas>
+    </section>
+    <script>
+    (function() {{
+        const root = document.getElementById('{panel_id}');
+        if (!root) return;
+        const canvas = root.querySelector('.weight-chart-canvas');
+        if (!canvas) return;
+        const points = {json.dumps(data)};
+        if (!points.length) return;
+
+        function draw() {{
+            const dpr = Math.max(window.devicePixelRatio || 1, 1);
+            const width = Math.max(Math.floor(root.clientWidth), 280);
+            const height = 220;
+            canvas.style.width = width + 'px';
+            canvas.style.height = height + 'px';
+            canvas.width = Math.floor(width * dpr);
+            canvas.height = Math.floor(height * dpr);
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.clearRect(0, 0, width, height);
+
+            const pad = {{ top: 16, right: 16, bottom: 28, left: 36 }};
+            const plotW = width - pad.left - pad.right;
+            const plotH = height - pad.top - pad.bottom;
+            if (plotW <= 20 || plotH <= 20) return;
+
+            const weights = points.map((p) => Number(p.weight));
+            let minW = Math.min.apply(null, weights);
+            let maxW = Math.max.apply(null, weights);
+            if (Math.abs(maxW - minW) < 0.001) {{
+                minW -= 0.5;
+                maxW += 0.5;
+            }}
+
+            const xFor = (idx) => pad.left + (points.length === 1 ? plotW / 2 : (idx / (points.length - 1)) * plotW);
+            const yFor = (w) => pad.top + ((maxW - w) / (maxW - minW)) * plotH;
+
+            ctx.strokeStyle = '#e2e8f0';
+            ctx.lineWidth = 1;
+            for (let i = 0; i <= 4; i++) {{
+                const y = pad.top + (i / 4) * plotH;
+                ctx.beginPath();
+                ctx.moveTo(pad.left, y);
+                ctx.lineTo(width - pad.right, y);
+                ctx.stroke();
+            }}
+
+            ctx.strokeStyle = '#0f172a';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            points.forEach((p, idx) => {{
+                const x = xFor(idx);
+                const y = yFor(Number(p.weight));
+                if (idx === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }});
+            ctx.stroke();
+
+            ctx.fillStyle = '#0f172a';
+            points.forEach((p, idx) => {{
+                const x = xFor(idx);
+                const y = yFor(Number(p.weight));
+                ctx.beginPath();
+                ctx.arc(x, y, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+            }});
+
+            ctx.fillStyle = '#64748b';
+            ctx.font = '11px Manrope, sans-serif';
+            ctx.textAlign = 'left';
+            ctx.fillText(points[0].date, pad.left, height - 8);
+            ctx.textAlign = 'right';
+            ctx.fillText(points[points.length - 1].date, width - pad.right, height - 8);
+
+            ctx.textAlign = 'right';
+            ctx.fillStyle = '#475569';
+            ctx.fillText(maxW.toFixed(1).replace('.', ',') + ' kg', pad.left - 6, pad.top + 4);
+            ctx.fillText(minW.toFixed(1).replace('.', ',') + ' kg', pad.left - 6, pad.top + plotH);
+        }}
+
+        draw();
+        window.addEventListener('resize', draw);
+    }})();
+    </script>
+    '''
 
 
 def upsert_client_fasting_weight(client_id, date_text, weight_kg):
@@ -747,8 +1242,8 @@ def upsert_client_daily_steps(client_id, date_text, steps):
     conn.close()
 
 
-def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', include_client_id=True):
-    slots = get_fasting_weight_slots()
+def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', include_client_id=True, admin_compact=False):
+    slots = get_fasting_weight_slots(excluded_months={5})
     first_year, first_month = slots[0]
     last_year, last_month = slots[-1]
     start_date_text = f"{first_year:04d}-{first_month:02d}-01"
@@ -774,20 +1269,32 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
                 '</label>'
             )
         is_current_slot = (year == last_year and month == last_month)
-        open_attr = ' open' if is_current_slot else ''
-        month_columns.append(
-            f'<details class="fw-month-card"{open_attr}>'
-            '<summary class="fw-month-summary">'
-            f'<span class="fw-month-title">{SPANISH_MONTHS[month - 1]} {year}</span>'
-            f'<span class="fw-month-meta">{filled_days}/{max_day} días</span>'
-            '</summary>'
-            f'<div class="fw-month-days">{"".join(rows)}</div>'
-            '</details>'
-        )
+        if admin_compact:
+            month_columns.append(
+                '<div class="fw-month-card">'
+                '<div class="fw-month-summary">'
+                f'<span class="fw-month-title">{SPANISH_MONTHS[month - 1]} {year}</span>'
+                f'<span class="fw-month-meta">{filled_days}/{max_day} días</span>'
+                '</div>'
+                f'<div class="fw-month-days">{"".join(rows)}</div>'
+                '</div>'
+            )
+        else:
+            open_attr = ' open' if is_current_slot else ''
+            month_columns.append(
+                f'<details class="fw-month-card"{open_attr}>'
+                '<summary class="fw-month-summary">'
+                f'<span class="fw-month-title">{SPANISH_MONTHS[month - 1]} {year}</span>'
+                f'<span class="fw-month-meta">{filled_days}/{max_day} días</span>'
+                '</summary>'
+                f'<div class="fw-month-days">{"".join(rows)}</div>'
+                '</details>'
+            )
 
     client_payload = f"client_id: {int(client_id)}," if include_client_id else ''
+    wrap_class = 'fw-wrap fw-admin-compact' if admin_compact else 'fw-wrap'
     return f'''
-    <div class="fw-wrap" id="{panel_id}">
+    <div class="{wrap_class}" id="{panel_id}">
         <div class="fw-head">Peso corporal en ayunas</div>
         <div class="fw-grid">{"".join(month_columns)}</div>
         <div class="fw-foot">Editable por ti y por el cliente. Se guarda automáticamente al salir del campo.</div>
@@ -800,15 +1307,19 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
         const dayRows = Array.from(root.querySelectorAll('.fw-day-row'));
         const monthCards = Array.from(root.querySelectorAll('.fw-month-card'));
 
-        // Keep accordion behavior simple on mobile: only one month open at a time.
-        monthCards.forEach((card) => {{
-            card.addEventListener('toggle', () => {{
-                if (!card.open) return;
-                monthCards.forEach((other) => {{
-                    if (other !== card) other.open = false;
+        const isAdminCompact = root.classList.contains('fw-admin-compact');
+
+        // Keep accordion behavior simple on client/mobile views: only one month open at a time.
+        if (!isAdminCompact) {{
+            monthCards.forEach((card) => {{
+                card.addEventListener('toggle', () => {{
+                    if (!card.open) return;
+                    monthCards.forEach((other) => {{
+                        if (other !== card) other.open = false;
+                    }});
                 }});
             }});
-        }});
+        }}
 
         function parseIsoDate(dateText) {{
             const parts = String(dateText || '').split('-');
@@ -944,8 +1455,8 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
     '''
 
 
-def render_client_daily_steps_panel(client_id, panel_id='client-steps-panel', include_client_id=True, daily_goal=0):
-    slots = get_fasting_weight_slots()
+def render_client_daily_steps_panel(client_id, panel_id='client-steps-panel', include_client_id=True, daily_goal=0, admin_compact=False):
+    slots = get_fasting_weight_slots(excluded_months={5})
     first_year, first_month = slots[0]
     last_year, last_month = slots[-1]
     start_date_text = f"{first_year:04d}-{first_month:02d}-01"
@@ -971,22 +1482,34 @@ def render_client_daily_steps_panel(client_id, panel_id='client-steps-panel', in
                 '</label>'
             )
         is_current_slot = (year == last_year and month == last_month)
-        open_attr = ' open' if is_current_slot else ''
-        month_columns.append(
-            f'<details class="fw-month-card"{open_attr}>'
-            '<summary class="fw-month-summary">'
-            f'<span class="fw-month-title">{SPANISH_MONTHS[month - 1]} {year}</span>'
-            f'<span class="fw-month-meta">{filled_days}/{max_day} días</span>'
-            '</summary>'
-            f'<div class="fw-month-days">{"".join(rows)}</div>'
-            '</details>'
-        )
+        if admin_compact:
+            month_columns.append(
+                '<div class="fw-month-card">'
+                '<div class="fw-month-summary">'
+                f'<span class="fw-month-title">{SPANISH_MONTHS[month - 1]} {year}</span>'
+                f'<span class="fw-month-meta">{filled_days}/{max_day} días</span>'
+                '</div>'
+                f'<div class="fw-month-days">{"".join(rows)}</div>'
+                '</div>'
+            )
+        else:
+            open_attr = ' open' if is_current_slot else ''
+            month_columns.append(
+                f'<details class="fw-month-card"{open_attr}>'
+                '<summary class="fw-month-summary">'
+                f'<span class="fw-month-title">{SPANISH_MONTHS[month - 1]} {year}</span>'
+                f'<span class="fw-month-meta">{filled_days}/{max_day} días</span>'
+                '</summary>'
+                f'<div class="fw-month-days">{"".join(rows)}</div>'
+                '</details>'
+            )
 
     goal_value = int(daily_goal or 0)
     goal_label = f"{goal_value} pasos" if goal_value > 0 else 'Sin objetivo'
     client_payload = f"client_id: {int(client_id)}," if include_client_id else ''
+    wrap_class = 'fw-wrap fw-admin-compact' if admin_compact else 'fw-wrap'
     return f'''
-    <div class="fw-wrap" id="{panel_id}">
+    <div class="{wrap_class}" id="{panel_id}">
         <div class="fw-head">Pasos diarios</div>
         <div class="fw-grid">{"".join(month_columns)}</div>
         <div class="fw-foot"><strong>Objetivo diario:</strong> {html.escape(goal_label)}</div>
@@ -1000,15 +1523,19 @@ def render_client_daily_steps_panel(client_id, panel_id='client-steps-panel', in
         const dailyGoal = {goal_value};
         const monthCards = Array.from(root.querySelectorAll('.fw-month-card'));
 
-        // Keep accordion behavior simple on mobile: only one month open at a time.
-        monthCards.forEach((card) => {{
-            card.addEventListener('toggle', () => {{
-                if (!card.open) return;
-                monthCards.forEach((other) => {{
-                    if (other !== card) other.open = false;
+        const isAdminCompact = root.classList.contains('fw-admin-compact');
+
+        // Keep accordion behavior simple on client/mobile views: only one month open at a time.
+        if (!isAdminCompact) {{
+            monthCards.forEach((card) => {{
+                card.addEventListener('toggle', () => {{
+                    if (!card.open) return;
+                    monthCards.forEach((other) => {{
+                        if (other !== card) other.open = false;
+                    }});
                 }});
             }});
-        }});
+        }}
 
         function normalizeSteps(raw) {{
             const text = String(raw || '').trim();
@@ -4182,7 +4709,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             c = client_rows[0]
-            _cid, client_name, _phone, client_email, _birthdate, _height_cm, _weight_kg, _objectives, _psd, _ped, _pa, _pn, _created = c
+            _cid, client_name, _phone, client_email, _birthdate, _height_cm, _weight_kg, _objectives, plan_start_date, plan_end_date, _pa, _pn, _created = c
             active_diet = get_active_client_diet(client_id)
             active_routine = get_active_client_routine(client_id)
 
@@ -4248,6 +4775,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
 
             fasting_weights_html = render_fasting_weights_panel(client_id, panel_id=f'fw-client-{client_id}', include_client_id=admin_preview)
+            weight_trend_html = render_client_weight_trend_chart(client_id, panel_id=f'weight-trend-client-{client_id}')
             daily_steps_goal = get_client_daily_steps_goal(client_id)
             daily_steps_html = render_client_daily_steps_panel(
                 client_id,
@@ -4255,8 +4783,12 @@ class Handler(BaseHTTPRequestHandler):
                 include_client_id=admin_preview,
                 daily_goal=daily_steps_goal,
             )
+            client_notice_events = get_client_notice_events(client_id)
+            client_notice_rules = get_client_notice_rules(client_id)
+            calendar_html = render_client_notice_calendar_panel(c, client_notice_events, client_notice_rules, admin_mode=False)
+            calendar_events = build_client_notice_calendar_events(c, client_notice_events, client_notice_rules)
             selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
-            if selected_section not in ('diet', 'routine', 'weight', 'steps'):
+            if selected_section not in ('diet', 'routine', 'weight', 'steps', 'calendar'):
                 selected_section = ''
 
             section_titles = {
@@ -4264,25 +4796,29 @@ class Handler(BaseHTTPRequestHandler):
                 'routine': 'Mi rutina',
                 'weight': 'Mi peso corporal en ayunas',
                 'steps': 'Mis pasos diarios',
+                'calendar': 'Calendario de avisos',
             }
             section_descriptions = {
                 'diet': 'Consulta tu plan actual y descarga tu PDF.',
                 'routine': 'Revisa tus días de entrenamiento y ejercicios.',
                 'weight': 'Registra tu peso diario y revisa la media semanal.',
                 'steps': 'Anota tus pasos diarios y compáralos con tu objetivo.',
+                'calendar': 'Fechas de inicio/fin del plan y avisos importantes.',
             }
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
                 'routine': 'Activa' if active_routine else 'Sin rutina activa',
                 'weight': 'Seguimiento activo',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
+                'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
             }
 
             section_content = {
                 'diet': diet_html,
                 'routine': routine_html,
-                'weight': fasting_weights_html,
+                'weight': weight_trend_html + fasting_weights_html,
                 'steps': daily_steps_html,
+                'calendar': calendar_html,
             }
 
             preview_qs = f'&client_id={client_id}' if admin_preview else ''
@@ -4292,7 +4828,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'<h3>{html.escape(section_titles[key])}</h3>'
                 f'<p>{html.escape(section_descriptions[key])}</p>'
                 '</a>'
-                for key in ('diet', 'routine', 'weight', 'steps')
+                for key in ('diet', 'routine', 'weight', 'steps', 'calendar')
             ])
 
             detail_html = ''
@@ -4360,6 +4896,11 @@ class Handler(BaseHTTPRequestHandler):
         th{{background:#f3f5f8;}}
         .fw-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:8px;overflow:hidden;}}
         .fw-head{{font-size:.98rem;font-weight:800;color:#b91c1c;text-align:center;margin:1px 0 8px;}}
+        .weight-chart-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:12px;margin-bottom:10px;}}
+        .weight-chart-head strong{{font-size:1rem;color:#0f172a;}}
+        .weight-chart-meta{{margin-top:4px;color:#64748b;font-size:.84rem;}}
+        .weight-chart-canvas{{display:block;width:100%;margin-top:10px;background:linear-gradient(180deg,#ffffff 0%,#f8fafc 100%);border:1px solid #e2e8f0;border-radius:10px;}}
+        .weight-chart-empty{{border:1px dashed #d8dde6;border-radius:10px;padding:10px;color:#64748b;margin-bottom:10px;background:#f8fafc;}}
         .fw-grid{{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;align-items:start;width:100%;min-width:0;}}
         .fw-month-card{{border:1px solid #d8dde6;border-radius:12px;background:#f8fafc;min-width:0;overflow:hidden;}}
         .fw-month-card[open]{{border-color:#c4ccda;box-shadow:0 8px 20px rgba(16,19,24,.06);background:#fff;}}
@@ -4387,6 +4928,24 @@ class Handler(BaseHTTPRequestHandler):
         .fw-steps-input.goal-met{{background:#ecfdf5;border-color:#86efac;color:#166534;font-weight:700;}}
         .fw-steps-input.goal-missed{{background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700;}}
         .fw-foot{{margin-top:8px;color:#6d7480;font-size:.82rem;}}
+        .cal-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:10px;}}
+        .cal-head{{font-size:1rem;font-weight:800;margin:0 0 10px;color:#0f172a;}}
+        .cal-months{{display:grid;gap:8px;}}
+        .cal-month{{border:1px solid #d8dde6;border-radius:10px;background:#f8fafc;overflow:hidden;}}
+        .cal-month[open]{{background:#fff;border-color:#cbd5e1;}}
+        .cal-month summary{{list-style:none;cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:10px 12px;font-weight:800;color:#0f172a;}}
+        .cal-month summary::-webkit-details-marker{{display:none;}}
+        .cal-count{{font-size:.78rem;font-weight:700;color:#6d7480;background:#eef2f7;padding:3px 8px;border-radius:999px;}}
+        .cal-items{{padding:10px;border-top:1px solid #e8ebef;display:grid;gap:8px;}}
+        .cal-item{{border:1px solid #e8ebef;border-radius:10px;background:#fff;padding:10px;}}
+        .cal-item-head{{display:flex;justify-content:space-between;gap:8px;align-items:center;}}
+        .cal-date{{font-size:.82rem;font-weight:800;color:#334155;}}
+        .cal-chip{{display:inline-flex;padding:3px 8px;border-radius:999px;background:#eef2f7;color:#475569;font-size:.72rem;font-weight:800;}}
+        .cal-chip-auto{{background:#dcfce7;color:#166534;}}
+        .cal-chip-recurring{{background:#ede9fe;color:#5b21b6;}}
+        .cal-item h4{{margin:7px 0 4px;font-size:.95rem;}}
+        .cal-item p{{margin:0;color:#6d7480;font-size:.86rem;}}
+        .cal-meta{{margin-top:5px;color:#64748b;font-size:.78rem;font-weight:700;}}
         input, button, select, textarea{{font-size:16px;}}
         @media (max-width: 900px){{ .cards{{grid-template-columns:1fr;}} .fw-grid{{grid-template-columns:1fr;}} }}
         @media (max-width: 640px){{
@@ -5492,15 +6051,35 @@ class Handler(BaseHTTPRequestHandler):
             old_training_html = ''.join([training_item_html(h) for h in old_training]) or '<p class="empty">Sin entrenamientos antiguos.</p>'
             fasting_weights_html = ''
             daily_steps_html = ''
+            calendar_html = ''
             if selected_section == 'weight':
-                fasting_weights_html = render_fasting_weights_panel(cid_i, panel_id=f'fw-admin-{cid_i}', include_client_id=True)
+                fasting_weights_html = render_fasting_weights_panel(
+                    cid_i,
+                    panel_id=f'fw-admin-{cid_i}',
+                    include_client_id=True,
+                    admin_compact=True,
+                )
             if selected_section == 'steps':
                 daily_steps_html = render_client_daily_steps_panel(
                     cid_i,
                     panel_id=f'steps-admin-{cid_i}',
                     include_client_id=True,
                     daily_goal=daily_steps_goal,
+                    admin_compact=True,
                 )
+            if selected_section == 'calendar':
+                client_notice_events = get_client_notice_events(cid_i)
+                client_notice_rules = get_client_notice_rules(cid_i)
+                calendar_html = render_client_notice_calendar_panel(
+                    c,
+                    client_notice_events,
+                    client_notice_rules,
+                    admin_mode=True,
+                    client_id=cid_i,
+                    return_to=f'/client_profile?id={cid_i}&section=calendar',
+                )
+
+            calendar_events = build_client_notice_calendar_events(c, get_client_notice_events(cid_i), get_client_notice_rules(cid_i))
 
             diet_panel_html = f'''
             <section class="panel">
@@ -5576,29 +6155,40 @@ class Handler(BaseHTTPRequestHandler):
             </section>
             '''
 
+            calendar_panel_html = f'''
+            <section class="panel panel-full">
+                <h2>🗓️ Calendario de avisos</h2>
+                {calendar_html}
+            </section>
+            '''
+
             section_titles = {
                 'diet': 'Dietas',
                 'training': 'Entrenamientos',
                 'weight': 'Peso corporal en ayunas',
                 'steps': 'Pasos diarios',
+                'calendar': 'Calendario de avisos',
             }
             section_descriptions = {
                 'diet': 'Asigna dietas y revisa el historial del cliente.',
                 'training': 'Asigna rutinas y consulta histórico de entrenamientos.',
                 'weight': 'Control diario del peso corporal en ayunas.',
                 'steps': 'Objetivo y seguimiento de pasos diarios.',
+                'calendar': 'Inicio/fin de plan y avisos personalizados del cliente.',
             }
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
                 'training': 'Activa' if active_routine else 'Sin entrenamiento activo',
                 'weight': 'Seguimiento activo',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
+                'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
             }
             section_content = {
                 'diet': diet_panel_html,
                 'training': training_panel_html,
                 'weight': weight_panel_html,
                 'steps': steps_panel_html,
+                'calendar': calendar_panel_html,
             }
 
             if selected_section not in section_content:
@@ -5610,7 +6200,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'<h3>{html.escape(section_titles[key])}</h3>'
                 f'<p>{html.escape(section_descriptions[key])}</p>'
                 '</a>'
-                for key in ('diet', 'training', 'weight', 'steps')
+                for key in ('diet', 'training', 'weight', 'steps', 'calendar')
             ])
 
             detail_html = ''
@@ -5682,8 +6272,12 @@ class Handler(BaseHTTPRequestHandler):
         .fw-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:8px;overflow:hidden;}}
         .fw-head{{font-size:.98rem;font-weight:800;color:#b91c1c;text-align:center;margin:1px 0 8px;}}
         .fw-grid{{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:6px;align-items:start;width:100%;min-width:0;}}
-        .fw-month{{border:1px solid #d8dde6;border-radius:9px;background:#f8fafc;min-height:220px;min-width:0;overflow:hidden;}}
-        .fw-month-title{{padding:5px 4px;border-bottom:1px solid #d8dde6;text-align:center;font-weight:800;color:#101318;font-size:.78rem;line-height:1.1;overflow-wrap:anywhere;}}
+        .fw-month-summary{{list-style:none;cursor:pointer;display:flex;flex-direction:column;gap:2px;padding:6px;border-bottom:1px solid #e2e8f0;}}
+        .fw-month-summary::-webkit-details-marker{{display:none;}}
+        .fw-month-card{{border:1px solid #d8dde6;border-radius:9px;background:#f8fafc;min-width:0;overflow:hidden;}}
+        .fw-month-card[open]{{background:#fff;border-color:#cbd5e1;}}
+        .fw-month-title{{font-weight:800;color:#101318;font-size:.78rem;line-height:1.1;overflow-wrap:anywhere;}}
+        .fw-month-meta{{font-size:.72rem;color:#6d7480;font-weight:700;}}
         .fw-month-days{{padding:5px;display:flex;flex-direction:column;gap:3px;max-height:none;overflow:visible;min-width:0;}}
         .fw-row{{display:grid;grid-template-columns:20px 58px;gap:4px;align-items:center;font-size:.74rem;color:#111827;min-width:0;justify-content:start;}}
         .fw-mean-row{{padding:2px 0 4px;}}
@@ -5704,19 +6298,65 @@ class Handler(BaseHTTPRequestHandler):
         .fw-steps-input.goal-met{{background:#ecfdf5;border-color:#86efac;color:#166534;font-weight:700;}}
         .fw-steps-input.goal-missed{{background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700;}}
         .fw-foot{{margin-top:8px;color:#6d7480;font-size:.82rem;}}
+        .fw-wrap.fw-admin-compact{{padding:6px;}}
+        .fw-wrap.fw-admin-compact .fw-head{{font-size:.92rem;margin:0 0 6px;}}
+        .fw-wrap.fw-admin-compact .fw-grid{{gap:6px;grid-template-columns:repeat(6,minmax(0,1fr));}}
+        .fw-wrap.fw-admin-compact .fw-month-card{{display:block;height:auto;min-height:0;border-radius:10px;overflow:visible;}}
+        .fw-wrap.fw-admin-compact .fw-month-summary{{padding:5px 6px;gap:1px;}}
+        .fw-wrap.fw-admin-compact .fw-month-title{{font-size:.74rem;line-height:1.05;}}
+        .fw-wrap.fw-admin-compact .fw-month-meta{{font-size:.68rem;}}
+        .fw-wrap.fw-admin-compact .fw-month-days{{padding:4px;gap:2px;overflow:visible;flex:0 0 auto;max-height:none;}}
+        .fw-wrap.fw-admin-compact .fw-row{{grid-template-columns:14px minmax(0,1fr);gap:3px;font-size:.66rem;line-height:1.05;}}
+        .fw-wrap.fw-admin-compact .fw-input,
+        .fw-wrap.fw-admin-compact .fw-steps-input{{width:100%;max-width:none;min-width:0;height:20px;padding:1px 4px;font-size:.66rem;border-radius:6px;}}
+        .fw-wrap.fw-admin-compact .fw-mean-row{{padding:1px 0 2px;}}
+        .fw-wrap.fw-admin-compact .fw-mean-value{{font-size:.66rem;line-height:1.05;}}
+        .fw-wrap.fw-admin-compact .fw-mean-value em{{margin-left:2px;}}
+        .fw-wrap.fw-admin-compact .fw-foot{{margin-top:6px;font-size:.75rem;}}
+        .cal-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:10px;}}
+        .cal-head{{font-size:1rem;font-weight:800;margin:0 0 10px;color:#0f172a;}}
+        .cal-add-form{{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;margin-bottom:10px;}}
+        .cal-add-form .full{{grid-column:1 / -1;}}
+        .cal-add-form input,.cal-add-form button{{font:inherit;padding:9px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;}}
+        .cal-add-form button{{background:#101318;color:#fff;border-color:#101318;cursor:pointer;font-weight:700;}}
+        .cal-months{{display:grid;gap:8px;}}
+        .cal-month{{border:1px solid #d8dde6;border-radius:10px;background:#f8fafc;overflow:hidden;}}
+        .cal-month[open]{{background:#fff;border-color:#cbd5e1;}}
+        .cal-month summary{{list-style:none;cursor:pointer;display:flex;justify-content:space-between;align-items:center;padding:10px 12px;font-weight:800;color:#0f172a;}}
+        .cal-month summary::-webkit-details-marker{{display:none;}}
+        .cal-count{{font-size:.78rem;font-weight:700;color:#6d7480;background:#eef2f7;padding:3px 8px;border-radius:999px;}}
+        .cal-items{{padding:10px;border-top:1px solid #e8ebef;display:grid;gap:8px;}}
+        .cal-item{{border:1px solid #e8ebef;border-radius:10px;background:#fff;padding:10px;}}
+        .cal-item-head{{display:flex;justify-content:space-between;gap:8px;align-items:center;}}
+        .cal-date{{font-size:.82rem;font-weight:800;color:#334155;}}
+        .cal-chip{{display:inline-flex;padding:3px 8px;border-radius:999px;background:#eef2f7;color:#475569;font-size:.72rem;font-weight:800;}}
+        .cal-chip-auto{{background:#dcfce7;color:#166534;}}
+        .cal-chip-recurring{{background:#ede9fe;color:#5b21b6;}}
+        .cal-item h4{{margin:7px 0 4px;font-size:.95rem;}}
+        .cal-item p{{margin:0;color:#6d7480;font-size:.86rem;}}
+        .cal-meta{{margin-top:5px;color:#64748b;font-size:.78rem;font-weight:700;}}
+        .cal-inline-form{{margin-top:8px;}}
+        .cal-delete-btn{{padding:6px 10px;border:1px solid #fecaca;background:#fff1f2;color:#9f1239;border-radius:8px;font-weight:700;cursor:pointer;}}
+        .cal-rule-form{{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;margin:0 0 10px;}}
+        .cal-rule-form .full{{grid-column:1 / -1;}}
+        .cal-rule-form input,.cal-rule-form button{{font:inherit;padding:9px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;}}
+        .cal-rule-form button{{background:#4c1d95;color:#fff;border-color:#4c1d95;cursor:pointer;font-weight:700;}}
+        .cal-rules-list{{display:grid;gap:8px;margin:0 0 10px;}}
         .steps-goal-form{{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:10px;}}
         .steps-goal-form label{{display:flex;flex-direction:column;gap:5px;font-size:.78rem;color:#6d7480;font-weight:700;}}
         .steps-goal-form input{{font:inherit;padding:8px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;min-width:200px;}}
         .steps-goal-form button{{padding:8px 12px;border:1px solid #d8dde6;border-radius:9px;background:#fff;color:#101318;font-weight:700;cursor:pointer;}}
         .empty{{color:#6d7480;font-style:italic;}}
-        @media (max-width: 1280px){{ .fw-grid{{grid-template-columns:repeat(5,minmax(0,1fr));}} }}
+        @media (max-width: 1440px){{ .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(5,minmax(0,1fr));}} }}
+        @media (max-width: 1280px){{ .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(4,minmax(0,1fr));}} }}
         @media (max-width: 1200px){{ .fw-grid{{grid-template-columns:repeat(4,minmax(0,1fr));}} }}
         @media (max-width: 960px){{
             .cards{{grid-template-columns:repeat(2,minmax(0,1fr));}}
             .fw-grid{{grid-template-columns:repeat(3,minmax(0,1fr));}}
+            .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(3,minmax(0,1fr));}}
         }}
         @media (max-width: 820px){{ .cards{{grid-template-columns:1fr;}} }}
-        @media (max-width: 720px){{ .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} }}
+        @media (max-width: 720px){{ .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} }}
         @media (max-width: 560px){{ .fw-grid{{grid-template-columns:1fr;}} }}
     </style>
 </head>
@@ -9664,6 +10304,112 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == '/add_client_notice_event':
+            client_id = get('client_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            date_text = normalize_iso_date_text(get('date_text').strip())
+            title = get('title').strip()
+            notes = get('notes').strip()
+
+            try:
+                client_id_i = int(client_id)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                self.end_headers()
+                return
+
+            if not date_text:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Fecha inválida'))
+                self.end_headers()
+                return
+
+            if not title:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Título obligatorio'))
+                self.end_headers()
+                return
+
+            create_client_notice_event(client_id_i, date_text, title, notes)
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Aviso añadido'))
+            self.end_headers()
+            return
+
+        if path == '/delete_client_notice_event':
+            event_id = get('event_id').strip()
+            client_id = get('client_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+
+            try:
+                event_id_i = int(event_id)
+                client_id_i = int(client_id) if client_id else None
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Aviso inválido'))
+                self.end_headers()
+                return
+
+            delete_client_notice_event(event_id_i, client_id_i)
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Aviso eliminado'))
+            self.end_headers()
+            return
+
+        if path == '/add_client_notice_rule':
+            client_id = get('client_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            month_days = parse_month_days(get('month_days').strip())
+            title = get('title').strip()
+            notes = get('notes').strip()
+
+            try:
+                client_id_i = int(client_id)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                self.end_headers()
+                return
+
+            if not month_days:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Días del mes inválidos'))
+                self.end_headers()
+                return
+
+            if not title:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Título obligatorio'))
+                self.end_headers()
+                return
+
+            create_client_notice_rule(client_id_i, month_days_text(month_days), title, notes)
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Regla recurrente añadida'))
+            self.end_headers()
+            return
+
+        if path == '/delete_client_notice_rule':
+            rule_id = get('rule_id').strip()
+            client_id = get('client_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+
+            try:
+                rule_id_i = int(rule_id)
+                client_id_i = int(client_id) if client_id else None
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Regla inválida'))
+                self.end_headers()
+                return
+
+            delete_client_notice_rule(rule_id_i, client_id_i)
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Regla recurrente eliminada'))
+            self.end_headers()
+            return
+
         if path == '/edit_payment':
             def getp(k):
                 return params.get(k, [''])[0]
@@ -9739,6 +10485,8 @@ class Handler(BaseHTTPRequestHandler):
             cur.execute("DELETE FROM client_training_history WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM client_fasting_weights WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM client_daily_steps WHERE client_id = ?", (cid_i,))
+            cur.execute("DELETE FROM client_notice_events WHERE client_id = ?", (cid_i,))
+            cur.execute("DELETE FROM client_notice_rules WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM payment_plans WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM clients WHERE id = ?", (cid_i,))
             for did in client_diet_ids:
@@ -10146,6 +10894,8 @@ def run():
         ensure_client_history_tables()
         ensure_fasting_weights_table()
         ensure_client_daily_steps_table()
+        ensure_client_notice_events_table()
+        ensure_client_notice_rules_table()
         ensure_diet_builder_tables()
         ensure_app_settings_table()
     finally:
