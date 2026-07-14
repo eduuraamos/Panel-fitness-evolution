@@ -3544,7 +3544,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def redirect_admin_login(self, next_path='/admin'):
         self.send_response(303)
-        self.send_header('Location', '/admin_login?next=' + urllib.parse.quote(next_path or '/admin'))
+        self.send_header('Location', '/client_login?next=' + urllib.parse.quote(next_path or '/admin'))
         self.end_headers()
 
     def read_json(self):
@@ -3628,65 +3628,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/admin_logout':
             self.send_response(303)
             self.send_header('Set-Cookie', f'{ADMIN_PORTAL_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax')
-            self.send_header('Location', '/admin_login?msg=' + urllib.parse.quote('Sesión cerrada'))
+            self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Sesión cerrada'))
             self.end_headers()
             return
 
         if path == '/admin_login':
-            if self.is_admin_authenticated():
-                self.send_response(303)
-                self.send_header('Location', '/admin')
-                self.end_headers()
-                return
-            msg = q.get('msg', [''])[0] if 'msg' in q else ''
             next_path = q.get('next', ['/admin'])[0] if 'next' in q else '/admin'
-            page = f'''
-<!doctype html>
-<html>
-<head>
-    <meta charset="utf-8" />
-    <title>Acceso administrador</title>
-    <style>
-        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
-        .page{{max-width:560px;margin:0 auto;padding:28px;}}
-        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
-        h1{{margin:0 0 10px;font-size:2rem;}}
-        p{{margin:0 0 18px;color:#6d7480;}}
-        form{{display:grid;gap:12px;}}
-        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
-        button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
-        .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
-        .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
-        .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
-    </style>
-</head>
-<body>
-    <div class="page">
-        <div class="card">
-            <h1>Acceso nutricionista</h1>
-            <p>Solo personal autorizado puede entrar al panel maestro.</p>
-            {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
-            <form method="post" action="/admin_login">
-                <input type="hidden" name="next" value="{html.escape(next_path or '/admin')}" />
-                <input name="username" placeholder="Usuario" required />
-                <input name="password" type="password" placeholder="Contraseña" required />
-                <button type="submit">Entrar al panel</button>
-            </form>
-            <div class="helper"><a href="/client_login">Ir al acceso de clientes</a></div>
-        </div>
-    </div>
-</body>
-</html>
-            '''
-            body = page.encode('utf-8')
-            self.send_response(200)
-            self.send_header('Content-Type', 'text/html; charset=utf-8')
-            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
-            self.send_header('Pragma', 'no-cache')
-            self.send_header('Expires', '0')
-            self.send_header('Content-Length', str(len(body)))
+            self.send_response(303)
+            self.send_header('Location', '/client_login?next=' + urllib.parse.quote(next_path))
             self.end_headers()
-            self.wfile.write(body)
             return
 
         public_get_exact = {
@@ -4012,12 +3962,16 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == '/client_login':
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
+            next_path = q.get('next', ['/client_app'])[0] if 'next' in q else '/client_app'
+            if not next_path.startswith('/'):
+                next_path = '/client_app'
+            logo = logo_html()
             page = f'''
 <!doctype html>
 <html>
 <head>
     <meta charset="utf-8" />
-    <title>Acceso cliente</title>
+    <title>Acceso</title>
     <style>
         body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
         .page{{max-width:560px;margin:0 auto;padding:28px;}}
@@ -4035,13 +3989,15 @@ class Handler(BaseHTTPRequestHandler):
 <body>
     <div class="page">
         <div class="card">
-            <h1>Acceso cliente</h1>
-            <p>Inicia sesión para ver tu dieta activa y tu rutina activa.</p>
+            {logo}
+            <h1>Acceso</h1>
+            <p>Inicia sesión con tu cuenta de cliente o con tu cuenta de administrador.</p>
             {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
             <form method="post" action="/client_login">
-                <input name="identifier" placeholder="Email o teléfono" required />
+                <input type="hidden" name="next" value="{html.escape(next_path)}" />
+                <input name="identifier" placeholder="Usuario, email o teléfono" required />
                 <input name="password" type="password" placeholder="Contraseña" />
-                <input name="access_code" placeholder="Código de acceso (opcional)" />
+                <input name="access_code" placeholder="Código de acceso cliente (opcional)" />
                 <button type="submit">Entrar</button>
             </form>
             <div class="helper">¿Primera vez? <a href="/client_register">Crear cuenta</a></div>
@@ -8404,6 +8360,22 @@ class Handler(BaseHTTPRequestHandler):
             identifier = get('identifier').strip()
             password = get('password').strip()
             access_code = get('access_code').strip()
+            next_path = get('next').strip() or '/client_app'
+            if not next_path.startswith('/'):
+                next_path = '/client_app'
+
+            # Unified access: admin can log in from the same entry form.
+            if verify_admin_portal_credentials(identifier, password):
+                admin_token = make_admin_portal_session_token(identifier)
+                self.send_response(303)
+                self.send_header(
+                    'Set-Cookie',
+                    f'{ADMIN_PORTAL_COOKIE}={urllib.parse.quote(admin_token)}; Path=/; Max-Age={ADMIN_PORTAL_SESSION_TTL_SECONDS}; HttpOnly; SameSite=Lax',
+                )
+                self.send_header('Location', '/admin')
+                self.end_headers()
+                return
+
             user = get_client_portal_user_by_identifier(identifier)
             if not user:
                 self.send_response(303)
@@ -8431,7 +8403,7 @@ class Handler(BaseHTTPRequestHandler):
                 'Set-Cookie',
                 f'{CLIENT_PORTAL_COOKIE}={urllib.parse.quote(token)}; Path=/; Max-Age={CLIENT_PORTAL_SESSION_TTL_SECONDS}; HttpOnly; SameSite=Lax',
             )
-            self.send_header('Location', '/client_app')
+            self.send_header('Location', next_path)
             self.end_headers()
             return
 
