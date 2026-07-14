@@ -3857,19 +3857,27 @@ class Handler(BaseHTTPRequestHandler):
 <html>
 <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Registro cliente</title>
     <style>
+        *{{box-sizing:border-box;}}
+        html,body{{height:100%;}}
         body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
-        .page{{max-width:560px;margin:0 auto;padding:28px;}}
+        .page{{max-width:560px;margin:0 auto;padding:clamp(14px, 3.5vw, 28px);min-height:100svh;display:flex;align-items:center;}}
+        @supports (min-height: 100dvh){{.page{{min-height:100dvh;}}}}
         .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
         h1{{margin:0 0 10px;font-size:2rem;}}
         p{{margin:0 0 18px;color:#6d7480;}}
         form{{display:grid;gap:12px;}}
-        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
+        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;font-size:16px;}}
         button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
         .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
         .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
         .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
+        @media (max-width:640px){{
+            .card{{padding:18px;border-radius:14px;}}
+            h1{{font-size:1.75rem;}}
+        }}
     </style>
 </head>
 <body>
@@ -3926,19 +3934,28 @@ class Handler(BaseHTTPRequestHandler):
 <html>
 <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Completar perfil</title>
     <style>
+        *{{box-sizing:border-box;}}
+        html,body{{height:100%;}}
         body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
-        .page{{max-width:900px;margin:0 auto;padding:28px;}}
+        .page{{max-width:900px;margin:0 auto;padding:clamp(14px, 3.5vw, 28px);min-height:100svh;display:flex;align-items:center;}}
+        @supports (min-height: 100dvh){{.page{{min-height:100dvh;}}}}
         .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
         h1{{margin:0 0 8px;font-size:2rem;}}
         p{{margin:0 0 16px;color:#6d7480;}}
         form{{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));}}
-        input,textarea{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
+        input,textarea{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;font-size:16px;}}
         textarea{{grid-column:1/-1;min-height:110px;resize:vertical;}}
         .full{{grid-column:1/-1;}}
         button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
         .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
+        @media (max-width:640px){{
+            .card{{padding:18px;border-radius:14px;}}
+            h1{{font-size:1.75rem;}}
+            form{{grid-template-columns:1fr;}}
+        }}
     </style>
 </head>
 <body>
@@ -3984,19 +4001,27 @@ class Handler(BaseHTTPRequestHandler):
 <html>
 <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>Acceso</title>
     <style>
+        *{{box-sizing:border-box;}}
+        html,body{{height:100%;}}
         body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
-        .page{{max-width:560px;margin:0 auto;padding:28px;}}
+        .page{{max-width:560px;margin:0 auto;padding:clamp(14px, 3.5vw, 28px);min-height:100svh;display:flex;align-items:center;}}
+        @supports (min-height: 100dvh){{.page{{min-height:100dvh;}}}}
         .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
         h1{{margin:0 0 10px;font-size:2rem;}}
         p{{margin:0 0 18px;color:#6d7480;}}
         form{{display:grid;gap:12px;}}
-        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;}}
+        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;font-size:16px;}}
         button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
         .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
         .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
         .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
+        @media (max-width:640px){{
+            .card{{padding:18px;border-radius:14px;}}
+            h1{{font-size:1.75rem;}}
+        }}
     </style>
 </head>
 <body>
