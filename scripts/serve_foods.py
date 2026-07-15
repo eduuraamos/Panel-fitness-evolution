@@ -40,6 +40,7 @@ DB_PATH = os.path.join(DATA_DIR, "foods.db")
 STATIC_BASE_DIR = os.path.join(os.path.dirname(__file__), STATIC_DIR)
 UPLOADS_DIR = os.environ.get("UPLOADS_DIR", os.path.join(DATA_DIR, "uploads"))
 UPLOADS_FOODS_DIR = os.path.join(UPLOADS_DIR, "foods")
+UPLOADS_REVIEWS_DIR = os.path.join(UPLOADS_DIR, "reviews")
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8005"))
 CLIENT_PORTAL_SECRET = os.environ.get("CLIENT_PORTAL_SECRET", "nutrition-app-client-portal")
@@ -71,6 +72,30 @@ DEFAULT_DIET_INSTRUCTIONS_TEMPLATE = (
 SPANISH_MONTHS = [
     'ENERO', 'FEBRERO', 'MARZO', 'ABRIL', 'MAYO', 'JUNIO',
     'JULIO', 'AGOSTO', 'SEPTIEMBRE', 'OCTUBRE', 'NOVIEMBRE', 'DICIEMBRE'
+]
+
+REVIEW_PHOTO_FIELDS = [
+    ('photo_front_path', 'Frente'),
+    ('photo_left_path', 'Perfil izquierdo'),
+    ('photo_right_path', 'Perfil derecho'),
+    ('photo_back_path', 'Espalda'),
+]
+
+REVIEW_MEASUREMENT_FIELDS = [
+    ('neck_cm', 'Cuello'),
+    ('left_biceps_relaxed_cm', 'Biceps izquierdo relajado'),
+    ('left_biceps_flexed_cm', 'Biceps izquierdo contraido'),
+    ('right_biceps_relaxed_cm', 'Biceps derecho relajado'),
+    ('right_biceps_flexed_cm', 'Biceps derecho contraido'),
+    ('shoulders_cm', 'Hombros'),
+    ('upper_chest_cm', 'Pectoral superior'),
+    ('lower_chest_cm', 'Pectoral inferior'),
+    ('waist_navel_cm', 'Ombligo (cintura)'),
+    ('glutes_cm', 'Gluteo'),
+    ('left_thigh_cm', 'Muslo izquierdo'),
+    ('right_thigh_cm', 'Muslo derecho'),
+    ('left_calf_cm', 'Gemelo izquierdo'),
+    ('right_calf_cm', 'Gemelo derecho'),
 ]
 
 
@@ -497,12 +522,44 @@ def ensure_clients_table(conn_or_path=None):
         cur.execute("ALTER TABLE clients ADD COLUMN daily_steps_goal INTEGER DEFAULT 0")
     if 'weight_goal_mode' not in cols:
         cur.execute("ALTER TABLE clients ADD COLUMN weight_goal_mode TEXT DEFAULT 'fat_loss'")
+    if 'review_schedule_mode' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN review_schedule_mode TEXT DEFAULT 'monthly_days'")
+    if 'review_month_days' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN review_month_days TEXT DEFAULT '1,15'")
+    if 'review_weekday' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN review_weekday INTEGER DEFAULT 1")
+    if 'review_custom_interval_days' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN review_custom_interval_days INTEGER DEFAULT 10")
+    if 'review_anchor_date' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN review_anchor_date TEXT")
+    if 'review_repeat_enabled' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN review_repeat_enabled INTEGER DEFAULT 1")
     cur.execute(
         "UPDATE clients SET client_access_code = ('C' || CAST(id AS TEXT)) WHERE COALESCE(TRIM(client_access_code), '') = ''"
     )
     cur.execute(
         "UPDATE clients SET weight_goal_mode = 'fat_loss' "
         "WHERE COALESCE(TRIM(LOWER(weight_goal_mode)), '') NOT IN ('fat_loss', 'muscle_gain')"
+    )
+    cur.execute(
+        "UPDATE clients SET review_schedule_mode = 'monthly_days' "
+        "WHERE COALESCE(TRIM(LOWER(review_schedule_mode)), '') NOT IN ('monthly_days', 'weekly', 'biweekly', 'custom')"
+    )
+    cur.execute(
+        "UPDATE clients SET review_month_days = '1,15' "
+        "WHERE COALESCE(TRIM(review_month_days), '') = ''"
+    )
+    cur.execute(
+        "UPDATE clients SET review_weekday = 1 "
+        "WHERE COALESCE(review_weekday, 0) < 1 OR COALESCE(review_weekday, 0) > 7"
+    )
+    cur.execute(
+        "UPDATE clients SET review_custom_interval_days = 10 "
+        "WHERE COALESCE(review_custom_interval_days, 0) < 2"
+    )
+    cur.execute(
+        "UPDATE clients SET review_repeat_enabled = 1 "
+        "WHERE COALESCE(review_repeat_enabled, 1) NOT IN (0, 1)"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_email ON clients(email)")
     conn.commit()
@@ -688,6 +745,46 @@ def ensure_client_notice_rules_table(conn_or_path=None):
         conn.close()
 
 
+def ensure_client_reviews_table(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_reviews (
+        id INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL,
+        review_date TEXT NOT NULL,
+        photo_front_path TEXT,
+        photo_left_path TEXT,
+        photo_right_path TEXT,
+        photo_back_path TEXT,
+        neck_cm REAL,
+        left_biceps_relaxed_cm REAL,
+        left_biceps_flexed_cm REAL,
+        right_biceps_relaxed_cm REAL,
+        right_biceps_flexed_cm REAL,
+        shoulders_cm REAL,
+        upper_chest_cm REAL,
+        lower_chest_cm REAL,
+        waist_navel_cm REAL,
+        glutes_cm REAL,
+        left_thigh_cm REAL,
+        right_thigh_cm REAL,
+        left_calf_cm REAL,
+        right_calf_cm REAL,
+        professional_feedback TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(client_id) REFERENCES clients(id)
+    )
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_reviews_client_date ON client_reviews(client_id, review_date)")
+    conn.commit()
+    if should_close:
+        conn.close()
+
+
 def get_fasting_weight_slots(excluded_months=None):
     from datetime import date
     today = date.today()
@@ -800,6 +897,374 @@ def get_client_daily_steps_map(client_id, start_date_text, end_date_text):
     for date_text, steps in rows:
         out[str(date_text)] = int(steps or 0)
     return out
+
+
+def normalize_review_schedule_mode(value, default='monthly_days'):
+    mode = str(value or '').strip().lower()
+    if mode in ('monthly_days', 'weekly', 'biweekly', 'custom'):
+        return mode
+    return default
+
+
+def normalize_review_weekday(value, default=1):
+    try:
+        day = int(value or default)
+    except Exception:
+        day = int(default)
+    if day < 1 or day > 7:
+        return int(default)
+    return day
+
+
+def normalize_review_interval_days(value, default=10):
+    try:
+        out = int(value or default)
+    except Exception:
+        out = int(default)
+    if out < 2:
+        out = int(default)
+    return out
+
+
+def get_client_review_schedule(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            COALESCE(review_schedule_mode, 'monthly_days'),
+            COALESCE(review_month_days, '1,15'),
+            COALESCE(review_repeat_enabled, 1)
+        FROM clients
+        WHERE id = ?
+        """,
+        (int(client_id),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {
+            'mode': 'monthly_days',
+            'month_days': '1,15',
+            'repeat_enabled': 1,
+        }
+    return {
+        'mode': normalize_review_schedule_mode(row[0], default='monthly_days'),
+        'month_days': str(row[1] or '1,15'),
+        'repeat_enabled': 1 if int(row[2] or 1) else 0,
+    }
+
+
+def get_weekday_label_es(day):
+    labels = {
+        1: 'Lunes',
+        2: 'Martes',
+        3: 'Miercoles',
+        4: 'Jueves',
+        5: 'Viernes',
+        6: 'Sabado',
+        7: 'Domingo',
+    }
+    return labels.get(int(day or 1), 'Lunes')
+
+
+def describe_review_schedule(schedule):
+    month_days = parse_month_days(schedule.get('month_days', '1,15')) or [1, 15]
+    repeat_text = 'Repite automaticamente' if int(schedule.get('repeat_enabled', 1) or 1) else 'Sin repeticion automatica'
+    return f"Dias del mes: {month_days_text(month_days)} · {repeat_text}"
+
+
+def build_review_schedule_dates(schedule, slots=None):
+    from datetime import date, timedelta
+
+    slots = slots or get_fasting_weight_slots()
+    if not slots:
+        return []
+
+    first_year, first_month = slots[0]
+    last_year, last_month = slots[-1]
+    start_date = date(first_year, first_month, 1)
+    end_day = calendar.monthrange(last_year, last_month)[1]
+    end_date = date(last_year, last_month, end_day)
+
+    mode = normalize_review_schedule_mode(schedule.get('mode'), default='monthly_days')
+    repeat_enabled = bool(int(schedule.get('repeat_enabled', 1) or 1))
+    out = set()
+
+    if mode != 'monthly_days':
+        mode = 'monthly_days'
+
+    days = parse_month_days(schedule.get('month_days', '1,15')) or [1, 15]
+    if repeat_enabled:
+        for year, month in slots:
+            max_day = calendar.monthrange(year, month)[1]
+            for day in days:
+                if day > max_day:
+                    continue
+                out.add(f"{year:04d}-{month:02d}-{day:02d}")
+        return sorted(out)
+
+    today = date.today()
+    max_day = calendar.monthrange(today.year, today.month)[1]
+    for day in days:
+        if day > max_day:
+            continue
+        date_text = f"{today.year:04d}-{today.month:02d}-{day:02d}"
+        if date_text >= today.isoformat():
+            out.add(date_text)
+
+    return sorted(out)
+
+
+def save_review_photo_data_url(photo_data_url, client_id, review_date, view_key):
+    data_url = (photo_data_url or '').strip()
+    if not data_url:
+        return None
+    m = re.match(r'^data:image/(png|jpeg|jpg|webp|gif);base64,(.+)$', data_url, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    ext_map = {'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'webp': 'webp', 'gif': 'gif'}
+    ext = ext_map.get(m.group(1).lower(), 'jpg')
+    try:
+        content = base64.b64decode(m.group(2).strip(), validate=True)
+    except Exception:
+        return None
+    if not content:
+        return None
+    os.makedirs(UPLOADS_REVIEWS_DIR, exist_ok=True)
+    date_slug = re.sub(r'[^0-9]', '', str(review_date or '')) or 'nodate'
+    key_slug = re.sub(r'[^a-z0-9_]+', '', str(view_key or '').lower()) or 'photo'
+    filename = f"review_{int(client_id)}_{date_slug}_{key_slug}_{uuid.uuid4().hex}.{ext}"
+    file_path = os.path.join(UPLOADS_REVIEWS_DIR, filename)
+    with open(file_path, 'wb') as f:
+        f.write(content)
+    return f"/static/uploads/reviews/{filename}"
+
+
+def _normalize_review_measure_value(value):
+    text = str(value or '').strip()
+    if not text:
+        return None
+    out = parse_numeric_input(text, default=0)
+    if out <= 0 or out > 500:
+        return None
+    return float(out)
+
+
+def _client_review_row_to_dict(row):
+    keys = [
+        'id', 'client_id', 'review_date',
+        'photo_front_path', 'photo_left_path', 'photo_right_path', 'photo_back_path',
+        'neck_cm', 'left_biceps_relaxed_cm', 'left_biceps_flexed_cm', 'right_biceps_relaxed_cm', 'right_biceps_flexed_cm',
+        'shoulders_cm', 'upper_chest_cm', 'lower_chest_cm', 'waist_navel_cm', 'glutes_cm',
+        'left_thigh_cm', 'right_thigh_cm', 'left_calf_cm', 'right_calf_cm',
+        'professional_feedback', 'created_at', 'updated_at',
+    ]
+    return dict(zip(keys, row))
+
+
+def get_client_reviews(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            id, client_id, review_date,
+            COALESCE(photo_front_path, ''), COALESCE(photo_left_path, ''), COALESCE(photo_right_path, ''), COALESCE(photo_back_path, ''),
+            neck_cm, left_biceps_relaxed_cm, left_biceps_flexed_cm, right_biceps_relaxed_cm, right_biceps_flexed_cm,
+            shoulders_cm, upper_chest_cm, lower_chest_cm, waist_navel_cm, glutes_cm,
+            left_thigh_cm, right_thigh_cm, left_calf_cm, right_calf_cm,
+            COALESCE(professional_feedback, ''), COALESCE(created_at, ''), COALESCE(updated_at, '')
+        FROM client_reviews
+        WHERE client_id = ?
+        ORDER BY review_date DESC, id DESC
+        """,
+        (int(client_id),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return [_client_review_row_to_dict(r) for r in rows]
+
+
+def get_client_reviews_count(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM client_reviews WHERE client_id = ?", (int(client_id),))
+    row = cur.fetchone()
+    conn.close()
+    return int(row[0] or 0) if row else 0
+
+
+def get_client_review_by_id(client_id, review_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            id, client_id, review_date,
+            COALESCE(photo_front_path, ''), COALESCE(photo_left_path, ''), COALESCE(photo_right_path, ''), COALESCE(photo_back_path, ''),
+            neck_cm, left_biceps_relaxed_cm, left_biceps_flexed_cm, right_biceps_relaxed_cm, right_biceps_flexed_cm,
+            shoulders_cm, upper_chest_cm, lower_chest_cm, waist_navel_cm, glutes_cm,
+            left_thigh_cm, right_thigh_cm, left_calf_cm, right_calf_cm,
+            COALESCE(professional_feedback, ''), COALESCE(created_at, ''), COALESCE(updated_at, '')
+        FROM client_reviews
+        WHERE client_id = ? AND id = ?
+        LIMIT 1
+        """,
+        (int(client_id), int(review_id)),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return _client_review_row_to_dict(row)
+
+
+def get_previous_client_review(client_id, review_date, review_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            id, client_id, review_date,
+            COALESCE(photo_front_path, ''), COALESCE(photo_left_path, ''), COALESCE(photo_right_path, ''), COALESCE(photo_back_path, ''),
+            neck_cm, left_biceps_relaxed_cm, left_biceps_flexed_cm, right_biceps_relaxed_cm, right_biceps_flexed_cm,
+            shoulders_cm, upper_chest_cm, lower_chest_cm, waist_navel_cm, glutes_cm,
+            left_thigh_cm, right_thigh_cm, left_calf_cm, right_calf_cm,
+            COALESCE(professional_feedback, ''), COALESCE(created_at, ''), COALESCE(updated_at, '')
+        FROM client_reviews
+        WHERE client_id = ?
+          AND (
+            review_date < ?
+            OR (review_date = ? AND id < ?)
+          )
+        ORDER BY review_date DESC, id DESC
+        LIMIT 1
+        """,
+        (int(client_id), str(review_date), str(review_date), int(review_id)),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return _client_review_row_to_dict(row)
+
+
+def upsert_client_review(client_id, review_date, payload, review_id=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    review_id_i = 0
+    try:
+        review_id_i = int(review_id or 0)
+    except Exception:
+        review_id_i = 0
+
+    if review_id_i > 0:
+        cur.execute(
+            "SELECT id, COALESCE(photo_front_path, ''), COALESCE(photo_left_path, ''), COALESCE(photo_right_path, ''), COALESCE(photo_back_path, '') FROM client_reviews WHERE id = ? AND client_id = ? LIMIT 1",
+            (review_id_i, int(client_id)),
+        )
+    else:
+        cur.execute(
+            "SELECT id, COALESCE(photo_front_path, ''), COALESCE(photo_left_path, ''), COALESCE(photo_right_path, ''), COALESCE(photo_back_path, '') FROM client_reviews WHERE client_id = ? AND review_date = ? ORDER BY id DESC LIMIT 1",
+            (int(client_id), str(review_date)),
+        )
+    existing = cur.fetchone()
+
+    photo_values = {}
+    for field_key, _label in REVIEW_PHOTO_FIELDS:
+        remove_requested = str(payload.get(field_key + '_remove') or '').strip() == '1'
+        new_value = payload.get(field_key)
+        if remove_requested:
+            new_value = None
+        elif existing and not new_value:
+            idx = ['photo_front_path', 'photo_left_path', 'photo_right_path', 'photo_back_path'].index(field_key)
+            new_value = existing[idx + 1]
+        photo_values[field_key] = new_value or None
+
+    measure_values = {}
+    for field_key, _label in REVIEW_MEASUREMENT_FIELDS:
+        measure_values[field_key] = _normalize_review_measure_value(payload.get(field_key))
+
+    if existing:
+        review_id = int(existing[0])
+        cur.execute(
+            """
+            UPDATE client_reviews
+            SET photo_front_path = ?, photo_left_path = ?, photo_right_path = ?, photo_back_path = ?,
+                neck_cm = ?, left_biceps_relaxed_cm = ?, left_biceps_flexed_cm = ?, right_biceps_relaxed_cm = ?, right_biceps_flexed_cm = ?,
+                shoulders_cm = ?, upper_chest_cm = ?, lower_chest_cm = ?, waist_navel_cm = ?, glutes_cm = ?,
+                left_thigh_cm = ?, right_thigh_cm = ?, left_calf_cm = ?, right_calf_cm = ?,
+                updated_at = datetime('now')
+            WHERE id = ?
+            """,
+            (
+                photo_values['photo_front_path'], photo_values['photo_left_path'], photo_values['photo_right_path'], photo_values['photo_back_path'],
+                measure_values['neck_cm'], measure_values['left_biceps_relaxed_cm'], measure_values['left_biceps_flexed_cm'],
+                measure_values['right_biceps_relaxed_cm'], measure_values['right_biceps_flexed_cm'], measure_values['shoulders_cm'],
+                measure_values['upper_chest_cm'], measure_values['lower_chest_cm'], measure_values['waist_navel_cm'], measure_values['glutes_cm'],
+                measure_values['left_thigh_cm'], measure_values['right_thigh_cm'], measure_values['left_calf_cm'], measure_values['right_calf_cm'],
+                review_id,
+            ),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO client_reviews(
+                client_id, review_date,
+                photo_front_path, photo_left_path, photo_right_path, photo_back_path,
+                neck_cm, left_biceps_relaxed_cm, left_biceps_flexed_cm, right_biceps_relaxed_cm, right_biceps_flexed_cm,
+                shoulders_cm, upper_chest_cm, lower_chest_cm, waist_navel_cm, glutes_cm,
+                left_thigh_cm, right_thigh_cm, left_calf_cm, right_calf_cm,
+                professional_feedback, created_at, updated_at
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'',datetime('now'),datetime('now'))
+            """,
+            (
+                int(client_id), str(review_date),
+                photo_values['photo_front_path'], photo_values['photo_left_path'], photo_values['photo_right_path'], photo_values['photo_back_path'],
+                measure_values['neck_cm'], measure_values['left_biceps_relaxed_cm'], measure_values['left_biceps_flexed_cm'],
+                measure_values['right_biceps_relaxed_cm'], measure_values['right_biceps_flexed_cm'], measure_values['shoulders_cm'],
+                measure_values['upper_chest_cm'], measure_values['lower_chest_cm'], measure_values['waist_navel_cm'], measure_values['glutes_cm'],
+                measure_values['left_thigh_cm'], measure_values['right_thigh_cm'], measure_values['left_calf_cm'], measure_values['right_calf_cm'],
+            ),
+        )
+        review_id = int(cur.lastrowid)
+
+    conn.commit()
+    conn.close()
+    return review_id
+
+
+def update_client_review_feedback(client_id, review_id, feedback):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE client_reviews SET professional_feedback = ?, updated_at = datetime('now') WHERE id = ? AND client_id = ?",
+        (str(feedback or ''), int(review_id), int(client_id)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _format_measure_value(value):
+    if value is None:
+        return '-'
+    try:
+        return f"{float(value):.1f}".replace('.', ',') + ' cm'
+    except Exception:
+        return '-'
+
+
+def _format_measure_diff(current_value, previous_value):
+    if current_value is None or previous_value is None:
+        return '-'
+    try:
+        diff = float(current_value) - float(previous_value)
+    except Exception:
+        return '-'
+    sign = '+' if diff > 0 else ''
+    return f"{sign}{diff:.1f}".replace('.', ',') + ' cm'
 
 
 def get_client_notice_events(client_id):
@@ -922,6 +1387,7 @@ def month_days_text(days):
 
 def build_client_notice_calendar_events(client_row, manual_events, recurring_rules=None):
     events = []
+    client_id = int(client_row[0] or 0) if client_row else 0
     plan_start = normalize_iso_date_text(client_row[8] if len(client_row) > 8 else '')
     plan_end = normalize_iso_date_text(client_row[9] if len(client_row) > 9 else '')
 
@@ -979,7 +1445,20 @@ def build_client_notice_calendar_events(client_row, manual_events, recurring_rul
                     'kind': 'recurring',
                 })
 
-    kind_order = {'auto': 0, 'recurring': 1, 'manual': 2}
+    if client_id > 0:
+        schedule = get_client_review_schedule(client_id)
+        schedule_dates = build_review_schedule_dates(schedule)
+        schedule_text = describe_review_schedule(schedule)
+        for date_text in schedule_dates:
+            events.append({
+                'id': None,
+                'date': date_text,
+                'title': 'Revision programada',
+                'notes': f'Frecuencia: {schedule_text}',
+                'kind': 'review',
+            })
+
+    kind_order = {'auto': 0, 'review': 1, 'recurring': 2, 'manual': 3}
     events.sort(key=lambda e: (e['date'], kind_order.get(e['kind'], 9), e.get('rule_id') or 0, e.get('id') or 0))
     return events
 
@@ -1006,6 +1485,8 @@ def render_client_notice_calendar_panel(client_row, manual_events, recurring_rul
         for item in grouped[month_key]:
             if item['kind'] == 'auto':
                 kind_chip = '<span class="cal-chip cal-chip-auto">Plan</span>'
+            elif item['kind'] == 'review':
+                kind_chip = '<span class="cal-chip cal-chip-review">Revision</span>'
             elif item['kind'] == 'recurring':
                 kind_chip = '<span class="cal-chip cal-chip-recurring">Recurrente</span>'
             else:
@@ -1666,6 +2147,281 @@ def render_weight_goal_mode_form(client_id, goal_mode, return_to):
         f'<button type="submit" name="weight_goal_mode" value="fat_loss" class="weight-goal-btn{loss_active}">Pérdida de grasa</button>'
         '</div>'
         '</form>'
+    )
+
+
+def render_review_schedule_form(client_id, schedule, return_to):
+    month_days = str(schedule.get('month_days') or '1,15')
+    repeat_enabled = 1 if int(schedule.get('repeat_enabled', 1) or 1) else 0
+    summary = describe_review_schedule(schedule)
+    return (
+        '<form method="post" action="/set_client_review_schedule" class="review-schedule-form">'
+        f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+        f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+        '<h3>Configuracion de revisiones</h3>'
+        '<label>Dias del mes (si aplica)'
+        f'<input name="review_month_days" value="{html.escape(month_days)}" placeholder="1,15" />'
+        '</label>'
+        '<label style="display:flex;align-items:center;gap:10px;flex-direction:row;justify-content:space-between;">'
+        '<span>Repetir automaticamente</span>'
+        f'<input name="review_repeat_enabled" type="checkbox" value="1" {"checked" if repeat_enabled else ""} />'
+        '</label>'
+        '<button type="submit">Guardar programacion</button>'
+        f'<p class="review-note">Programacion actual: {html.escape(summary)}</p>'
+        '</form>'
+    )
+
+
+def _review_measure_input_value(value):
+    if value is None:
+        return ''
+    try:
+        return str(float(value)).replace('.', ',')
+    except Exception:
+        return str(value or '')
+
+
+def render_client_review_submit_form(client_id, return_to, schedule, review=None, title='Enviar revision', button_label='Guardar revision'):
+    from datetime import date
+
+    default_date = str(review.get('review_date') or date.today().isoformat()) if review else date.today().isoformat()
+    form_id = f'review-form-{int(client_id)}'
+    photo_fields_html = []
+    for key, label in REVIEW_PHOTO_FIELDS:
+        existing_photo = str(review.get(key) or '').strip() if review else ''
+        preview_style = 'display:block;' if existing_photo else 'display:none;'
+        photo_fields_html.append(
+            '<label class="review-photo-field">'
+            f'<span>{html.escape(label)}</span>'
+            f'<input type="file" accept=".jpg,.jpeg,.png,.webp" data-review-file="{key}" style="display:none;" />'
+            f'<input type="file" accept=".jpg,.jpeg,.png,.webp" capture="environment" data-review-camera="{key}" style="display:none;" />'
+            '<div class="review-photo-actions">'
+            f'<button type="button" data-review-open-gallery="{key}">Seleccionar de galeria</button>'
+            f'<button type="button" data-review-open-camera="{key}">Abrir camara</button>'
+            '</div>'
+            f'<input type="hidden" name="{key}_data_url" data-review-hidden="{key}" value="{html.escape(existing_photo)}" />'
+            f'<input type="hidden" name="{key}_remove" data-review-remove="{key}" value="0" />'
+            '<article class="review-compare-card review-upload-preview-card">'
+            '<h4>Vista previa</h4>'
+            '<div class="review-compare-slot">'
+            '<small>Actual</small>'
+            '<div class="review-photo-frame">'
+            f'<img data-review-preview="{key}" alt="{html.escape(label)}" src="{html.escape(existing_photo)}" style="{preview_style}" />'
+            '</div>'
+            '</div>'
+            '</article>'
+            f'<button type="button" class="review-photo-clear" data-review-clear="{key}">Quitar foto</button>'
+            '</label>'
+        )
+    measure_fields_html = []
+    for key, label in REVIEW_MEASUREMENT_FIELDS:
+        field_value = _review_measure_input_value(review.get(key)) if review else ''
+        measure_fields_html.append(
+            '<label>'
+            f'<span>{html.escape(label)}</span>'
+            f'<input name="{key}" type="text" inputmode="decimal" placeholder="cm" value="{html.escape(field_value)}" />'
+            '</label>'
+        )
+    return (
+        f'<form method="post" action="/submit_client_review" id="{form_id}" class="review-submit-form">'
+        f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+        f'<input type="hidden" name="review_id" value="{int(review.get("id") or 0) if review else 0}" />'
+        f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+        f'<h3>{html.escape(title)}</h3>'
+        f'<p class="review-note">Frecuencia configurada: {html.escape(describe_review_schedule(schedule))}</p>'
+        '<label><span>Fecha de revision</span>'
+        f'<input name="review_date" type="date" value="{default_date}" required /></label>'
+        '<div class="review-guide">'
+        '<strong>Guia visual rapida:</strong> usa siempre la misma luz, distancia y postura para facilitar comparaciones.'
+        '</div>'
+        '<div class="review-photo-grid">' + ''.join(photo_fields_html) + '</div>'
+        '<div class="review-measures-grid">' + ''.join(measure_fields_html) + '</div>'
+        f'<button type="submit">{html.escape(button_label)}</button>'
+        '</form>'
+        '<script>(function(){'
+        f'const root=document.getElementById({json.dumps(form_id)});if(!root)return;'
+        'const bindInput=(input)=>{input.addEventListener("change",()=>{'
+        'const key=input.getAttribute("data-review-file");'
+        'const hidden=root.querySelector(`input[data-review-hidden="${key}"]`);'
+        'const removeFlag=root.querySelector(`input[data-review-remove="${key}"]`);'
+        'const preview=root.querySelector(`img[data-review-preview="${key}"]`);'
+        'const file=input.files&&input.files[0];'
+        'if(!file){if(hidden)hidden.value="";if(removeFlag)removeFlag.value="0";if(preview){preview.removeAttribute("src");preview.style.display="none";}return;}'
+        'const reader=new FileReader();'
+        'reader.onload=()=>{if(hidden)hidden.value=String(reader.result||"");if(removeFlag)removeFlag.value="0";if(preview){preview.src=String(reader.result||"");preview.style.display="block";}};'
+        'reader.readAsDataURL(file);'
+        '});};'
+        'root.querySelectorAll("input[data-review-file],input[data-review-camera]").forEach((input)=>bindInput(input));'
+        'root.querySelectorAll("button[data-review-open-gallery]").forEach((btn)=>{btn.addEventListener("click",()=>{'
+        'const key=btn.getAttribute("data-review-open-gallery");'
+        'const input=root.querySelector(`input[data-review-file="${key}"]`);'
+        'if(input)input.click();'
+        '});});'
+        'root.querySelectorAll("button[data-review-open-camera]").forEach((btn)=>{btn.addEventListener("click",()=>{'
+        'const key=btn.getAttribute("data-review-open-camera");'
+        'const input=root.querySelector(`input[data-review-camera="${key}"]`);'
+        'if(input)input.click();'
+        '});});'
+        'root.querySelectorAll("button[data-review-clear]").forEach((btn)=>{btn.addEventListener("click",()=>{'
+        'const key=btn.getAttribute("data-review-clear");'
+        'const hidden=root.querySelector(`input[data-review-hidden="${key}"]`);'
+        'const removeFlag=root.querySelector(`input[data-review-remove="${key}"]`);'
+        'const preview=root.querySelector(`img[data-review-preview="${key}"]`);'
+        'const input=root.querySelector(`input[data-review-file="${key}"]`);'
+        'if(hidden)hidden.value="";'
+        'if(removeFlag)removeFlag.value="1";'
+        'if(input)input.value="";'
+        'if(preview){preview.removeAttribute("src");preview.style.display="none";}'
+        '});});'
+        '})();</script>'
+    )
+
+
+def render_review_upcoming_preview(client_id, schedule, base_url=''):
+    from datetime import date
+
+    dates = [d for d in build_review_schedule_dates(schedule) if d >= date.today().isoformat()]
+    completed_dates = {str(item.get('review_date') or '').strip() for item in get_client_reviews(client_id)}
+    dates = [d for d in dates if d not in completed_dates]
+    if not dates:
+        return '<p class="review-note">No hay revisiones programadas próximamente.</p>'
+    return (
+        '<section class="review-upcoming">'
+        '<h3>Próximas revisiones</h3>'
+        '<ul class="review-upcoming-list">'
+        + ''.join([f'<li>{html.escape(format_dmy(d))}</li>' for d in dates[:5]]) +
+        '</ul>'
+        '</section>'
+    )
+
+
+def render_client_reviews_cards(reviews, detail_base_url):
+    if not reviews:
+        return '<p class="empty">Todavia no hay revisiones registradas.</p>'
+    cards = []
+    for item in reviews:
+        photos_count = sum([1 for key, _ in REVIEW_PHOTO_FIELDS if item.get(key)])
+        measures_count = sum([1 for key, _ in REVIEW_MEASUREMENT_FIELDS if item.get(key) is not None])
+        cards.append(
+            '<a class="review-card" href="' + html.escape(detail_base_url + '&review_id=' + str(int(item['id']))) + '">'
+            f'<div class="review-card-date">{html.escape(format_dmy(item.get("review_date")))} </div>'
+            f'<div class="review-card-meta">Fotos: {photos_count}/4 · Medidas: {measures_count}/{len(REVIEW_MEASUREMENT_FIELDS)}</div>'
+            '</a>'
+        )
+    return '<div class="review-cards">' + ''.join(cards) + '</div>'
+
+
+def render_client_review_detail(review, previous_review, admin_mode=False, return_to=''):
+    if not review:
+        return ''
+
+    review_client_id = int(review.get('client_id') or 0)
+    review_schedule = get_client_review_schedule(review_client_id) if review_client_id > 0 else {}
+    edit_form_html = render_client_review_submit_form(
+        review_client_id,
+        return_to or (f'/client_app?section=reviews&review_id={int(review.get("id") or 0)}' if not admin_mode else f'/client_profile?id={review_client_id}&section=reviews&review_id={int(review.get("id") or 0)}'),
+        review_schedule,
+        review=review,
+        title='Editar revision',
+        button_label='Guardar cambios',
+    )
+
+    def photo_img(path):
+        path_text = str(path or '').strip()
+        if not path_text:
+            return '<div class="review-photo-empty">Sin foto</div>'
+        return (
+            '<div class="review-photo-frame">'
+            f'<img src="{html.escape(path_text)}" alt="Foto revision" style="width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;object-position:center;display:block;background:#fff;margin:auto;" />'
+            '</div>'
+        )
+
+    photo_blocks = []
+    comparison_blocks = []
+    for key, label in REVIEW_PHOTO_FIELDS:
+        current_path = review.get(key)
+        previous_path = previous_review.get(key) if previous_review else ''
+        photo_blocks.append(
+            '<article class="review-photo-card">'
+            f'<h4>{html.escape(label)}</h4>'
+            f'{photo_img(current_path)}'
+            '</article>'
+        )
+        previous_photo_html = photo_img(previous_path) if previous_review else '<div class="review-photo-empty">Sin foto anterior</div>'
+        current_photo_html = photo_img(current_path)
+        comparison_blocks.append(
+            '<article class="review-compare-card">'
+            f'<h4>{html.escape(label)}</h4>'
+            '<div class="review-compare-grid">'
+            '<div class="review-compare-slot"><small>Anterior</small>' + previous_photo_html + '</div>'
+            '<div class="review-compare-slot"><small>Actual</small>' + current_photo_html + '</div>'
+            '</div>'
+            '</article>'
+        )
+
+    measure_rows = []
+    for key, label in REVIEW_MEASUREMENT_FIELDS:
+        current_value = review.get(key)
+        previous_value = previous_review.get(key) if previous_review else None
+        diff_text = _format_measure_diff(current_value, previous_value) if previous_review else '-'
+        measure_rows.append(
+            '<tr>'
+            f'<td>{html.escape(label)}</td>'
+            f'<td>{html.escape(_format_measure_value(current_value))}</td>'
+            f'<td>{html.escape(_format_measure_value(previous_value))}</td>'
+            f'<td>{html.escape(diff_text)}</td>'
+            '</tr>'
+        )
+
+    feedback_html = '<p class="review-note">Sin feedback profesional todavia.</p>'
+    if str(review.get('professional_feedback') or '').strip():
+        feedback_html = f'<p class="review-feedback-text">{html.escape(str(review.get("professional_feedback") or ""))}</p>'
+
+    if admin_mode:
+        feedback_html = (
+            '<form method="post" action="/save_client_review_feedback" class="review-feedback-form">'
+            f'<input type="hidden" name="client_id" value="{int(review.get("client_id") or 0)}" />'
+            f'<input type="hidden" name="review_id" value="{int(review.get("id") or 0)}" />'
+            f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+            '<label>Feedback profesional'
+            f'<textarea name="professional_feedback" rows="5" placeholder="Escribe tus observaciones...">{html.escape(str(review.get("professional_feedback") or ""))}</textarea>'
+            '</label>'
+            '<button type="submit">Guardar feedback</button>'
+            '</form>'
+        )
+
+    comparison_html = ''
+    comparison_title = 'Comparacion con revision anterior'
+    if previous_review:
+        comparison_title += f' ({html.escape(format_dmy(previous_review.get("review_date")))})'
+    comparison_html = (
+        '<section class="review-compare-wrap">'
+        f'<h3>{comparison_title}</h3>'
+        '<div class="review-compare-list">' + ''.join(comparison_blocks) + '</div>'
+        '</section>'
+    )
+
+    return (
+        '<section class="review-detail-wrap">'
+        f'<h3>Revision {html.escape(format_dmy(review.get("review_date")))}</h3>'
+        + edit_form_html +
+        comparison_html +
+        '<section class="review-current-photos-wrap">'
+        '<h3>Fotos de la revision actual</h3>'
+        '<div class="review-photo-list">' + ''.join(photo_blocks) + '</div>'
+        '</section>'
+        '<section class="review-measures-table-wrap">'
+        '<h3>Medidas y diferencias</h3>'
+        '<table class="review-measures-table">'
+        '<thead><tr><th>Medida</th><th>Actual</th><th>Anterior</th><th>Diferencia</th></tr></thead>'
+        '<tbody>' + ''.join(measure_rows) + '</tbody>'
+        '</table>'
+        '</section>'
+        '<section class="review-feedback-wrap">'
+        '<h3>Feedback del profesional</h3>'
+        + feedback_html +
+        '</section>'
+        '</section>'
     )
 
 
@@ -4316,9 +5072,66 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == '/admin_login':
             next_path = q.get('next', ['/admin'])[0] if 'next' in q else '/admin'
-            self.send_response(303)
-            self.send_header('Location', '/client_login?next=' + urllib.parse.quote(next_path))
+            if not next_path.startswith('/'):
+                next_path = '/admin'
+            msg = q.get('msg', [''])[0] if 'msg' in q else ''
+            page = f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Acceso administrador</title>
+    <style>
+        *{{box-sizing:border-box;}}
+        html,body{{min-height:100%;height:auto;}}
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:560px;margin:0 auto;padding:clamp(12px, 3.5vw, 28px);min-height:100svh;display:flex;align-items:center;}}
+        @supports (min-height: 100dvh){{.page{{min-height:100dvh;}}}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:24px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
+        h1{{margin:0 0 10px;font-size:2rem;}}
+        p{{margin:0 0 18px;color:#6d7480;}}
+        form{{display:grid;gap:12px;}}
+        input{{padding:13px 14px;border:1px solid #d8dde6;border-radius:12px;font:inherit;font-size:16px;}}
+        button{{padding:12px 14px;border:none;border-radius:12px;background:#101318;color:#fff;cursor:pointer;font:inherit;font-weight:700;}}
+        .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;color:#4d3217;border:1px solid #f5dcc0;margin-bottom:14px;}}
+        .helper{{margin-top:12px;font-size:.95rem;color:#6d7480;}}
+        .helper a{{color:#101318;font-weight:700;text-decoration:none;}}
+        @media (max-width:640px){{
+            .page{{padding-top:max(12px, env(safe-area-inset-top));padding-bottom:max(12px, env(safe-area-inset-bottom));}}
+            .card{{padding:18px;border-radius:14px;}}
+            h1{{font-size:1.75rem;}}
+        }}
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            {logo_html()}
+            <h1>Acceso administrador</h1>
+            <p>Entra con tu usuario y contraseña del panel maestro.</p>
+            {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
+            <form method="post" action="/admin_login">
+                <input type="hidden" name="next" value="{html.escape(next_path)}" />
+                <input name="username" placeholder="Usuario" required />
+                <input name="password" type="password" placeholder="Contraseña" required />
+                <button type="submit">Entrar</button>
+            </form>
+            <div class="helper"><a href="/client_login">Volver al acceso de cliente</a></div>
+        </div>
+    </div>
+</body>
+</html>
+            '''
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
             self.end_headers()
+            self.wfile.write(body)
             return
 
         public_get_exact = {
@@ -4856,7 +5669,27 @@ class Handler(BaseHTTPRequestHandler):
             calendar_html = render_client_notice_calendar_panel(c, client_notice_events, client_notice_rules, admin_mode=False)
             calendar_events = build_client_notice_calendar_events(c, client_notice_events, client_notice_rules)
             selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
-            if selected_section not in ('diet', 'routine', 'weight', 'steps', 'calendar'):
+            review_schedule = get_client_review_schedule(client_id)
+            review_count = get_client_reviews_count(client_id)
+            selected_review_id = (q.get('review_id', [''])[0] if 'review_id' in q else '').strip()
+            reviews_base_url = f'/client_app?section=reviews{preview_qs}'
+            reviews_history = get_client_reviews(client_id) if (selected_section == 'reviews' or selected_review_id) else []
+            review_submit_form_html = render_client_review_submit_form(client_id, reviews_base_url, review_schedule)
+            review_upcoming_html = render_review_upcoming_preview(client_id, review_schedule, reviews_base_url)
+            review_cards_html = render_client_reviews_cards(reviews_history, reviews_base_url)
+            review_detail_html = ''
+            if selected_review_id:
+                try:
+                    selected_review_id_i = int(selected_review_id)
+                except Exception:
+                    selected_review_id_i = 0
+                if selected_review_id_i > 0:
+                    selected_review = get_client_review_by_id(client_id, selected_review_id_i)
+                    if selected_review:
+                        previous_review = get_previous_client_review(client_id, selected_review.get('review_date'), selected_review.get('id'))
+                        review_detail_html = render_client_review_detail(selected_review, previous_review, admin_mode=False)
+
+            if selected_section not in ('diet', 'routine', 'weight', 'steps', 'calendar', 'reviews'):
                 selected_section = ''
 
             section_titles = {
@@ -4865,6 +5698,7 @@ class Handler(BaseHTTPRequestHandler):
                 'weight': 'Mi peso corporal en ayunas',
                 'steps': 'Mis pasos diarios',
                 'calendar': 'Calendario de avisos',
+                'reviews': 'Mis revisiones',
             }
             section_descriptions = {
                 'diet': 'Consulta tu plan actual y descarga tu PDF.',
@@ -4872,6 +5706,7 @@ class Handler(BaseHTTPRequestHandler):
                 'weight': 'Registra tu peso diario y revisa la media semanal.',
                 'steps': 'Anota tus pasos diarios y compáralos con tu objetivo.',
                 'calendar': 'Fechas de inicio/fin del plan y avisos importantes.',
+                'reviews': 'Sube fotos y medidas corporales para tu seguimiento.',
             }
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
@@ -4879,6 +5714,7 @@ class Handler(BaseHTTPRequestHandler):
                 'weight': f'Objetivo: {weight_goal_status_text}',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
                 'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
+                'reviews': f'{review_count} revisiones' if review_count > 0 else 'Sin revisiones',
             }
 
             section_content = {
@@ -4887,6 +5723,7 @@ class Handler(BaseHTTPRequestHandler):
                 'weight': weight_trend_html + weight_goal_form_html + fasting_weights_html,
                 'steps': daily_steps_html,
                 'calendar': calendar_html,
+                'reviews': review_submit_form_html + review_upcoming_html + review_cards_html + review_detail_html,
             }
 
             cards_html = ''.join([
@@ -4895,7 +5732,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'<h3>{html.escape(section_titles[key])}</h3>'
                 f'<p>{html.escape(section_descriptions[key])}</p>'
                 '</a>'
-                for key in ('diet', 'routine', 'weight', 'steps', 'calendar')
+                for key in ('diet', 'routine', 'weight', 'steps', 'calendar', 'reviews')
             ])
 
             detail_html = ''
@@ -5002,6 +5839,52 @@ class Handler(BaseHTTPRequestHandler):
         .weight-goal-buttons{{display:flex;gap:8px;flex-wrap:wrap;}}
         .weight-goal-btn{{padding:8px 12px;border:1px solid #d8dde6;border-radius:999px;background:#fff;color:#101318;font-weight:800;cursor:pointer;}}
         .weight-goal-btn.is-active{{background:#101318;border-color:#101318;color:#fff;}}
+        .review-schedule-form,.review-submit-form{{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;border:1px solid #e8ebef;border-radius:12px;padding:10px;background:#fff;margin-bottom:12px;}}
+        .review-schedule-form h3,.review-submit-form h3{{grid-column:1 / -1;margin:0;font-size:1rem;}}
+        .review-schedule-form label,.review-submit-form label{{display:flex;flex-direction:column;gap:4px;font-size:.8rem;color:#6d7480;font-weight:700;}}
+        .review-schedule-form input,.review-schedule-form select,.review-schedule-form button,.review-submit-form input,.review-submit-form select,.review-submit-form button{{font:inherit;padding:8px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;}}
+        .review-schedule-form button,.review-submit-form button{{grid-column:1 / -1;background:#101318;border-color:#101318;color:#fff;font-weight:700;cursor:pointer;}}
+        .review-note{{grid-column:1 / -1;margin:0;color:#64748b;font-size:.82rem;}}
+        .review-guide{{grid-column:1 / -1;border:1px dashed #cbd5e1;background:#f8fafc;padding:8px 10px;border-radius:10px;font-size:.82rem;color:#475569;}}
+        .review-photo-grid{{grid-column:1 / -1;display:grid;grid-template-columns:repeat(2,minmax(160px,1fr));gap:8px;}}
+        .review-photo-field{{display:flex;flex-direction:column;gap:6px;border:1px solid #e8ebef;border-radius:10px;padding:8px;background:#f8fafc;}}
+        .review-upload-preview-card{{padding:8px;}}
+        .review-upload-preview-card h4{{margin:0 0 6px;font-size:.9rem;}}
+        .review-photo-frame{{width:100%;height:240px;display:flex;align-items:center;justify-content:center;padding:8px;border:1px solid #d8dde6;border-radius:8px;background:#fff;box-sizing:border-box;overflow:hidden;}}
+        .review-photo-frame img{{display:block !important;width:auto !important;height:auto !important;max-width:100% !important;max-height:100% !important;object-fit:contain !important;object-position:center !important;background:#fff;margin:auto !important;}}
+        .review-compare-card img,.review-photo-card img{{display:block !important;width:auto !important;height:auto !important;max-width:100% !important;max-height:100% !important;object-fit:contain !important;object-position:center !important;margin:auto !important;}}
+        .review-photo-clear{{padding:7px 10px;border:1px solid #d8dde6;border-radius:8px;background:#fff;color:#101318;font-weight:700;cursor:pointer;align-self:flex-start;}}
+        .review-measures-grid{{grid-column:1 / -1;display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;}}
+        .review-upcoming{{border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:10px 12px;margin-bottom:12px;}}
+        .review-upcoming h3{{margin:0 0 8px;font-size:.98rem;}}
+        .review-upcoming-list{{margin:0;padding-left:18px;display:grid;gap:4px;color:#334155;}}
+        .review-cards{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin-bottom:12px;}}
+        .review-card{{display:block;text-decoration:none;color:#101318;border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:10px;}}
+        .review-card-date{{font-weight:800;}}
+        .review-card-meta{{color:#6d7480;font-size:.82rem;margin-top:4px;}}
+        .review-detail-wrap{{display:grid;gap:10px;}}
+        .review-photo-list{{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;}}
+        .review-photo-card,.review-compare-card{{border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:8px;}}
+        .review-photo-card h4,.review-compare-card h4{{margin:0 0 6px;font-size:.9rem;}}
+        .review-photo-frame{{width:100%;height:240px;display:flex;align-items:center;justify-content:center;padding:8px;border:1px solid #d8dde6;border-radius:8px;background:#fff;box-sizing:border-box;overflow:hidden;}}
+        .review-photo-frame img{{display:block !important;width:auto !important;height:auto !important;max-width:100% !important;max-height:100% !important;object-fit:contain !important;object-position:center !important;background:#fff;margin:auto !important;}}
+        .review-compare-card img,.review-photo-card img{{display:block !important;width:auto !important;height:auto !important;max-width:100% !important;max-height:100% !important;object-fit:contain !important;object-position:center !important;margin:auto !important;}}
+        .review-photo-empty{{height:240px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:8px;background:#f8fafc;color:#64748b;font-size:.85rem;}}
+        .review-compare-wrap h3,.review-measures-table-wrap h3,.review-feedback-wrap h3{{margin:0 0 8px;font-size:1rem;}}
+        .review-compare-list{{display:grid;gap:8px;}}
+        .review-compare-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px;}}
+        .review-compare-slot{{display:grid;gap:4px;}}
+        .review-compare-grid small{{display:block;margin:0 0 4px;color:#64748b;font-size:.75rem;font-weight:700;}}
+        .review-current-photos-wrap{{display:grid;gap:8px;}}
+        .review-current-photos-wrap h3{{margin:0;font-size:1rem;}}
+        .review-measures-table-wrap{{overflow:auto;}}
+        .review-measures-table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8ebef;border-radius:10px;overflow:hidden;}}
+        .review-measures-table th,.review-measures-table td{{padding:8px;border-bottom:1px solid #eef2f7;text-align:left;font-size:.84rem;}}
+        .review-measures-table th{{background:#f8fafc;font-weight:800;color:#334155;}}
+        .review-feedback-form{{display:grid;gap:8px;}}
+        .review-feedback-form textarea{{font:inherit;padding:8px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;}}
+        .review-feedback-form button{{justify-self:start;padding:8px 12px;border:1px solid #d8dde6;border-radius:9px;background:#101318;color:#fff;font-weight:700;cursor:pointer;}}
+        .review-feedback-text{{margin:0;padding:10px;border:1px solid #e8ebef;border-radius:10px;background:#fff;white-space:pre-wrap;}}
         .cal-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:10px;}}
         .cal-head{{font-size:1rem;font-weight:800;margin:0 0 10px;color:#0f172a;}}
         .cal-months{{display:grid;gap:8px;}}
@@ -5016,6 +5899,7 @@ class Handler(BaseHTTPRequestHandler):
         .cal-date{{font-size:.82rem;font-weight:800;color:#334155;}}
         .cal-chip{{display:inline-flex;padding:3px 8px;border-radius:999px;background:#eef2f7;color:#475569;font-size:.72rem;font-weight:800;}}
         .cal-chip-auto{{background:#dcfce7;color:#166534;}}
+        .cal-chip-review{{background:#dbeafe;color:#1d4ed8;}}
         .cal-chip-recurring{{background:#ede9fe;color:#5b21b6;}}
         .cal-item h4{{margin:7px 0 4px;font-size:.95rem;}}
         .cal-item p{{margin:0;color:#6d7480;font-size:.86rem;}}
@@ -5036,6 +5920,7 @@ class Handler(BaseHTTPRequestHandler):
             .fw-month-summary{{padding:11px 10px;}}
             .fw-month-days{{max-height:none;overflow:visible;}}
             .fw-input,.fw-steps-input{{width:100%;max-width:none;min-width:0;height:34px;padding:5px 7px;}}
+            .review-schedule-form,.review-submit-form,.review-photo-grid,.review-measures-grid,.review-photo-list{{grid-template-columns:1fr;}}
         }}
     </style>
 </head>
@@ -6000,6 +6885,15 @@ class Handler(BaseHTTPRequestHandler):
                 f'/client_profile?id={cid_i}&section=weight',
             )
             weight_goal_status_text = 'Ganancia de masa muscular' if weight_goal_mode == 'muscle_gain' else 'Pérdida de grasa'
+            review_schedule = get_client_review_schedule(cid_i)
+            review_schedule_form_html = render_review_schedule_form(
+                cid_i,
+                review_schedule,
+                f'/client_profile?id={cid_i}&section=reviews',
+            )
+            review_schedule_status_text = describe_review_schedule(review_schedule)
+            selected_review_id = (q.get('review_id', [''])[0] if 'review_id' in q else '').strip()
+            reviews_base_url = f'/client_profile?id={cid_i}&section=reviews'
             diets = []
             routines_all = []
             diet_history = []
@@ -6133,6 +7027,10 @@ class Handler(BaseHTTPRequestHandler):
             fasting_weights_html = ''
             daily_steps_html = ''
             calendar_html = ''
+            reviews_history = []
+            review_upcoming_html = ''
+            review_cards_html = ''
+            review_detail_html = ''
             if selected_section == 'weight':
                 fasting_weights_html = render_fasting_weights_panel(
                     cid_i,
@@ -6160,8 +7058,28 @@ class Handler(BaseHTTPRequestHandler):
                     client_id=cid_i,
                     return_to=f'/client_profile?id={cid_i}&section=calendar',
                 )
+            if selected_section == 'reviews' or selected_review_id:
+                reviews_history = get_client_reviews(cid_i)
+                review_upcoming_html = render_review_upcoming_preview(cid_i, review_schedule, reviews_base_url)
+                review_cards_html = render_client_reviews_cards(reviews_history, reviews_base_url)
+                if selected_review_id:
+                    try:
+                        selected_review_id_i = int(selected_review_id)
+                    except Exception:
+                        selected_review_id_i = 0
+                    if selected_review_id_i > 0:
+                        selected_review = get_client_review_by_id(cid_i, selected_review_id_i)
+                        if selected_review:
+                            previous_review = get_previous_client_review(cid_i, selected_review.get('review_date'), selected_review.get('id'))
+                            review_detail_html = render_client_review_detail(
+                                selected_review,
+                                previous_review,
+                                admin_mode=True,
+                                return_to=f'/client_profile?id={cid_i}&section=reviews&review_id={selected_review_id_i}',
+                            )
 
             calendar_events = build_client_notice_calendar_events(c, get_client_notice_events(cid_i), get_client_notice_rules(cid_i))
+            review_count = get_client_reviews_count(cid_i)
 
             diet_panel_html = f'''
             <section class="panel">
@@ -6245,12 +7163,23 @@ class Handler(BaseHTTPRequestHandler):
             </section>
             '''
 
+            reviews_panel_html = f'''
+            <section class="panel panel-full">
+                <h2>📸 Revisiones</h2>
+                {review_schedule_form_html}
+                {review_upcoming_html}
+                {review_cards_html}
+                {review_detail_html}
+            </section>
+            '''
+
             section_titles = {
                 'diet': 'Dietas',
                 'training': 'Entrenamientos',
                 'weight': 'Peso corporal en ayunas',
                 'steps': 'Pasos diarios',
                 'calendar': 'Calendario de avisos',
+                'reviews': 'Revisiones',
             }
             section_descriptions = {
                 'diet': 'Asigna dietas y revisa el historial del cliente.',
@@ -6258,6 +7187,7 @@ class Handler(BaseHTTPRequestHandler):
                 'weight': 'Control diario del peso corporal en ayunas.',
                 'steps': 'Objetivo y seguimiento de pasos diarios.',
                 'calendar': 'Inicio/fin de plan y avisos personalizados del cliente.',
+                'reviews': 'Configura y analiza revisiones con fotos y medidas.',
             }
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
@@ -6265,6 +7195,7 @@ class Handler(BaseHTTPRequestHandler):
                 'weight': f'Objetivo: {weight_goal_status_text}',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
                 'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
+                'reviews': f'{review_count} revisiones · {review_schedule_status_text}' if review_count > 0 else f'Sin revisiones · {review_schedule_status_text}',
             }
             section_content = {
                 'diet': diet_panel_html,
@@ -6272,6 +7203,7 @@ class Handler(BaseHTTPRequestHandler):
                 'weight': weight_panel_html,
                 'steps': steps_panel_html,
                 'calendar': calendar_panel_html,
+                'reviews': reviews_panel_html,
             }
 
             if selected_section not in section_content:
@@ -6283,7 +7215,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'<h3>{html.escape(section_titles[key])}</h3>'
                 f'<p>{html.escape(section_descriptions[key])}</p>'
                 '</a>'
-                for key in ('diet', 'training', 'weight', 'steps', 'calendar')
+                for key in ('diet', 'training', 'weight', 'steps', 'calendar', 'reviews')
             ])
 
             detail_html = ''
@@ -6416,6 +7348,7 @@ class Handler(BaseHTTPRequestHandler):
         .cal-date{{font-size:.82rem;font-weight:800;color:#334155;}}
         .cal-chip{{display:inline-flex;padding:3px 8px;border-radius:999px;background:#eef2f7;color:#475569;font-size:.72rem;font-weight:800;}}
         .cal-chip-auto{{background:#dcfce7;color:#166534;}}
+        .cal-chip-review{{background:#dbeafe;color:#1d4ed8;}}
         .cal-chip-recurring{{background:#ede9fe;color:#5b21b6;}}
         .cal-item h4{{margin:7px 0 4px;font-size:.95rem;}}
         .cal-item p{{margin:0;color:#6d7480;font-size:.86rem;}}
@@ -6436,6 +7369,50 @@ class Handler(BaseHTTPRequestHandler):
         .weight-goal-buttons{{display:flex;gap:8px;flex-wrap:wrap;}}
         .weight-goal-btn{{padding:8px 12px;border:1px solid #d8dde6;border-radius:999px;background:#fff;color:#101318;font-weight:800;cursor:pointer;}}
         .weight-goal-btn.is-active{{background:#101318;border-color:#101318;color:#fff;}}
+        .review-schedule-form,.review-submit-form{{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;border:1px solid #e8ebef;border-radius:12px;padding:10px;background:#fff;margin-bottom:12px;}}
+        .review-schedule-form h3,.review-submit-form h3{{grid-column:1 / -1;margin:0;font-size:1rem;}}
+        .review-schedule-form label,.review-submit-form label{{display:flex;flex-direction:column;gap:4px;font-size:.8rem;color:#6d7480;font-weight:700;}}
+        .review-schedule-form input,.review-schedule-form select,.review-schedule-form button,.review-submit-form input,.review-submit-form select,.review-submit-form button{{font:inherit;padding:8px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;}}
+        .review-schedule-form button,.review-submit-form button{{grid-column:1 / -1;background:#101318;border-color:#101318;color:#fff;font-weight:700;cursor:pointer;}}
+        .review-note{{grid-column:1 / -1;margin:0;color:#64748b;font-size:.82rem;}}
+        .review-guide{{grid-column:1 / -1;border:1px dashed #cbd5e1;background:#f8fafc;padding:8px 10px;border-radius:10px;font-size:.82rem;color:#475569;}}
+        .review-photo-grid{{grid-column:1 / -1;display:grid;grid-template-columns:repeat(2,minmax(160px,1fr));gap:8px;}}
+        .review-photo-field{{display:flex;flex-direction:column;gap:6px;border:1px solid #e8ebef;border-radius:10px;padding:8px;background:#f8fafc;}}
+        .review-upload-preview-card{{padding:8px;}}
+        .review-upload-preview-card h4{{margin:0 0 6px;font-size:.9rem;}}
+        .review-photo-frame{{width:100%;height:240px;display:flex;align-items:center;justify-content:center;padding:8px;border:1px solid #d8dde6;border-radius:8px;background:#fff;box-sizing:border-box;overflow:hidden;}}
+        .review-photo-frame img{{display:block;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;object-position:center;background:#fff;margin:auto;}}
+        .review-photo-clear{{padding:7px 10px;border:1px solid #d8dde6;border-radius:8px;background:#fff;color:#101318;font-weight:700;cursor:pointer;align-self:flex-start;}}
+        .review-measures-grid{{grid-column:1 / -1;display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;}}
+        .review-upcoming{{border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:10px 12px;margin-bottom:12px;}}
+        .review-upcoming h3{{margin:0 0 8px;font-size:.98rem;}}
+        .review-upcoming-list{{margin:0;padding-left:18px;display:grid;gap:4px;color:#334155;}}
+        .review-cards{{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px;margin-bottom:12px;}}
+        .review-card{{display:block;text-decoration:none;color:#101318;border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:10px;}}
+        .review-card-date{{font-weight:800;}}
+        .review-card-meta{{color:#6d7480;font-size:.82rem;margin-top:4px;}}
+        .review-detail-wrap{{display:grid;gap:10px;}}
+        .review-photo-list{{display:grid;grid-template-columns:repeat(2,minmax(180px,1fr));gap:8px;}}
+        .review-photo-card,.review-compare-card{{border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:8px;}}
+        .review-photo-card h4,.review-compare-card h4{{margin:0 0 6px;font-size:.9rem;}}
+        .review-photo-frame{{width:100%;height:240px;display:flex;align-items:center;justify-content:center;padding:8px;border:1px solid #d8dde6;border-radius:8px;background:#fff;box-sizing:border-box;overflow:hidden;}}
+        .review-photo-frame img{{display:block;width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;object-position:center;background:#fff;margin:auto;}}
+        .review-photo-empty{{height:240px;display:flex;align-items:center;justify-content:center;border:1px dashed #cbd5e1;border-radius:8px;background:#f8fafc;color:#64748b;font-size:.85rem;}}
+        .review-compare-wrap h3,.review-measures-table-wrap h3,.review-feedback-wrap h3{{margin:0 0 8px;font-size:1rem;}}
+        .review-compare-list{{display:grid;gap:8px;}}
+        .review-compare-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px;}}
+        .review-compare-slot{{display:grid;gap:4px;}}
+        .review-compare-grid small{{display:block;margin:0 0 4px;color:#64748b;font-size:.75rem;font-weight:700;}}
+        .review-current-photos-wrap{{display:grid;gap:8px;}}
+        .review-current-photos-wrap h3{{margin:0;font-size:1rem;}}
+        .review-measures-table-wrap{{overflow:auto;}}
+        .review-measures-table{{width:100%;border-collapse:collapse;background:#fff;border:1px solid #e8ebef;border-radius:10px;overflow:hidden;}}
+        .review-measures-table th,.review-measures-table td{{padding:8px;border-bottom:1px solid #eef2f7;text-align:left;font-size:.84rem;}}
+        .review-measures-table th{{background:#f8fafc;font-weight:800;color:#334155;}}
+        .review-feedback-form{{display:grid;gap:8px;}}
+        .review-feedback-form textarea{{font:inherit;padding:8px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;}}
+        .review-feedback-form button{{justify-self:start;padding:8px 12px;border:1px solid #d8dde6;border-radius:9px;background:#101318;color:#fff;font-weight:700;cursor:pointer;}}
+        .review-feedback-text{{margin:0;padding:10px;border:1px solid #e8ebef;border-radius:10px;background:#fff;white-space:pre-wrap;}}
         .empty{{color:#6d7480;font-style:italic;}}
         @media (max-width: 1440px){{ .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(5,minmax(0,1fr));}} }}
         @media (max-width: 1280px){{ .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(4,minmax(0,1fr));}} }}
@@ -6447,7 +7424,7 @@ class Handler(BaseHTTPRequestHandler):
         }}
         @media (max-width: 820px){{ .cards{{grid-template-columns:1fr;}} }}
         @media (max-width: 720px){{ .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(2,minmax(0,1fr));}} }}
-        @media (max-width: 560px){{ .fw-grid{{grid-template-columns:1fr;}} }}
+        @media (max-width: 560px){{ .fw-grid{{grid-template-columns:1fr;}} .review-schedule-form,.review-submit-form,.review-photo-grid,.review-measures-grid,.review-photo-list{{grid-template-columns:1fr;}} }}
     </style>
 </head>
 <body>
@@ -8920,7 +9897,14 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         ctype = self.headers.get('Content-Type', '')
 
-        public_post_paths = {'/client_login', '/client_register', '/client_onboarding', '/admin_login', '/set_client_weight_goal'}
+        public_post_paths = {
+            '/client_login',
+            '/client_register',
+            '/client_onboarding',
+            '/admin_login',
+            '/set_client_weight_goal',
+            '/submit_client_review',
+        }
         if path not in public_post_paths and not self.is_admin_authenticated():
             self.redirect_admin_login(path)
             return
@@ -9269,6 +10253,23 @@ class Handler(BaseHTTPRequestHandler):
                 next_path = '/client_app'
 
             # Unified access: admin can log in from the same entry form.
+            expected_admin_user = get_admin_portal_username()
+            if identifier == expected_admin_user:
+                if verify_admin_portal_credentials(identifier, password):
+                    admin_token = make_admin_portal_session_token(identifier)
+                    self.send_response(303)
+                    self.send_header(
+                        'Set-Cookie',
+                        f'{ADMIN_PORTAL_COOKIE}={urllib.parse.quote(admin_token)}; Path=/; Max-Age={ADMIN_PORTAL_SESSION_TTL_SECONDS}; HttpOnly; SameSite=Lax',
+                    )
+                    self.send_header('Location', '/admin')
+                    self.end_headers()
+                    return
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('Credenciales incorrectas'))
+                self.end_headers()
+                return
+
             if verify_admin_portal_credentials(identifier, password):
                 admin_token = make_admin_portal_session_token(identifier)
                 self.send_response(303)
@@ -10450,6 +11451,135 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == '/set_client_review_schedule':
+            if not self.is_admin_authenticated():
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('No autorizado'))
+                self.end_headers()
+                return
+
+            client_id_raw = get('client_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            try:
+                client_id_i = int(client_id_raw)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                self.end_headers()
+                return
+
+            month_days = parse_month_days(get('review_month_days').strip())
+            repeat_enabled = 1 if get('review_repeat_enabled').strip() else 0
+
+            if not month_days:
+                month_days = [1, 15]
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                """
+                UPDATE clients
+                SET review_schedule_mode = 'monthly_days', review_month_days = ?, review_repeat_enabled = ?
+                WHERE id = ?
+                """,
+                (
+                    month_days_text(month_days or [1, 15]),
+                    int(repeat_enabled),
+                    client_id_i,
+                ),
+            )
+            conn.commit()
+            conn.close()
+
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Programación de revisiones guardada'))
+            self.end_headers()
+            return
+
+        if path == '/submit_client_review':
+            client_id_raw = get('client_id').strip()
+            review_id_raw = get('review_id').strip()
+            return_to = get('return_to').strip() or '/client_app?section=reviews'
+            review_date = normalize_iso_date_text(get('review_date').strip())
+            if not review_date:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Fecha de revisión inválida'))
+                self.end_headers()
+                return
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+
+            client_id_i = None
+            if session_client_id is not None:
+                if client_id_raw:
+                    try:
+                        requested_client_id = int(client_id_raw)
+                    except Exception:
+                        self.send_response(303)
+                        self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                        self.end_headers()
+                        return
+                    if int(requested_client_id) != int(session_client_id):
+                        self.send_response(303)
+                        self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('No autorizado'))
+                        self.end_headers()
+                        return
+                client_id_i = int(session_client_id)
+            else:
+                if not self.is_admin_authenticated():
+                    self.send_response(303)
+                    self.send_header('Location', '/client_login?next=' + urllib.parse.quote(return_to))
+                    self.end_headers()
+                    return
+                try:
+                    client_id_i = int(client_id_raw)
+                except Exception:
+                    self.send_response(303)
+                    self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                    self.end_headers()
+                    return
+
+            payload = {}
+            for photo_key, _label in REVIEW_PHOTO_FIELDS:
+                data_url = get(photo_key + '_data_url').strip()
+                payload[photo_key] = save_review_photo_data_url(data_url, client_id_i, review_date, photo_key)
+            for measure_key, _label in REVIEW_MEASUREMENT_FIELDS:
+                payload[measure_key] = get(measure_key).strip()
+
+            upsert_client_review(client_id_i, review_date, payload, review_id=review_id_raw)
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Revisión guardada'))
+            self.end_headers()
+            return
+
+        if path == '/save_client_review_feedback':
+            if not self.is_admin_authenticated():
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('No autorizado'))
+                self.end_headers()
+                return
+
+            client_id_raw = get('client_id').strip()
+            review_id_raw = get('review_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            feedback = get('professional_feedback').strip()
+            try:
+                client_id_i = int(client_id_raw)
+                review_id_i = int(review_id_raw)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Revisión inválida'))
+                self.end_headers()
+                return
+
+            update_client_review_feedback(client_id_i, review_id_i, feedback)
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Feedback guardado'))
+            self.end_headers()
+            return
+
         if path == '/add_client_notice_event':
             client_id = get('client_id').strip()
             return_to = get('return_to').strip() or '/clients'
@@ -11042,6 +12172,7 @@ def run():
         ensure_client_daily_steps_table()
         ensure_client_notice_events_table()
         ensure_client_notice_rules_table()
+        ensure_client_reviews_table()
         ensure_diet_builder_tables()
         ensure_app_settings_table()
     finally:

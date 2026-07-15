@@ -40,6 +40,7 @@ TABLES_TO_MIGRATE = [
     "client_training_history",
     "client_fasting_weights",
     "client_daily_steps",
+    "client_reviews",
 ]
 
 SEQUENCE_TABLES = [
@@ -62,6 +63,7 @@ SEQUENCE_TABLES = [
     "client_training_history",
     "client_fasting_weights",
     "client_daily_steps",
+    "client_reviews",
 ]
 
 
@@ -98,6 +100,7 @@ def _bootstrap_destination_schema(dest_conn):
     app_schema.ensure_client_history_tables(dest_conn)
     app_schema.ensure_fasting_weights_table(dest_conn)
     app_schema.ensure_client_daily_steps_table(dest_conn)
+    app_schema.ensure_client_reviews_table(dest_conn)
     app_schema.ensure_diet_builder_tables(dest_conn)
     app_schema.ensure_app_settings_table(dest_conn)
     print('[1/6] Schema bootstrap complete', flush=True)
