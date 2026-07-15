@@ -495,8 +495,14 @@ def ensure_clients_table(conn_or_path=None):
         cur.execute("ALTER TABLE clients ADD COLUMN client_password_hash TEXT")
     if 'daily_steps_goal' not in cols:
         cur.execute("ALTER TABLE clients ADD COLUMN daily_steps_goal INTEGER DEFAULT 0")
+    if 'weight_goal_mode' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN weight_goal_mode TEXT DEFAULT 'fat_loss'")
     cur.execute(
         "UPDATE clients SET client_access_code = ('C' || CAST(id AS TEXT)) WHERE COALESCE(TRIM(client_access_code), '') = ''"
+    )
+    cur.execute(
+        "UPDATE clients SET weight_goal_mode = 'fat_loss' "
+        "WHERE COALESCE(TRIM(LOWER(weight_goal_mode)), '') NOT IN ('fat_loss', 'muscle_gain')"
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_email ON clients(email)")
     conn.commit()
@@ -756,6 +762,24 @@ def get_client_daily_steps_goal(client_id):
         return int(row[0] or 0)
     except Exception:
         return 0
+
+
+def normalize_weight_goal_mode(value, default='fat_loss'):
+    mode = str(value or '').strip().lower()
+    if mode in ('fat_loss', 'muscle_gain'):
+        return mode
+    return default
+
+
+def get_client_weight_goal_mode(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(weight_goal_mode, 'fat_loss') FROM clients WHERE id = ?", (int(client_id),))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return 'fat_loss'
+    return normalize_weight_goal_mode(row[0], default='fat_loss')
 
 
 def get_client_daily_steps_map(client_id, start_date_text, end_date_text):
@@ -1242,7 +1266,13 @@ def upsert_client_daily_steps(client_id, date_text, steps):
     conn.close()
 
 
-def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', include_client_id=True, admin_compact=False):
+def render_fasting_weights_panel(
+    client_id,
+    panel_id='fasting-weight-panel',
+    include_client_id=True,
+    admin_compact=False,
+    weight_goal_mode='fat_loss',
+):
     slots = get_fasting_weight_slots(excluded_months={5})
     first_year, first_month = slots[0]
     last_year, last_month = slots[-1]
@@ -1291,6 +1321,7 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
                 '</details>'
             )
 
+    goal_mode = normalize_weight_goal_mode(weight_goal_mode, default='fat_loss')
     client_payload = f"client_id: {int(client_id)}," if include_client_id else ''
     wrap_class = 'fw-wrap fw-admin-compact' if admin_compact else 'fw-wrap'
     return f'''
@@ -1306,6 +1337,7 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
         const inputs = Array.from(root.querySelectorAll('.fw-input'));
         const dayRows = Array.from(root.querySelectorAll('.fw-day-row'));
         const monthCards = Array.from(root.querySelectorAll('.fw-month-card'));
+        const weightGoalMode = '{goal_mode}';
 
         const isAdminCompact = root.classList.contains('fw-admin-compact');
 
@@ -1344,6 +1376,15 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
         function formatPct(p) {{
             const sign = p > 0 ? '+' : '';
             return sign + Number(p || 0).toFixed(2).replace('.', ',') + '%';
+        }}
+
+        function pctClassByGoal(pct) {{
+            if (!Number.isFinite(pct) || pct === 0) return 'neutral';
+            const isUp = pct > 0;
+            if (weightGoalMode === 'muscle_gain') {{
+                return isUp ? 'good' : 'bad';
+            }}
+            return isUp ? 'bad' : 'good';
         }}
 
         function renderWeeklyMeans() {{
@@ -1388,7 +1429,7 @@ def render_fasting_weights_panel(client_id, panel_id='fasting-weight-panel', inc
                 if (previousAverage && previousAverage > 0) {{
                     const pct = ((avg - previousAverage) / previousAverage) * 100;
                     pctText = '(' + formatPct(pct) + ')';
-                    pctClass = pct < 0 ? 'down' : (pct > 0 ? 'up' : 'neutral');
+                    pctClass = pctClassByGoal(pct);
                 }}
 
                 const meanRow = document.createElement('div');
@@ -1609,6 +1650,23 @@ def render_client_daily_steps_panel(client_id, panel_id='client-steps-panel', in
     }})();
     </script>
     '''
+
+
+def render_weight_goal_mode_form(client_id, goal_mode, return_to):
+    mode = normalize_weight_goal_mode(goal_mode, default='fat_loss')
+    gain_active = ' is-active' if mode == 'muscle_gain' else ''
+    loss_active = ' is-active' if mode == 'fat_loss' else ''
+    return (
+        '<form method="post" action="/set_client_weight_goal" class="weight-goal-form">'
+        f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+        f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+        '<div class="weight-goal-label">Objetivo de peso</div>'
+        '<div class="weight-goal-buttons">'
+        f'<button type="submit" name="weight_goal_mode" value="muscle_gain" class="weight-goal-btn{gain_active}">Ganancia de masa muscular</button>'
+        f'<button type="submit" name="weight_goal_mode" value="fat_loss" class="weight-goal-btn{loss_active}">Pérdida de grasa</button>'
+        '</div>'
+        '</form>'
+    )
 
 
 # helpers
@@ -4774,9 +4832,19 @@ class Handler(BaseHTTPRequestHandler):
                     '</div>'
                 )
 
-            fasting_weights_html = render_fasting_weights_panel(client_id, panel_id=f'fw-client-{client_id}', include_client_id=admin_preview)
             weight_trend_html = render_client_weight_trend_chart(client_id, panel_id=f'weight-trend-client-{client_id}')
             daily_steps_goal = get_client_daily_steps_goal(client_id)
+            preview_qs = f'&client_id={client_id}' if admin_preview else ''
+            weight_goal_mode = get_client_weight_goal_mode(client_id)
+            weight_goal_return_to = f'/client_app?section=weight{preview_qs}'
+            weight_goal_form_html = render_weight_goal_mode_form(client_id, weight_goal_mode, weight_goal_return_to)
+            weight_goal_status_text = 'Ganancia de masa muscular' if weight_goal_mode == 'muscle_gain' else 'Pérdida de grasa'
+            fasting_weights_html = render_fasting_weights_panel(
+                client_id,
+                panel_id=f'fw-client-{client_id}',
+                include_client_id=admin_preview,
+                weight_goal_mode=weight_goal_mode,
+            )
             daily_steps_html = render_client_daily_steps_panel(
                 client_id,
                 panel_id=f'steps-client-{client_id}',
@@ -4808,7 +4876,7 @@ class Handler(BaseHTTPRequestHandler):
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
                 'routine': 'Activa' if active_routine else 'Sin rutina activa',
-                'weight': 'Seguimiento activo',
+                'weight': f'Objetivo: {weight_goal_status_text}',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
                 'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
             }
@@ -4816,12 +4884,11 @@ class Handler(BaseHTTPRequestHandler):
             section_content = {
                 'diet': diet_html,
                 'routine': routine_html,
-                'weight': weight_trend_html + fasting_weights_html,
+                'weight': weight_trend_html + weight_goal_form_html + fasting_weights_html,
                 'steps': daily_steps_html,
                 'calendar': calendar_html,
             }
 
-            preview_qs = f'&client_id={client_id}' if admin_preview else ''
             cards_html = ''.join([
                 f'<a class="client-home-card" href="/client_app?section={key}{preview_qs}">'
                 f'<div class="chip">{html.escape(section_status[key])}</div>'
@@ -4916,6 +4983,8 @@ class Handler(BaseHTTPRequestHandler):
         .fw-mean-value em{{font-style:normal;font-weight:700;margin-left:3px;display:block;}}
         .fw-mean-value.down em{{color:#15803d;}}
         .fw-mean-value.up em{{color:#b91c1c;}}
+        .fw-mean-value.good em{{color:#15803d;}}
+        .fw-mean-value.bad em{{color:#b91c1c;}}
         .fw-mean-value.neutral em{{color:#6d7480;}}
         .fw-input{{width:100%;max-width:none;min-width:0;padding:5px 7px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.82rem;height:30px;}}
         .fw-steps-input{{width:100%;max-width:none;min-width:0;padding:5px 7px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.82rem;height:30px;}}
@@ -4928,6 +4997,11 @@ class Handler(BaseHTTPRequestHandler):
         .fw-steps-input.goal-met{{background:#ecfdf5;border-color:#86efac;color:#166534;font-weight:700;}}
         .fw-steps-input.goal-missed{{background:#fef2f2;border-color:#fca5a5;color:#991b1b;font-weight:700;}}
         .fw-foot{{margin-top:8px;color:#6d7480;font-size:.82rem;}}
+        .weight-goal-form{{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:0 0 10px;}}
+        .weight-goal-label{{font-size:.78rem;color:#6d7480;font-weight:800;}}
+        .weight-goal-buttons{{display:flex;gap:8px;flex-wrap:wrap;}}
+        .weight-goal-btn{{padding:8px 12px;border:1px solid #d8dde6;border-radius:999px;background:#fff;color:#101318;font-weight:800;cursor:pointer;}}
+        .weight-goal-btn.is-active{{background:#101318;border-color:#101318;color:#fff;}}
         .cal-wrap{{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:10px;}}
         .cal-head{{font-size:1rem;font-weight:800;margin:0 0 10px;color:#0f172a;}}
         .cal-months{{display:grid;gap:8px;}}
@@ -5919,6 +5993,13 @@ class Handler(BaseHTTPRequestHandler):
             active_diet = get_active_client_diet(cid_i)
             active_routine = get_active_client_routine(cid_i)
             daily_steps_goal = get_client_daily_steps_goal(cid_i)
+            weight_goal_mode = get_client_weight_goal_mode(cid_i)
+            weight_goal_form_html = render_weight_goal_mode_form(
+                cid_i,
+                weight_goal_mode,
+                f'/client_profile?id={cid_i}&section=weight',
+            )
+            weight_goal_status_text = 'Ganancia de masa muscular' if weight_goal_mode == 'muscle_gain' else 'Pérdida de grasa'
             diets = []
             routines_all = []
             diet_history = []
@@ -6058,6 +6139,7 @@ class Handler(BaseHTTPRequestHandler):
                     panel_id=f'fw-admin-{cid_i}',
                     include_client_id=True,
                     admin_compact=True,
+                    weight_goal_mode=weight_goal_mode,
                 )
             if selected_section == 'steps':
                 daily_steps_html = render_client_daily_steps_panel(
@@ -6136,6 +6218,7 @@ class Handler(BaseHTTPRequestHandler):
             weight_panel_html = f'''
             <section class="panel panel-full">
                 <h2>⚖️ Peso corporal en ayunas</h2>
+                {weight_goal_form_html}
                 {fasting_weights_html}
             </section>
             '''
@@ -6179,7 +6262,7 @@ class Handler(BaseHTTPRequestHandler):
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
                 'training': 'Activa' if active_routine else 'Sin entrenamiento activo',
-                'weight': 'Seguimiento activo',
+                'weight': f'Objetivo: {weight_goal_status_text}',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
                 'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
             }
@@ -6286,6 +6369,8 @@ class Handler(BaseHTTPRequestHandler):
         .fw-mean-value em{{font-style:normal;font-weight:700;margin-left:3px;display:block;}}
         .fw-mean-value.down em{{color:#15803d;}}
         .fw-mean-value.up em{{color:#b91c1c;}}
+        .fw-mean-value.good em{{color:#15803d;}}
+        .fw-mean-value.bad em{{color:#b91c1c;}}
         .fw-mean-value.neutral em{{color:#6d7480;}}
         .fw-input{{width:58px;max-width:58px;min-width:58px;padding:2px 4px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.72rem;height:24px;}}
         .fw-steps-input{{width:58px;max-width:58px;min-width:58px;padding:2px 4px;border:1px solid #d8dde6;border-radius:7px;background:#fff;font:inherit;font-size:.72rem;height:24px;}}
@@ -6346,6 +6431,11 @@ class Handler(BaseHTTPRequestHandler):
         .steps-goal-form label{{display:flex;flex-direction:column;gap:5px;font-size:.78rem;color:#6d7480;font-weight:700;}}
         .steps-goal-form input{{font:inherit;padding:8px 10px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;min-width:200px;}}
         .steps-goal-form button{{padding:8px 12px;border:1px solid #d8dde6;border-radius:9px;background:#fff;color:#101318;font-weight:700;cursor:pointer;}}
+        .weight-goal-form{{display:flex;gap:8px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin:0 0 10px;}}
+        .weight-goal-label{{font-size:.78rem;color:#6d7480;font-weight:800;}}
+        .weight-goal-buttons{{display:flex;gap:8px;flex-wrap:wrap;}}
+        .weight-goal-btn{{padding:8px 12px;border:1px solid #d8dde6;border-radius:999px;background:#fff;color:#101318;font-weight:800;cursor:pointer;}}
+        .weight-goal-btn.is-active{{background:#101318;border-color:#101318;color:#fff;}}
         .empty{{color:#6d7480;font-style:italic;}}
         @media (max-width: 1440px){{ .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(5,minmax(0,1fr));}} }}
         @media (max-width: 1280px){{ .fw-wrap.fw-admin-compact .fw-grid{{grid-template-columns:repeat(4,minmax(0,1fr));}} }}
@@ -8830,7 +8920,7 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         ctype = self.headers.get('Content-Type', '')
 
-        public_post_paths = {'/client_login', '/client_register', '/client_onboarding', '/admin_login'}
+        public_post_paths = {'/client_login', '/client_register', '/client_onboarding', '/admin_login', '/set_client_weight_goal'}
         if path not in public_post_paths and not self.is_admin_authenticated():
             self.redirect_admin_login(path)
             return
@@ -10301,6 +10391,62 @@ class Handler(BaseHTTPRequestHandler):
 
             self.send_response(303)
             self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Objetivo de pasos actualizado'))
+            self.end_headers()
+            return
+
+        if path == '/set_client_weight_goal':
+            client_id_raw = get('client_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            mode = normalize_weight_goal_mode(get('weight_goal_mode').strip(), default='')
+            if mode not in ('fat_loss', 'muscle_gain'):
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Objetivo de peso inválido'))
+                self.end_headers()
+                return
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+
+            client_id_i = None
+            if session_client_id is not None:
+                if client_id_raw:
+                    try:
+                        requested_client_id = int(client_id_raw)
+                    except Exception:
+                        self.send_response(303)
+                        self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                        self.end_headers()
+                        return
+                    if int(requested_client_id) != int(session_client_id):
+                        self.send_response(303)
+                        self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('No autorizado'))
+                        self.end_headers()
+                        return
+                client_id_i = int(session_client_id)
+            else:
+                if not self.is_admin_authenticated():
+                    self.send_response(303)
+                    self.send_header('Location', '/client_login?next=' + urllib.parse.quote(return_to))
+                    self.end_headers()
+                    return
+                try:
+                    client_id_i = int(client_id_raw)
+                except Exception:
+                    self.send_response(303)
+                    self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                    self.end_headers()
+                    return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("UPDATE clients SET weight_goal_mode = ? WHERE id = ?", (mode, client_id_i))
+            conn.commit()
+            conn.close()
+
+            label = 'Ganancia de masa muscular' if mode == 'muscle_gain' else 'Pérdida de grasa'
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Objetivo de peso: ' + label))
             self.end_headers()
             return
 
