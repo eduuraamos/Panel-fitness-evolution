@@ -289,16 +289,21 @@ body.modal-open{overflow:hidden}
             <div class="field"><div class="flbl">Altura (cm)</div><input class="finp" type="number" id="cp-client-height" min="0" step="0.1" placeholder="175" oninput="onClientProfileInput()"></div>
             <div class="field"><div class="flbl">Edad</div><input class="finp" type="number" id="cp-client-age" min="0" step="1" placeholder="30" oninput="onClientProfileInput()"></div>
           </div>
-          <div class="trow">
-            <label class="tgl">
-              <input type="checkbox" id="cp-train" checked onchange="onTrainToggle()">
-              <span class="tgls"></span>
-            </label>
-            <span class="tlbl" id="cp-tlbl">Día de entrenamiento</span>
+          <div class="field">
+            <div class="flbl">Tipo de día</div>
+            <select class="finp" id="cp-day-kind" onchange="onDayKindChange()">
+              <option value="training_plus">Día de entreno +</option>
+              <option value="training" selected>Día de entreno</option>
+              <option value="rest">Día de descanso</option>
+            </select>
           </div>
           <div class="field"><div class="flbl">Objetivo kcal</div><input class="finp" type="number" id="cp-kcal" placeholder="2000" oninput="onMacroCalculatorInput()"></div>
           <div class="field"><div class="flbl">Pasos objetivo</div><input class="finp" type="number" id="cp-steps" min="0" step="100" placeholder="10000" oninput="saveCP()"></div>
           <div class="field"><div class="flbl">Fibra (g)</div><input class="finp" type="number" id="cp-fiber" placeholder="30" oninput="saveCP()"></div>
+          <div class="field iwrap">
+            <div class="flbl">Observaciones</div>
+            <textarea class="finp itext" id="cp-observations" placeholder="Observaciones para esta dieta" oninput="onObservationsInput()"></textarea>
+          </div>
           <div class="field iwrap">
             <div class="flbl">Indicaciones para página 2 del PDF</div>
             <textarea class="finp itext" id="cp-instructions" placeholder="Indicaciones personalizadas para el cliente" oninput="onInstructionsInput()"></textarea>
@@ -688,15 +693,22 @@ async function load() {
 }
 
 // ── Calculations ──────────────────────────────────────────────────────────────
-function getC(d) { return S.dayConfigs[d] || {is_training:true,goal_kcal:0,goal_steps:0,goal_protein:0,goal_fat:0,goal_carbs:0,goal_fiber:0,protein_multiplier:0,fat_multiplier:0,carb_multiplier:0}; }
-function getProfileForType(isTraining, excludeDay) {
+function getC(d) { return S.dayConfigs[d] || {is_training:true,day_kind:'training',goal_kcal:0,goal_steps:0,goal_protein:0,goal_fat:0,goal_carbs:0,goal_fiber:0,protein_multiplier:0,fat_multiplier:0,carb_multiplier:0}; }
+function getDayKind(cfg) {
+  return (cfg && cfg.day_kind) || ((cfg && cfg.is_training === false) ? 'rest' : 'training');
+}
+function isTrainingKind(kind) {
+  return kind !== 'rest';
+}
+function getProfileForKind(kind, excludeDay) {
   for (const day of DAYS) {
     if (day === excludeDay) continue;
     const cfg = getC(day);
-    if ((cfg.is_training !== false) === isTraining) return { ...cfg };
+    if (getDayKind(cfg) === kind) return { ...cfg };
   }
   return {
-    is_training: isTraining,
+    is_training: isTrainingKind(kind),
+    day_kind: kind,
     goal_kcal: 0,
     goal_steps: 0,
     goal_protein: 0,
@@ -738,7 +750,8 @@ function render() {
   for (const day of DAYS) {
     const cfg = getC(day);
     const tot = calcDay(day);
-    const isT = cfg.is_training !== false;
+    const dayKind = getDayKind(cfg);
+    const isT = dayKind !== 'rest';
     const gk = cfg.goal_kcal || 0;
     const gs = cfg.goal_steps || 0;
     const gp = cfg.goal_protein || 0;
@@ -762,7 +775,7 @@ function render() {
         <button class="ib" onclick="event.stopPropagation();copyDayClip('${day}')" style="opacity:.7;font-size:13px" title="Copiar día completo">📋</button>
         <button class="ib" onclick="event.stopPropagation();pasteDayClip('${day}')" style="opacity:.7;font-size:13px" title="Pegar día completo">📥</button>
       </div>
-      <div class="dbadge ${isT?'train':'rest'}" onclick="event.stopPropagation();toggleT('${day}')">${isT?'🟢 Entreno':'⚪ Descanso'}</div>
+      <div class="dbadge ${isT?'train':'rest'}" onclick="event.stopPropagation();toggleT('${day}')">${dayKind === 'training_plus' ? '🟢 Entreno +' : (isT ? '🟢 Entreno' : '⚪ Descanso')}</div>
       <div class="dkcal">${rnd(tot.kcal)} kcal</div>
       <div class="dgoal">Objetivo: ${gk > 0 ? rnd(gk) + ' kcal' : 'sin definir'}</div>
       <div class="dgoal">Pasos: ${gs > 0 ? rnd(gs) : 'sin definir'}</div>
@@ -1538,7 +1551,7 @@ function openCP(day) {
   document.getElementById('cp-weight').value = S.diet.client_weight_kg || '';
   document.getElementById('cp-client-height').value = S.diet.client_height_cm || '';
   document.getElementById('cp-client-age').value = S.diet.client_age || '';
-  document.getElementById('cp-train').checked = cfg.is_training !== false;
+  document.getElementById('cp-day-kind').value = getDayKind(cfg);
   document.getElementById('cp-kcal').value = cfg.goal_kcal || '';
   document.getElementById('cp-steps').value = cfg.goal_steps || '';
   const protMult = parseFloat(cfg.protein_multiplier || 0) || deriveMultiplier(cfg.goal_protein);
@@ -1548,6 +1561,7 @@ function openCP(day) {
   document.getElementById('cp-fat-mult').value = fatMult ? fd(fatMult) : '';
   document.getElementById('cp-carbs-mult').value = carbMult ? fd(carbMult) : '';
   document.getElementById('cp-fiber').value = cfg.goal_fiber || '';
+  document.getElementById('cp-observations').value = S.diet.client_observations || '';
   document.getElementById('cp-instructions').value = S.diet.client_instructions || '';
   refreshMacroCalculator();
   updTL();
@@ -1558,18 +1572,20 @@ function openMacroCalculator() {
 }
 function closeCP() {}
 function updTL() {
-  const t = document.getElementById('cp-train').checked;
-  document.getElementById('cp-tlbl').textContent = t ? 'Día de entrenamiento' : 'Día de descanso';
+  const kind = document.getElementById('cp-day-kind').value || 'training';
+  const label = kind === 'training_plus' ? 'Día de entreno +' : (kind === 'rest' ? 'Día de descanso' : 'Día de entrenamiento');
+  const titleEl = document.getElementById('cp-tlbl');
+  if (titleEl) titleEl.textContent = label;
 }
 function onMacroMultiplierInput() {
   refreshMacroCalculator();
   saveCP();
 }
-function onTrainToggle() {
+function onDayKindChange() {
   if (!activeDay) return;
-  const isTraining = document.getElementById('cp-train').checked;
-  const profile = getProfileForType(isTraining, activeDay);
-  const merged = { ...profile, is_training: isTraining };
+  const dayKind = document.getElementById('cp-day-kind').value || 'training';
+  const profile = getProfileForKind(dayKind, activeDay);
+  const merged = { ...profile, day_kind: dayKind, is_training: isTrainingKind(dayKind) };
   S.dayConfigs[activeDay] = merged;
 
   // Load the target profile into the panel so switching type reflects its goals.
@@ -1621,6 +1637,16 @@ function onClientProfileInput() {
     } catch (e) { toast('Error al guardar datos del cliente'); }
   }, 450);
 }
+function onObservationsInput() {
+  const text = (document.getElementById('cp-observations').value || '').trim();
+  S.diet.client_observations = text;
+  clearTimeout(instructionsTimer);
+  instructionsTimer = setTimeout(async () => {
+    try {
+      await api('PUT', '/api/diets/' + DIET_ID, { client_observations: S.diet.client_observations });
+    } catch (e) { toast('Error al guardar observaciones'); }
+  }, 450);
+}
 function onInstructionsInput() {
   const text = (document.getElementById('cp-instructions').value || '').trim();
   S.diet.client_instructions = text;
@@ -1654,13 +1680,15 @@ function saveCP() {
   if (!activeDay) return;
   clearTimeout(cpTimer);
   cpTimer = setTimeout(async () => {
-    const is_training = document.getElementById('cp-train').checked;
+    const day_kind = document.getElementById('cp-day-kind').value || 'training';
+    const is_training = isTrainingKind(day_kind);
     const protein_multiplier = parseFloat(document.getElementById('cp-prot-mult').value) || 0;
     const fat_multiplier = parseFloat(document.getElementById('cp-fat-mult').value) || 0;
     const carb_goal = calcAutoCarbsGoal();
     const carb_multiplier = deriveMultiplier(carb_goal);
     const cfg = {
       is_training,
+      day_kind,
       goal_kcal: parseFloat(document.getElementById('cp-kcal').value) || 0,
       goal_steps: parseFloat(document.getElementById('cp-steps').value) || 0,
       goal_protein: calcGoalByWeight(protein_multiplier),
@@ -1677,12 +1705,16 @@ function saveCP() {
     const daysToUpdate = DAYS.filter(day => {
       if (day === activeDay) return true;
       const current = getC(day);
-      return (current.is_training !== false) === is_training;
+      return getDayKind(current) === day_kind;
     });
     for (const day of daysToUpdate) S.dayConfigs[day] = { ...cfg };
     render();
     try {
-      await Promise.all(daysToUpdate.map(day => api('POST', '/api/diet_builder/' + DIET_ID + '/day_config', { day, ...cfg })));
+      if (daysToUpdate.length > 1) {
+        await api('POST', '/api/diet_builder/' + DIET_ID + '/day_config_bulk', { days: daysToUpdate, ...cfg });
+      } else {
+        await api('POST', '/api/diet_builder/' + DIET_ID + '/day_config', { day: activeDay, ...cfg });
+      }
     }
     catch (e) { toast('Error al guardar configuración'); }
   }, 500);
@@ -1690,9 +1722,10 @@ function saveCP() {
 
 async function toggleT(day) {
   const cfg = getC(day);
-  const nv = !(cfg.is_training !== false);
-  const profile = getProfileForType(nv, day);
-  S.dayConfigs[day] = { ...profile, is_training: nv };
+  const currentKind = getDayKind(cfg);
+  const nextKind = currentKind === 'rest' ? 'training' : currentKind === 'training' ? 'training_plus' : 'rest';
+  const profile = getProfileForKind(nextKind, day);
+  S.dayConfigs[day] = { ...profile, day_kind: nextKind, is_training: isTrainingKind(nextKind) };
   if (day === activeDay) openCP(day);
   render();
   try { await api('POST', '/api/diet_builder/' + DIET_ID + '/day_config', { day, ...S.dayConfigs[day] }); }

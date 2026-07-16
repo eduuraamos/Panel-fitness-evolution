@@ -360,6 +360,7 @@ def ensure_diets_table(conn_or_path=None):
         name TEXT NOT NULL,
         description TEXT,
         client_instructions TEXT,
+        client_observations TEXT,
         is_template INTEGER DEFAULT 1,
         client_diet_name TEXT,
         client_weight_kg REAL DEFAULT 0,
@@ -401,6 +402,8 @@ def ensure_diets_table(conn_or_path=None):
         cur.execute("ALTER TABLE diets ADD COLUMN client_age INTEGER DEFAULT 0")
     if 'client_instructions' not in diet_cols:
         cur.execute("ALTER TABLE diets ADD COLUMN client_instructions TEXT")
+    if 'client_observations' not in diet_cols:
+        cur.execute("ALTER TABLE diets ADD COLUMN client_observations TEXT")
     if 'display_number' not in diet_cols:
         cur.execute("ALTER TABLE diets ADD COLUMN display_number INTEGER")
     cur.execute("UPDATE diets SET display_number = id WHERE display_number IS NULL")
@@ -2762,6 +2765,7 @@ def get_active_client_diet(client_id):
             h.diet_id,
             COALESCE(d.name, 'Dieta'),
             COALESCE(d.client_diet_name, ''),
+            COALESCE(d.client_observations, ''),
             COALESCE(h.start_date, ''),
             COALESCE(h.end_date, ''),
             COALESCE(h.notes, '')
@@ -3081,7 +3085,7 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT name, description, COALESCE(client_instructions, ''), COALESCE(client_diet_name, ''), COALESCE(client_weight_kg, 0), "
+        "SELECT name, description, COALESCE(client_instructions, ''), COALESCE(client_observations, ''), COALESCE(client_diet_name, ''), COALESCE(client_weight_kg, 0), "
         "COALESCE(client_name, ''), COALESCE(client_height_cm, 0), COALESCE(client_age, 0) "
         "FROM diets WHERE id = ?",
         (template_diet_id,),
@@ -3091,17 +3095,18 @@ def clone_diet_template_for_client(template_diet_id, client_name=''):
         conn.close()
         return None
 
-    template_name, description, client_instructions, client_diet_name, client_weight_kg, src_client_name, client_height_cm, client_age = src
+    template_name, description, client_instructions, client_observations, client_diet_name, client_weight_kg, src_client_name, client_height_cm, client_age = src
     copy_name = f"{template_name} · {client_name}".strip() if client_name else f"{template_name} · Cliente"
     copy_client_name = src_client_name or client_name or ''
 
     cur.execute(
-        "INSERT INTO diets(name, description, client_instructions, is_template, client_diet_name, client_weight_kg, client_name, client_height_cm, client_age, created_at) "
-        "VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))",
+        "INSERT INTO diets(name, description, client_instructions, client_observations, is_template, client_diet_name, client_weight_kg, client_name, client_height_cm, client_age, created_at) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,datetime('now'))",
         (
             copy_name,
             description,
             client_instructions,
+            client_observations,
             0,
             client_diet_name,
             client_weight_kg,
@@ -3440,6 +3445,7 @@ def ensure_diet_builder_tables(conn_or_path=None):
         diet_id INTEGER NOT NULL,
         day_of_week TEXT NOT NULL,
         is_training INTEGER DEFAULT 1,
+        day_kind TEXT DEFAULT 'training',
         goal_kcal REAL DEFAULT 0,
         goal_steps REAL DEFAULT 0,
         goal_protein REAL DEFAULT 0,
@@ -3465,6 +3471,8 @@ def ensure_diet_builder_tables(conn_or_path=None):
     day_cols = [r[1] for r in cur.fetchall()]
     if 'goal_steps' not in day_cols:
         cur.execute("ALTER TABLE diet_day_config ADD COLUMN goal_steps REAL DEFAULT 0")
+    if 'day_kind' not in day_cols:
+        cur.execute("ALTER TABLE diet_day_config ADD COLUMN day_kind TEXT DEFAULT 'training'")
     if 'protein_multiplier' not in day_cols:
         cur.execute("ALTER TABLE diet_day_config ADD COLUMN protein_multiplier REAL DEFAULT 0")
     if 'fat_multiplier' not in day_cols:
@@ -3491,7 +3499,7 @@ def get_diet_builder_data(diet_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, description, COALESCE(client_instructions, ''), COALESCE(client_diet_name, ''), COALESCE(client_weight_kg, 0), "
+        "SELECT id, name, description, COALESCE(client_instructions, ''), COALESCE(client_observations, ''), COALESCE(client_diet_name, ''), COALESCE(client_weight_kg, 0), "
         "COALESCE(client_name, ''), COALESCE(client_height_cm, 0), COALESCE(client_age, 0) "
         "FROM diets WHERE id=?",
         (diet_id,),
@@ -3506,11 +3514,12 @@ def get_diet_builder_data(diet_id):
         'name': row[1],
         'description': row[2] or '',
         'client_instructions': (row[3] or '').strip() or instructions_template,
-        'client_diet_name': row[4] or '',
-        'client_weight_kg': row[5] or 0,
-        'client_name': row[6] or '',
-        'client_height_cm': row[7] or 0,
-        'client_age': row[8] or 0,
+        'client_observations': row[4] or '',
+        'client_diet_name': row[5] or '',
+        'client_weight_kg': row[6] or 0,
+        'client_name': row[7] or '',
+        'client_height_cm': row[8] or 0,
+        'client_age': row[9] or 0,
     }
 
     cur.execute("SELECT id, name, order_index FROM diet_meals WHERE diet_id=? ORDER BY order_index, id", (diet_id,))
@@ -3523,20 +3532,21 @@ def get_diet_builder_data(diet_id):
         cur.execute("SELECT id, name, order_index FROM diet_meals WHERE diet_id=? ORDER BY order_index, id", (diet_id,))
         meals = [{'id': r[0], 'name': r[1], 'order_index': r[2]} for r in cur.fetchall()]
 
-    cur.execute("SELECT day_of_week, is_training, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier FROM diet_day_config WHERE diet_id=?", (diet_id,))
+    cur.execute("SELECT day_of_week, is_training, COALESCE(day_kind, CASE WHEN is_training=0 THEN 'rest' ELSE 'training' END), goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier FROM diet_day_config WHERE diet_id=?", (diet_id,))
     day_configs = {}
     for r in cur.fetchall():
         day_configs[r[0]] = {
             'is_training': bool(r[1]),
-            'goal_kcal': r[2],
-            'goal_steps': r[3],
-            'goal_protein': r[4],
-            'goal_fat': r[5],
-            'goal_carbs': r[6],
-            'goal_fiber': r[7],
-            'protein_multiplier': r[8],
-            'fat_multiplier': r[9],
-            'carb_multiplier': r[10],
+            'day_kind': r[2] or ('rest' if not bool(r[1]) else 'training'),
+            'goal_kcal': r[3],
+            'goal_steps': r[4],
+            'goal_protein': r[5],
+            'goal_fat': r[6],
+            'goal_carbs': r[7],
+            'goal_fiber': r[8],
+            'protein_multiplier': r[9],
+            'fat_multiplier': r[10],
+            'carb_multiplier': r[11],
         }
 
     cur.execute("""
@@ -3960,6 +3970,7 @@ def build_diet_pdf(diet_id):
     ]
     client_data_text = ' · '.join(client_data_parts)
     client_instructions = (diet.get('client_instructions') or '').strip() or get_diet_instructions_template()
+    client_observations = (diet.get('client_observations') or '').strip()
 
     def parse_quantity_text(quantity_text):
         text = (quantity_text or '').strip()
@@ -4394,37 +4405,44 @@ def build_diet_pdf(diet_id):
     max_line_width = right - left - 14
     line_height = 12
     y_cursor = text_y_start - 8
-    paragraphs = [p.strip() for p in (client_instructions or '').split('\n') if p.strip()]
-    if not paragraphs:
-        paragraphs = ['Sin indicaciones específicas.']
+    def draw_section(title, body_text):
+        nonlocal y_cursor
+        if y_cursor < bottom + 18:
+            return
+        pdf.setFillColor(colors.HexColor('#0f172a'))
+        pdf.setFont('Helvetica-Bold', 10)
+        pdf.drawString(left + 6, y_cursor, title)
+        y_cursor -= line_height
+        pdf.setFont('Helvetica', 10)
+        paragraphs = [p.strip() for p in str(body_text or '').split('\n') if p.strip()]
+        if not paragraphs:
+            paragraphs = ['-']
+        for paragraph in paragraphs:
+            words = paragraph.split()
+            if not words:
+                continue
+            current = words[0]
+            lines = []
+            for word in words[1:]:
+                candidate = current + ' ' + word
+                if pdf.stringWidth(candidate, 'Helvetica', 10) <= max_line_width:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = word
+            lines.append(current)
+
+            for idx, line in enumerate(lines):
+                if y_cursor < bottom + 10:
+                    return
+                prefix = '• ' if idx == 0 else '  '
+                pdf.drawString(left + 6, y_cursor, fit_text(prefix + line, max_line_width, font_name='Helvetica', font_size=10))
+                y_cursor -= line_height
+            y_cursor -= 4
 
     pdf.setFillColor(colors.HexColor('#0f172a'))
-    pdf.setFont('Helvetica', 10)
-
-    for paragraph in paragraphs:
-        words = paragraph.split()
-        if not words:
-            continue
-        current = words[0]
-        lines = []
-        for word in words[1:]:
-            candidate = current + ' ' + word
-            if pdf.stringWidth(candidate, 'Helvetica', 10) <= max_line_width:
-                current = candidate
-            else:
-                lines.append(current)
-                current = word
-        lines.append(current)
-
-        for idx, line in enumerate(lines):
-            if y_cursor < bottom + 10:
-                break
-            prefix = '• ' if idx == 0 else '  '
-            pdf.drawString(left + 6, y_cursor, fit_text(prefix + line, max_line_width, font_name='Helvetica', font_size=10))
-            y_cursor -= line_height
-        y_cursor -= 4
-        if y_cursor < bottom + 10:
-            break
+    draw_section('Observaciones', client_observations or 'Sin observaciones.')
+    draw_section('Indicaciones', client_instructions or 'Sin indicaciones específicas.')
 
     draw_page_number('Página 2')
     pdf.showPage()
@@ -5586,13 +5604,14 @@ class Handler(BaseHTTPRequestHandler):
 
             diet_html = '<p class="empty">No tienes dieta activa.</p>'
             if active_diet:
-                _hid, diet_id, diet_name, client_diet_name, start_date, end_date, notes = active_diet
+                _hid, diet_id, diet_name, client_diet_name, client_observations, start_date, end_date, notes = active_diet
                 diet_label = (client_diet_name or '').strip() or (diet_name or 'Dieta')
                 diet_html = (
                     '<div class="info-block">'
                     f'<h3>{html.escape(diet_label)}</h3>'
                     f'<p><strong>Inicio:</strong> {html.escape(start_date or "-")}</p>'
                     f'<p><strong>Fin:</strong> {html.escape(end_date or "En curso")}</p>'
+                    f'<p><strong>Observaciones:</strong> {html.escape(client_observations or "-")}</p>'
                     f'<p><strong>Notas:</strong> {html.escape(notes or "-")}</p>'
                     f'<a class="btn" href="/export_diet_pdf/dieta_{diet_id}.pdf?v={uuid.uuid4().hex}" target="_blank">Descargar PDF</a>'
                     '</div>'
@@ -9754,7 +9773,7 @@ class Handler(BaseHTTPRequestHandler):
         m = re.match(r'^/api/diets/(\d+)$', path)
         if m:
             did = int(m.group(1))
-            allowed = ['name', 'description', 'client_instructions', 'client_diet_name', 'client_weight_kg', 'client_name', 'client_height_cm', 'client_age']
+            allowed = ['name', 'description', 'client_instructions', 'client_observations', 'client_diet_name', 'client_weight_kg', 'client_name', 'client_height_cm', 'client_age']
             sets = []
             vals = []
             for k in allowed:
@@ -9910,7 +9929,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Diet builder JSON API
-        bm = re.match(r'^/api/diet_builder/(\d+)/(meals|items|day_config|copy_day|supplements)$', path)
+        bm = re.match(r'^/api/diet_builder/(\d+)/(meals|items|day_config|day_config_bulk|copy_day|supplements)$', path)
         dup_m = re.match(r'^/api/diet_item_b/(\d+)/duplicate$', path)
         if dup_m:
             item_id = int(dup_m.group(1))
@@ -9986,7 +10005,10 @@ class Handler(BaseHTTPRequestHandler):
                     })
                 elif action == 'day_config':
                     day = str(payload.get('day', '')).strip()
-                    is_training = 1 if payload.get('is_training', True) else 0
+                    day_kind = str(payload.get('day_kind', '') or '').strip().lower()
+                    if day_kind not in ('rest', 'training', 'training_plus'):
+                        day_kind = 'training' if payload.get('is_training', True) else 'rest'
+                    is_training = 0 if day_kind == 'rest' else 1
                     goal_kcal = float(payload.get('goal_kcal', 0) or 0)
                     goal_steps = float(payload.get('goal_steps', 0) or 0)
                     goal_protein = float(payload.get('goal_protein', 0) or 0)
@@ -9998,14 +10020,61 @@ class Handler(BaseHTTPRequestHandler):
                     carb_multiplier = float(payload.get('carb_multiplier', 0) or 0)
                     cur.execute("SELECT id FROM diet_day_config WHERE diet_id=? AND day_of_week=?", (diet_id_i, day))
                     if cur.fetchone():
-                        cur.execute("UPDATE diet_day_config SET is_training=?,goal_kcal=?,goal_steps=?,goal_protein=?,goal_fat=?,goal_carbs=?,goal_fiber=?,protein_multiplier=?,fat_multiplier=?,carb_multiplier=? WHERE diet_id=? AND day_of_week=?",
-                                    (is_training, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier, diet_id_i, day))
+                        cur.execute("UPDATE diet_day_config SET is_training=?,day_kind=?,goal_kcal=?,goal_steps=?,goal_protein=?,goal_fat=?,goal_carbs=?,goal_fiber=?,protein_multiplier=?,fat_multiplier=?,carb_multiplier=? WHERE diet_id=? AND day_of_week=?",
+                                    (is_training, day_kind, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier, diet_id_i, day))
                     else:
-                        cur.execute("INSERT INTO diet_day_config(diet_id,day_of_week,is_training,goal_kcal,goal_steps,goal_protein,goal_fat,goal_carbs,goal_fiber,protein_multiplier,fat_multiplier,carb_multiplier) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                                    (diet_id_i, day, is_training, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier))
+                        cur.execute("INSERT INTO diet_day_config(diet_id,day_of_week,is_training,day_kind,goal_kcal,goal_steps,goal_protein,goal_fat,goal_carbs,goal_fiber,protein_multiplier,fat_multiplier,carb_multiplier) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                    (diet_id_i, day, is_training, day_kind, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier))
                     conn.commit()
                     conn.close()
                     return self.send_json({'ok': True})
+                elif action == 'day_config_bulk':
+                    raw_days = payload.get('days') or []
+                    if not isinstance(raw_days, list):
+                        conn.close()
+                        return self.send_json({'error': 'days must be an array'}, status=400)
+                    days = []
+                    seen_days = set()
+                    for raw_day in raw_days:
+                        day_text = str(raw_day or '').strip()
+                        if not day_text or day_text in seen_days:
+                            continue
+                        seen_days.add(day_text)
+                        days.append(day_text)
+                    if not days:
+                        conn.close()
+                        return self.send_json({'error': 'no valid days'}, status=400)
+
+                    day_kind = str(payload.get('day_kind', '') or '').strip().lower()
+                    if day_kind not in ('rest', 'training', 'training_plus'):
+                        day_kind = 'training' if payload.get('is_training', True) else 'rest'
+                    is_training = 0 if day_kind == 'rest' else 1
+                    goal_kcal = float(payload.get('goal_kcal', 0) or 0)
+                    goal_steps = float(payload.get('goal_steps', 0) or 0)
+                    goal_protein = float(payload.get('goal_protein', 0) or 0)
+                    goal_fat = float(payload.get('goal_fat', 0) or 0)
+                    goal_carbs = float(payload.get('goal_carbs', 0) or 0)
+                    goal_fiber = float(payload.get('goal_fiber', 0) or 0)
+                    protein_multiplier = float(payload.get('protein_multiplier', 0) or 0)
+                    fat_multiplier = float(payload.get('fat_multiplier', 0) or 0)
+                    carb_multiplier = float(payload.get('carb_multiplier', 0) or 0)
+
+                    for day in days:
+                        cur.execute("SELECT id FROM diet_day_config WHERE diet_id=? AND day_of_week=?", (diet_id_i, day))
+                        if cur.fetchone():
+                            cur.execute(
+                                "UPDATE diet_day_config SET is_training=?,day_kind=?,goal_kcal=?,goal_steps=?,goal_protein=?,goal_fat=?,goal_carbs=?,goal_fiber=?,protein_multiplier=?,fat_multiplier=?,carb_multiplier=? WHERE diet_id=? AND day_of_week=?",
+                                (is_training, day_kind, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier, diet_id_i, day),
+                            )
+                        else:
+                            cur.execute(
+                                "INSERT INTO diet_day_config(diet_id,day_of_week,is_training,day_kind,goal_kcal,goal_steps,goal_protein,goal_fat,goal_carbs,goal_fiber,protein_multiplier,fat_multiplier,carb_multiplier) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (diet_id_i, day, is_training, day_kind, goal_kcal, goal_steps, goal_protein, goal_fat, goal_carbs, goal_fiber, protein_multiplier, fat_multiplier, carb_multiplier),
+                            )
+
+                    conn.commit()
+                    conn.close()
+                    return self.send_json({'ok': True, 'updated_days': len(days)})
                 elif action == 'copy_day':
                     from_day = str(payload.get('from_day', '')).strip()
                     to_day = str(payload.get('to_day', '')).strip()
@@ -10523,8 +10592,8 @@ class Handler(BaseHTTPRequestHandler):
                 conn = sqlite3.connect(DB_PATH)
                 cur = conn.cursor()
                 cur.execute(
-                    "INSERT INTO diets(name, description, client_instructions, client_weight_kg, created_at) VALUES(?,?,?,?,datetime('now'))",
-                    (name, description or None, default_instructions, client_weight_kg),
+                    "INSERT INTO diets(name, description, client_instructions, client_observations, client_weight_kg, created_at) VALUES(?,?,?,?,?,datetime('now'))",
+                    (name, description or None, default_instructions, '', client_weight_kg),
                 )
                 new_diet_id = cur.lastrowid
                 cur.execute("UPDATE diets SET display_number = ? WHERE id = ?", (new_diet_id, new_diet_id))
