@@ -1107,14 +1107,18 @@ def save_review_photo_data_url(photo_data_url, client_id, review_date, view_key)
     decoded = _decode_review_photo_data_url(photo_data_url)
     if not decoded:
         return None
-    os.makedirs(UPLOADS_REVIEWS_DIR, exist_ok=True)
-    date_slug = re.sub(r'[^0-9]', '', str(review_date or '')) or 'nodate'
-    key_slug = re.sub(r'[^a-z0-9_]+', '', str(view_key or '').lower()) or 'photo'
-    filename = f"review_{int(client_id)}_{date_slug}_{key_slug}_{uuid.uuid4().hex}.{decoded['ext']}"
-    file_path = os.path.join(UPLOADS_REVIEWS_DIR, filename)
-    with open(file_path, 'wb') as f:
-        f.write(decoded['content'])
-    return f"/static/uploads/reviews/{filename}"
+    try:
+        os.makedirs(UPLOADS_REVIEWS_DIR, exist_ok=True)
+        date_slug = re.sub(r'[^0-9]', '', str(review_date or '')) or 'nodate'
+        key_slug = re.sub(r'[^a-z0-9_]+', '', str(view_key or '').lower()) or 'photo'
+        filename = f"review_{int(client_id)}_{date_slug}_{key_slug}_{uuid.uuid4().hex}.{decoded['ext']}"
+        file_path = os.path.join(UPLOADS_REVIEWS_DIR, filename)
+        with open(file_path, 'wb') as f:
+            f.write(decoded['content'])
+        return f"/static/uploads/reviews/{filename}"
+    except Exception:
+        # If disk write fails (permissions/volume issues), caller can still persist blob backup.
+        return None
 
 
 def upsert_client_review_photo_blob(review_id, photo_field, mime_type, content):
@@ -1163,6 +1167,35 @@ def get_client_review_photo_blob(review_id, photo_field):
     if not blob:
         return None
     return mime_type, bytes(blob)
+
+
+def has_client_review_photo_blob(review_id, photo_field):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT 1 FROM client_review_photo_blobs WHERE review_id = ? AND photo_field = ? LIMIT 1",
+        (int(review_id), str(photo_field)),
+    )
+    row = cur.fetchone()
+    conn.close()
+    return bool(row)
+
+
+def review_has_photo(review, photo_field):
+    if not isinstance(review, dict):
+        return False
+    if str(review.get(photo_field) or '').strip():
+        return True
+    review_id = int(review.get('id') or 0)
+    if review_id <= 0:
+        return False
+    return has_client_review_photo_blob(review_id, photo_field)
+
+
+def build_review_blob_marker_path(client_id, review_date, view_key):
+    date_slug = re.sub(r'[^0-9]', '', str(review_date or '')) or 'nodate'
+    key_slug = re.sub(r'[^a-z0-9_]+', '', str(view_key or '').lower()) or 'photo'
+    return f"/static/uploads/reviews/blob_only_{int(client_id)}_{date_slug}_{key_slug}_{uuid.uuid4().hex}.bin"
 
 
 def _review_upload_roots():
@@ -1501,6 +1534,31 @@ def update_client_review_feedback(client_id, review_id, feedback):
     )
     conn.commit()
     conn.close()
+
+
+def delete_client_review(client_id, review_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id FROM client_reviews WHERE id = ? AND client_id = ? LIMIT 1",
+        (int(review_id), int(client_id)),
+    )
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return False
+
+    cur.execute(
+        "DELETE FROM client_review_photo_blobs WHERE review_id = ?",
+        (int(review_id),),
+    )
+    cur.execute(
+        "DELETE FROM client_reviews WHERE id = ? AND client_id = ?",
+        (int(review_id), int(client_id)),
+    )
+    conn.commit()
+    conn.close()
+    return True
 
 
 def _format_measure_value(value):
@@ -2487,7 +2545,7 @@ def render_client_review_submit_form(client_id, return_to, schedule, review=None
     form_id = f'review-form-{int(client_id)}'
     photo_fields_html = []
     for key, label in REVIEW_PHOTO_FIELDS:
-        existing_photo = build_review_photo_proxy_url(review, key) if (review and review.get(key)) else ''
+        existing_photo = build_review_photo_proxy_url(review, key) if review_has_photo(review, key) else ''
         preview_style = 'display:block;' if existing_photo else 'display:none;'
         photo_fields_html.append(
             '<label class="review-photo-field">'
@@ -2540,7 +2598,7 @@ def render_client_review_submit_form(client_id, return_to, schedule, review=None
         '<script>(function(){'
         f'const root=document.getElementById({json.dumps(form_id)});if(!root)return;'
         'const bindInput=(input)=>{input.addEventListener("change",()=>{'
-        'const key=input.getAttribute("data-review-file");'
+        'const key=input.getAttribute("data-review-file")||input.getAttribute("data-review-camera");'
         'const hidden=root.querySelector(`input[data-review-hidden="${key}"]`);'
         'const removeFlag=root.querySelector(`input[data-review-remove="${key}"]`);'
         'const preview=root.querySelector(`img[data-review-preview="${key}"]`);'
@@ -2583,6 +2641,28 @@ def render_client_review_submit_form(client_id, return_to, schedule, review=None
     )
 
 
+def render_new_review_toggle_panel(form_html):
+    panel_id = f'review-new-panel-{uuid.uuid4().hex}'
+    button_id = f'review-new-button-{uuid.uuid4().hex}'
+    return (
+        f'<div class="review-new-review-toggle">'
+        f'<button type="button" id="{button_id}" data-review-toggle="{panel_id}" aria-expanded="false" '
+        'style="display:inline-flex;align-items:center;gap:6px;padding:8px 12px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;font-weight:700;cursor:pointer;">Nueva revision</button>'
+        f'<div id="{panel_id}" hidden style="margin-top:10px;">{form_html}</div>'
+        '<script>(function(){'
+        f'const button=document.getElementById({json.dumps(button_id)});'
+        f'const panel=document.getElementById({json.dumps(panel_id)});'
+        'if(!button||!panel)return;'
+        'button.addEventListener("click",()=>{'
+        'const isHidden=panel.hasAttribute("hidden");'
+        'if(isHidden){panel.removeAttribute("hidden");button.setAttribute("aria-expanded","true");}'
+        'else{panel.setAttribute("hidden","");button.setAttribute("aria-expanded","false");}'
+        '});'
+        '})();</script>'
+        '</div>'
+    )
+
+
 def render_review_upcoming_preview(client_id, schedule, base_url=''):
     from datetime import date
 
@@ -2608,11 +2688,29 @@ def render_client_reviews_cards(reviews, detail_base_url):
     for item in reviews:
         photos_count = sum([1 for key, _ in REVIEW_PHOTO_FIELDS if item.get(key)])
         measures_count = sum([1 for key, _ in REVIEW_MEASUREMENT_FIELDS if item.get(key) is not None])
+        review_id = int(item.get('id') or 0)
+        client_id = int(item.get('client_id') or 0)
+        return_to = detail_base_url
+        review_detail_url = detail_base_url + '&review_id=' + str(review_id)
         cards.append(
-            '<a class="review-card" href="' + html.escape(detail_base_url + '&review_id=' + str(int(item['id']))) + '">'
+            '<article class="review-card" style="display:grid;gap:8px;">'
+            '<div style="display:flex;gap:8px;justify-content:space-between;align-items:flex-start;">'
+            '<a class="review-card-link" style="display:block;text-decoration:none;color:#101318;flex:1;" href="' + html.escape(review_detail_url) + '">'
             f'<div class="review-card-date">{html.escape(format_dmy(item.get("review_date")))} </div>'
             f'<div class="review-card-meta">Fotos: {photos_count}/4 · Medidas: {measures_count}/{len(REVIEW_MEASUREMENT_FIELDS)}</div>'
             '</a>'
+            '<div style="display:grid;gap:6px;justify-items:stretch;">'
+            '<form method="post" action="/delete_client_review" class="review-card-delete-form" style="margin:0;" '
+            'onsubmit="return confirm(\'¿Seguro que quieres borrar esta revisión?\');">'
+            f'<input type="hidden" name="client_id" value="{client_id}" />'
+            f'<input type="hidden" name="review_id" value="{review_id}" />'
+            f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+            '<button type="submit" style="padding:8px 10px;border:1px solid #efcfd2;border-radius:8px;background:#fff4f4;color:#8b1b20;font-weight:700;cursor:pointer;white-space:nowrap;width:100%;">Borrar</button>'
+            '</form>'
+            '<a href="' + html.escape(review_detail_url) + '" style="display:inline-flex;align-items:center;justify-content:center;padding:8px 10px;border:1px solid #d8dde6;border-radius:8px;background:#fff;color:#101318;font-weight:700;text-decoration:none;white-space:nowrap;">Editar</a>'
+            '</div>'
+            '</div>'
+            '</article>'
         )
     return '<div class="review-cards">' + ''.join(cards) + '</div>'
 
@@ -2631,9 +2729,19 @@ def render_client_review_detail(review, previous_review, admin_mode=False, retur
         title='Editar revision',
         button_label='Guardar cambios',
     )
+    delete_return_to = f'/client_profile?id={review_client_id}&section=reviews' if admin_mode else '/client_app?section=reviews'
+    delete_form_html = (
+        '<form method="post" action="/delete_client_review" class="review-delete-form" '
+        'onsubmit="return confirm(\'¿Seguro que quieres borrar esta revisión?\');">'
+        f'<input type="hidden" name="client_id" value="{review_client_id}" />'
+        f'<input type="hidden" name="review_id" value="{int(review.get("id") or 0)}" />'
+        f'<input type="hidden" name="return_to" value="{html.escape(delete_return_to)}" />'
+        '<button type="submit" class="danger">Borrar revisión</button>'
+        '</form>'
+    )
 
     def photo_img(review_for_path, field_key):
-        path_text = build_review_photo_proxy_url(review_for_path, field_key) if (review_for_path and review_for_path.get(field_key)) else ''
+        path_text = build_review_photo_proxy_url(review_for_path, field_key) if review_has_photo(review_for_path, field_key) else ''
         if not path_text:
             return '<div class="review-photo-empty">Sin foto</div>'
         return (
@@ -2709,6 +2817,7 @@ def render_client_review_detail(review, previous_review, admin_mode=False, retur
         '<section class="review-detail-wrap">'
         f'<h3>Revision {html.escape(format_dmy(review.get("review_date")))}</h3>'
         + edit_form_html +
+        delete_form_html +
         comparison_html +
         '<section class="review-current-photos-wrap">'
         '<h3>Fotos de la revision actual</h3>'
@@ -6050,7 +6159,9 @@ class Handler(BaseHTTPRequestHandler):
             selected_review_id = (q.get('review_id', [''])[0] if 'review_id' in q else '').strip()
             reviews_base_url = f'/client_app?section=reviews{preview_qs}'
             reviews_history = get_client_reviews(client_id) if (selected_section == 'reviews' or selected_review_id) else []
-            review_submit_form_html = render_client_review_submit_form(client_id, reviews_base_url, review_schedule)
+            review_submit_form_html = render_new_review_toggle_panel(
+                render_client_review_submit_form(client_id, reviews_base_url, review_schedule)
+            )
             review_upcoming_html = render_review_upcoming_preview(client_id, review_schedule, reviews_base_url)
             review_cards_html = render_client_reviews_cards(reviews_history, reviews_base_url)
             review_detail_html = ''
@@ -7403,6 +7514,7 @@ class Handler(BaseHTTPRequestHandler):
             fasting_weights_html = ''
             daily_steps_html = ''
             calendar_html = ''
+            review_submit_form_html = ''
             reviews_history = []
             review_upcoming_html = ''
             review_cards_html = ''
@@ -7435,6 +7547,9 @@ class Handler(BaseHTTPRequestHandler):
                     return_to=f'/client_profile?id={cid_i}&section=calendar',
                 )
             if selected_section == 'reviews' or selected_review_id:
+                review_submit_form_html = render_new_review_toggle_panel(
+                    render_client_review_submit_form(cid_i, reviews_base_url, review_schedule)
+                )
                 reviews_history = get_client_reviews(cid_i)
                 review_upcoming_html = render_review_upcoming_preview(cid_i, review_schedule, reviews_base_url)
                 review_cards_html = render_client_reviews_cards(reviews_history, reviews_base_url)
@@ -7543,6 +7658,7 @@ class Handler(BaseHTTPRequestHandler):
             <section class="panel panel-full">
                 <h2>📸 Revisiones</h2>
                 {review_schedule_form_html}
+                {review_submit_form_html}
                 {review_upcoming_html}
                 {review_cards_html}
                 {review_detail_html}
@@ -10280,6 +10396,7 @@ class Handler(BaseHTTPRequestHandler):
             '/admin_login',
             '/set_client_weight_goal',
             '/submit_client_review',
+            '/delete_client_review',
         }
         if path not in public_post_paths and not self.is_admin_authenticated():
             self.redirect_admin_login(path)
@@ -12045,6 +12162,8 @@ class Handler(BaseHTTPRequestHandler):
                 decoded = _decode_review_photo_data_url(data_url)
                 if decoded:
                     new_photo_blobs[photo_key] = decoded
+                    if not payload[photo_key]:
+                        payload[photo_key] = build_review_blob_marker_path(client_id_i, review_date, photo_key)
             for measure_key, _label in REVIEW_MEASUREMENT_FIELDS:
                 payload[measure_key] = get(measure_key).strip()
 
@@ -12063,6 +12182,48 @@ class Handler(BaseHTTPRequestHandler):
                     )
             self.send_response(303)
             self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Revisión guardada'))
+            self.end_headers()
+            return
+
+        if path == '/delete_client_review':
+            client_id_raw = get('client_id').strip()
+            review_id_raw = get('review_id').strip()
+            return_to = get('return_to').strip() or '/client_app?section=reviews'
+
+            try:
+                client_id_i = int(client_id_raw)
+                review_id_i = int(review_id_raw)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Revisión inválida'))
+                self.end_headers()
+                return
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+
+            if session_client_id is not None:
+                if int(client_id_i) != int(session_client_id):
+                    self.send_response(303)
+                    self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('No autorizado'))
+                    self.end_headers()
+                    return
+            elif not self.is_admin_authenticated():
+                self.send_response(303)
+                self.send_header('Location', '/client_login?next=' + urllib.parse.quote(return_to))
+                self.end_headers()
+                return
+
+            deleted = delete_client_review(client_id_i, review_id_i)
+            if not deleted:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Revisión no encontrada'))
+                self.end_headers()
+                return
+
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Revisión borrada'))
             self.end_headers()
             return
 
