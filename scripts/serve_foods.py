@@ -20,6 +20,7 @@ import uuid
 import mimetypes
 import socket
 import urllib.parse
+import urllib.request
 import json
 import unicodedata
 import io
@@ -783,6 +784,21 @@ def ensure_client_reviews_table(conn_or_path=None):
     """
     )
     cur.execute("CREATE INDEX IF NOT EXISTS idx_client_reviews_client_date ON client_reviews(client_id, review_date)")
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_review_photo_blobs (
+        review_id INTEGER NOT NULL,
+        photo_field TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        photo_blob BYTEA NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(review_id, photo_field),
+        FOREIGN KEY(review_id) REFERENCES client_reviews(id) ON DELETE CASCADE
+    )
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_review_photo_blobs_review ON client_review_photo_blobs(review_id)")
     conn.commit()
     if should_close:
         conn.close()
@@ -848,6 +864,50 @@ def get_client_fasting_weights_series(client_id):
             continue
         out.append((date_norm, value))
     return out
+
+
+def get_client_latest_weekly_mean_weight(client_id):
+    from datetime import datetime, timedelta
+
+    series = get_client_fasting_weights_series(client_id)
+    if not series:
+        return None
+
+    weight_by_date = {}
+    for date_text, weight_kg in series:
+        weight_by_date[str(date_text)] = float(weight_kg or 0)
+
+    ordered_dates = sorted(weight_by_date.keys())
+    previous_monday = None
+    latest_average = None
+
+    for date_text in ordered_dates:
+        try:
+            current_date = datetime.strptime(date_text, '%Y-%m-%d').date()
+        except Exception:
+            continue
+        if current_date.weekday() != 0:
+            continue
+        if previous_monday is None:
+            previous_monday = current_date
+            continue
+
+        week_sum = 0.0
+        week_count = 0
+        for offset in range(1, 8):
+            candidate_date = previous_monday + timedelta(days=offset)
+            candidate_text = candidate_date.isoformat()
+            value = weight_by_date.get(candidate_text)
+            if value is not None and value > 0:
+                week_sum += float(value)
+                week_count += 1
+
+        if week_count:
+            latest_average = math.trunc((week_sum / float(week_count)) * 100) / 100.0
+
+        previous_monday = current_date
+
+    return latest_average
 
 
 def get_client_daily_steps_goal(client_id):
@@ -1019,7 +1079,7 @@ def build_review_schedule_dates(schedule, slots=None):
     return sorted(out)
 
 
-def save_review_photo_data_url(photo_data_url, client_id, review_date, view_key):
+def _decode_review_photo_data_url(photo_data_url):
     data_url = (photo_data_url or '').strip()
     if not data_url:
         return None
@@ -1027,21 +1087,191 @@ def save_review_photo_data_url(photo_data_url, client_id, review_date, view_key)
     if not m:
         return None
     ext_map = {'jpeg': 'jpg', 'jpg': 'jpg', 'png': 'png', 'webp': 'webp', 'gif': 'gif'}
-    ext = ext_map.get(m.group(1).lower(), 'jpg')
+    subtype = m.group(1).lower()
+    ext = ext_map.get(subtype, 'jpg')
+    mime_type = f"image/{'jpeg' if ext == 'jpg' else ext}"
     try:
         content = base64.b64decode(m.group(2).strip(), validate=True)
     except Exception:
         return None
     if not content:
         return None
+    return {
+        'ext': ext,
+        'mime_type': mime_type,
+        'content': content,
+    }
+
+
+def save_review_photo_data_url(photo_data_url, client_id, review_date, view_key):
+    decoded = _decode_review_photo_data_url(photo_data_url)
+    if not decoded:
+        return None
     os.makedirs(UPLOADS_REVIEWS_DIR, exist_ok=True)
     date_slug = re.sub(r'[^0-9]', '', str(review_date or '')) or 'nodate'
     key_slug = re.sub(r'[^a-z0-9_]+', '', str(view_key or '').lower()) or 'photo'
-    filename = f"review_{int(client_id)}_{date_slug}_{key_slug}_{uuid.uuid4().hex}.{ext}"
+    filename = f"review_{int(client_id)}_{date_slug}_{key_slug}_{uuid.uuid4().hex}.{decoded['ext']}"
     file_path = os.path.join(UPLOADS_REVIEWS_DIR, filename)
     with open(file_path, 'wb') as f:
-        f.write(content)
+        f.write(decoded['content'])
     return f"/static/uploads/reviews/{filename}"
+
+
+def upsert_client_review_photo_blob(review_id, photo_field, mime_type, content):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_review_photo_blobs(review_id, photo_field, mime_type, photo_blob, created_at, updated_at)
+        VALUES(?,?,?,?,datetime('now'),datetime('now'))
+        ON CONFLICT(review_id, photo_field)
+        DO UPDATE SET
+            mime_type = excluded.mime_type,
+            photo_blob = excluded.photo_blob,
+            updated_at = datetime('now')
+        """,
+        (int(review_id), str(photo_field), str(mime_type or 'image/jpeg'), content or b''),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_client_review_photo_blob(review_id, photo_field):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM client_review_photo_blobs WHERE review_id = ? AND photo_field = ?",
+        (int(review_id), str(photo_field)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_client_review_photo_blob(review_id, photo_field):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT mime_type, photo_blob FROM client_review_photo_blobs WHERE review_id = ? AND photo_field = ? LIMIT 1",
+        (int(review_id), str(photo_field)),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    mime_type = str(row[0] or '').strip() or 'image/jpeg'
+    blob = row[1]
+    if not blob:
+        return None
+    return mime_type, bytes(blob)
+
+
+def _review_upload_roots():
+    roots = []
+    for base in [
+        UPLOADS_DIR,
+        os.path.join(DATA_DIR, 'uploads'),
+        os.path.join(BASE_DIR, 'data', 'uploads'),
+        os.path.join(STATIC_BASE_DIR, 'uploads'),
+    ]:
+        abs_base = os.path.abspath(base)
+        if abs_base in roots:
+            continue
+        roots.append(abs_base)
+    return roots
+
+
+def _resolve_static_upload_file(upload_rel_path):
+    rel_path = str(upload_rel_path or '').lstrip('/')
+    if not rel_path:
+        return None
+    for root in _review_upload_roots():
+        candidate = os.path.abspath(os.path.normpath(os.path.join(root, rel_path)))
+        if not candidate.startswith(root + os.sep):
+            continue
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _read_review_photo_from_path(path_text):
+    src = str(path_text or '').strip()
+    if not src:
+        return None
+
+    try:
+        parsed = urllib.parse.urlparse(src)
+    except Exception:
+        parsed = None
+
+    if parsed and parsed.scheme in ('http', 'https'):
+        try:
+            req = urllib.request.Request(src, headers={'User-Agent': 'nutrition-app/1.0'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                body = resp.read()
+                if not body:
+                    return None
+                ctype = str(resp.headers.get('Content-Type') or '').split(';', 1)[0].strip() or 'application/octet-stream'
+                return ctype, body
+        except Exception:
+            return None
+
+    local_src = src
+    if parsed and parsed.scheme == '':
+        local_src = parsed.path or src
+    if local_src.startswith('/uploads/'):
+        local_src = '/static' + local_src
+
+    candidate_path = None
+    if local_src.startswith('/static/uploads/'):
+        upload_rel = local_src[len('/static/uploads/'):]
+        candidate_path = _resolve_static_upload_file(upload_rel)
+    elif os.path.isabs(local_src) and os.path.isfile(local_src):
+        candidate_path = local_src
+
+    if not candidate_path:
+        return None
+
+    ctype, _ = mimetypes.guess_type(candidate_path)
+    if not ctype:
+        ctype = 'application/octet-stream'
+    with open(candidate_path, 'rb') as f:
+        return ctype, f.read()
+
+
+def _build_missing_review_photo_svg(label='Foto no disponible'):
+    safe_label = html.escape(str(label or 'Foto no disponible'))
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1600" viewBox="0 0 1200 1600">'
+        '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0%" stop-color="#f8fafc"/><stop offset="100%" stop-color="#e2e8f0"/></linearGradient></defs>'
+        '<rect width="1200" height="1600" fill="url(#g)"/>'
+        '<rect x="120" y="160" width="960" height="1280" rx="28" fill="#ffffff" stroke="#cbd5e1" stroke-width="8"/>'
+        '<text x="600" y="760" text-anchor="middle" fill="#0f172a" font-size="54" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">'
+        f'{safe_label}'
+        '</text>'
+        '<text x="600" y="835" text-anchor="middle" fill="#64748b" font-size="34" font-family="-apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">'
+        'Repite la subida para restaurar la imagen'
+        '</text>'
+        '</svg>'
+    )
+    return svg.encode('utf-8')
+
+
+def build_review_photo_proxy_url(review, photo_field):
+    if not isinstance(review, dict):
+        return ''
+    review_id = int(review.get('id') or 0)
+    if review_id <= 0:
+        return ''
+    field_key = str(photo_field or '').strip()
+    if field_key not in {k for k, _ in REVIEW_PHOTO_FIELDS}:
+        return ''
+    version_raw = str(review.get('updated_at') or review.get('created_at') or review.get('review_date') or '').strip()
+    version = re.sub(r'[^0-9A-Za-z]+', '', version_raw)
+    qs = urllib.parse.urlencode({'review_id': review_id, 'field': field_key})
+    if version:
+        qs += '&v=' + urllib.parse.quote(version)
+    return '/review_photo?' + qs
 
 
 def _normalize_review_measure_value(value):
@@ -1121,6 +1351,29 @@ def get_client_review_by_id(client_id, review_id):
     if not row:
         return None
     return _client_review_row_to_dict(row)
+
+
+def get_review_photo_field_by_review_id(review_id, photo_field):
+    field = str(photo_field or '').strip()
+    allowed = {k for k, _ in REVIEW_PHOTO_FIELDS}
+    if field not in allowed:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        f"SELECT COALESCE({field}, ''), COALESCE(updated_at, ''), COALESCE(created_at, ''), COALESCE(review_date, '') FROM client_reviews WHERE id = ? LIMIT 1",
+        (int(review_id),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'path': str(row[0] or '').strip(),
+        'updated_at': str(row[1] or '').strip(),
+        'created_at': str(row[2] or '').strip(),
+        'review_date': str(row[3] or '').strip(),
+    }
 
 
 def get_previous_client_review(client_id, review_date, review_id):
@@ -1847,19 +2100,37 @@ def render_fasting_weights_panel(
             return new Date(y, m - 1, d);
         }}
 
+        function formatIsoDate(date) {{
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            return y + '-' + m + '-' + d;
+        }}
+
+        function addDays(date, days) {{
+            const copy = new Date(date.getTime());
+            copy.setDate(copy.getDate() + days);
+            return copy;
+        }}
+
         function isMonday(dateText) {{
             const dt = parseIsoDate(dateText);
             if (!dt) return false;
             return dt.getDay() === 1;
         }}
 
+        function trunc2(n) {{
+            if (!Number.isFinite(n)) return 0;
+            return Math.trunc(n * 100) / 100;
+        }}
+
         function formatWeight(n) {{
-            return Number(n || 0).toFixed(2).replace('.', ',');
+            return trunc2(Number(n || 0)).toFixed(2).replace('.', ',');
         }}
 
         function formatPct(p) {{
             const sign = p > 0 ? '+' : '';
-            return sign + Number(p || 0).toFixed(2).replace('.', ',') + '%';
+            return sign + trunc2(Number(p || 0)).toFixed(2).replace('.', ',') + '%';
         }}
 
         function pctClassByGoal(pct) {{
@@ -1891,27 +2162,33 @@ def render_fasting_weights_panel(
             let previousAverage = null;
 
             for (const dateText of orderedDates) {{
-                if (!isMonday(dateText)) continue;
+                const currentDate = parseIsoDate(dateText);
+                if (!currentDate || currentDate.getDay() !== 1) continue;
                 if (!previousMonday) {{
-                    previousMonday = dateText;
+                    previousMonday = currentDate;
                     continue;
                 }}
 
-                const weekDates = orderedDates.filter((d) => d >= previousMonday && d <= dateText);
-                const values = weekDates
-                    .map((d) => valueByDate.get(d))
-                    .filter((v) => Number.isFinite(v));
-
-                if (!values.length) {{
-                    previousMonday = dateText;
+                let weekSum = 0;
+                let weekCount = 0;
+                for (let offset = 1; offset <= 7; offset++) {{
+                    const dayText = formatIsoDate(addDays(previousMonday, offset));
+                    const value = valueByDate.get(dayText);
+                    if (Number.isFinite(value)) {{
+                        weekSum += value;
+                        weekCount += 1;
+                    }}
+                }}
+                if (!weekCount) {{
+                    previousMonday = currentDate;
                     continue;
                 }}
+                const avg = trunc2(weekSum / weekCount);
 
-                const avg = values.reduce((a, b) => a + b, 0) / values.length;
                 let pctText = '(s/d)';
                 let pctClass = 'neutral';
-                if (previousAverage && previousAverage > 0) {{
-                    const pct = ((avg - previousAverage) / previousAverage) * 100;
+                if (Number.isFinite(previousAverage) && previousAverage > 0) {{
+                    const pct = trunc2(((avg - previousAverage) / previousAverage) * 100);
                     pctText = '(' + formatPct(pct) + ')';
                     pctClass = pctClassByGoal(pct);
                 }}
@@ -1923,7 +2200,7 @@ def render_fasting_weights_panel(
                 if (anchor && anchor.parentNode) anchor.insertAdjacentElement('afterend', meanRow);
 
                 previousAverage = avg;
-                previousMonday = dateText;
+                previousMonday = currentDate;
             }}
         }}
 
@@ -2184,6 +2461,25 @@ def _review_measure_input_value(value):
         return str(value or '')
 
 
+def _normalize_review_photo_src(path, review=None):
+    path_text = str(path or '').strip()
+    if not path_text:
+        return ''
+    if not path_text.startswith(('http://', 'https://', '/')):
+        path_text = '/' + path_text.lstrip('/')
+    if path_text.startswith('/uploads/'):
+        path_text = '/static' + path_text
+    if path_text.startswith('/static/uploads/reviews/'):
+        version_raw = ''
+        if isinstance(review, dict):
+            version_raw = str(review.get('updated_at') or review.get('created_at') or review.get('review_date') or '').strip()
+        version = re.sub(r'[^0-9A-Za-z]+', '', version_raw)
+        if version:
+            separator = '&' if '?' in path_text else '?'
+            path_text = f"{path_text}{separator}v={version}"
+    return path_text
+
+
 def render_client_review_submit_form(client_id, return_to, schedule, review=None, title='Enviar revision', button_label='Guardar revision'):
     from datetime import date
 
@@ -2191,7 +2487,7 @@ def render_client_review_submit_form(client_id, return_to, schedule, review=None
     form_id = f'review-form-{int(client_id)}'
     photo_fields_html = []
     for key, label in REVIEW_PHOTO_FIELDS:
-        existing_photo = str(review.get(key) or '').strip() if review else ''
+        existing_photo = build_review_photo_proxy_url(review, key) if (review and review.get(key)) else ''
         preview_style = 'display:block;' if existing_photo else 'display:none;'
         photo_fields_html.append(
             '<label class="review-photo-field">'
@@ -2276,6 +2572,13 @@ def render_client_review_submit_form(client_id, return_to, schedule, review=None
         'if(input)input.value="";'
         'if(preview){preview.removeAttribute("src");preview.style.display="none";}'
         '});});'
+        'root.querySelectorAll("img[data-review-preview]").forEach((img)=>{img.addEventListener("error",()=>{'
+        'if(img.dataset.retryLoaded==="1")return;'
+        'const src=img.getAttribute("src")||"";'
+        'if(!src)return;'
+        'img.dataset.retryLoaded="1";'
+        'img.src=src + (src.includes("?")?"&":"?") + "retry=" + Date.now();'
+        '});});'
         '})();</script>'
     )
 
@@ -2329,29 +2632,27 @@ def render_client_review_detail(review, previous_review, admin_mode=False, retur
         button_label='Guardar cambios',
     )
 
-    def photo_img(path):
-        path_text = str(path or '').strip()
+    def photo_img(review_for_path, field_key):
+        path_text = build_review_photo_proxy_url(review_for_path, field_key) if (review_for_path and review_for_path.get(field_key)) else ''
         if not path_text:
             return '<div class="review-photo-empty">Sin foto</div>'
         return (
             '<div class="review-photo-frame">'
-            f'<img src="{html.escape(path_text)}" alt="Foto revision" style="width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;object-position:center;display:block;background:#fff;margin:auto;" />'
+            f'<img src="{html.escape(path_text)}" alt="Foto revision" data-review-photo="1" style="width:auto;height:auto;max-width:100%;max-height:100%;object-fit:contain;object-position:center;display:block;background:#fff;margin:auto;" />'
             '</div>'
         )
 
     photo_blocks = []
     comparison_blocks = []
     for key, label in REVIEW_PHOTO_FIELDS:
-        current_path = review.get(key)
-        previous_path = previous_review.get(key) if previous_review else ''
         photo_blocks.append(
             '<article class="review-photo-card">'
             f'<h4>{html.escape(label)}</h4>'
-            f'{photo_img(current_path)}'
+            f'{photo_img(review, key)}'
             '</article>'
         )
-        previous_photo_html = photo_img(previous_path) if previous_review else '<div class="review-photo-empty">Sin foto anterior</div>'
-        current_photo_html = photo_img(current_path)
+        previous_photo_html = photo_img(previous_review, key) if previous_review else '<div class="review-photo-empty">Sin foto anterior</div>'
+        current_photo_html = photo_img(review, key)
         comparison_blocks.append(
             '<article class="review-compare-card">'
             f'<h4>{html.escape(label)}</h4>'
@@ -2424,6 +2725,7 @@ def render_client_review_detail(review, previous_review, admin_mode=False, retur
         '<h3>Feedback del profesional</h3>'
         + feedback_html +
         '</section>'
+        '<script>(function(){document.querySelectorAll("img[data-review-photo]").forEach((img)=>{img.addEventListener("error",()=>{if(img.dataset.retryLoaded==="1")return;const src=img.getAttribute("src")||"";if(!src)return;img.dataset.retryLoaded="1";img.src=src + (src.includes("?")?"&":"?") + "retry=" + Date.now();});});})();</script>'
         '</section>'
     )
 
@@ -5029,6 +5331,58 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == '/review_photo':
+            review_id_raw = (q.get('review_id', [''])[0] or '').strip()
+            field_key = (q.get('field', [''])[0] or '').strip()
+            try:
+                review_id = int(review_id_raw)
+            except Exception:
+                review_id = 0
+            allowed_fields = {k for k, _ in REVIEW_PHOTO_FIELDS}
+            if review_id <= 0 or field_key not in allowed_fields:
+                body = _build_missing_review_photo_svg('Foto no disponible')
+                self.send_response(200)
+                self.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
+                self.send_header('Cache-Control', 'no-store')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            review_photo = get_review_photo_field_by_review_id(review_id, field_key)
+            if review_photo:
+                resolved = _read_review_photo_from_path(review_photo.get('path'))
+                if resolved:
+                    ctype, body = resolved
+                    self.send_response(200)
+                    self.send_header('Content-Type', ctype)
+                    self.send_header('Cache-Control', 'public, max-age=300')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+            blob_row = get_client_review_photo_blob(review_id, field_key)
+            if blob_row:
+                ctype, body = blob_row
+                self.send_response(200)
+                self.send_header('Content-Type', ctype)
+                self.send_header('Cache-Control', 'public, max-age=300')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            label_map = {k: v for k, v in REVIEW_PHOTO_FIELDS}
+            body = _build_missing_review_photo_svg(label_map.get(field_key) or 'Foto no disponible')
+            self.send_response(200)
+            self.send_header('Content-Type', 'image/svg+xml; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
         if path.startswith('/static/'):
             rel_path = urllib.parse.unquote(path[len('/static/'):]).strip()
             safe_path = os.path.normpath(rel_path)
@@ -5040,22 +5394,11 @@ class Handler(BaseHTTPRequestHandler):
             path_parts = safe_path.split('/')
             if path_parts and path_parts[0] == 'uploads':
                 upload_rel = '/'.join(path_parts[1:])
-                uploads_root_abs = os.path.abspath(UPLOADS_DIR)
-                full_path = os.path.abspath(os.path.normpath(os.path.join(uploads_root_abs, upload_rel)))
-                if not full_path.startswith(uploads_root_abs + os.sep):
-                    self.send_response(403)
+                full_path = _resolve_static_upload_file(upload_rel)
+                if not full_path:
+                    self.send_response(404)
                     self.end_headers()
                     return
-
-                # Backward compatibility: old images may still be bundled under scripts/static/uploads.
-                if not os.path.isfile(full_path):
-                    legacy_uploads_abs = os.path.abspath(os.path.join(STATIC_BASE_DIR, 'uploads'))
-                    legacy_path = os.path.abspath(os.path.normpath(os.path.join(legacy_uploads_abs, upload_rel)))
-                    if not legacy_path.startswith(legacy_uploads_abs + os.sep):
-                        self.send_response(403)
-                        self.end_headers()
-                        return
-                    full_path = legacy_path
             else:
                 full_path = os.path.join(STATIC_BASE_DIR, safe_path)
 
@@ -5228,6 +5571,20 @@ class Handler(BaseHTTPRequestHandler):
             diet_panel_html = f'''
             <section class="panel">
                 <h2>🥗 Dietas</h2>
+                <form method="post" action="/add_diet" class="assign">
+                    <input type="hidden" name="client_id" value="{cid_i}" />
+                    <input type="hidden" name="assign_to_client" value="1" />
+                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=diet" />
+                    <input name="name" class="full" value="Dieta de {html.escape(name)}" placeholder="Nombre de la dieta" required />
+                    <input name="description" class="full" value="Dieta creada para {html.escape(name)}" placeholder="Descripción" />
+                    <div class="full" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;">
+                        <input name="client_name" value="{html.escape(name)}" placeholder="Nombre del cliente" />
+                        <input name="client_age" type="number" min="0" step="1" value="{int(age) if int(age or 0) > 0 else ''}" placeholder="Edad" />
+                        <input name="client_height_cm" type="number" min="0" step="0.1" value="{fmt_num(_height_cm) if _height_cm else ''}" placeholder="Altura (cm)" />
+                        <input name="client_weight_kg" type="number" min="0" step="0.1" value="{fmt_num(_weight_kg) if _weight_kg else ''}" placeholder="Peso (kg)" />
+                    </div>
+                    <button type="submit" class="full">✨ Crear y asignar dieta nueva</button>
+                </form>
                 <form method="post" action="/assign_client_diet" class="assign">
                     <input type="hidden" name="client_id" value="{cid_i}" />
                     <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=diet" />
@@ -10582,26 +10939,94 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/add_diet':
             name = get('name').strip()
             description = get('description').strip()
+            client_id_raw = get('client_id').strip()
+            assign_to_client = get('assign_to_client').strip() == '1'
+            client_name_input = get('client_name').strip()
+            client_age_input = get('client_age').strip()
+            client_height_input = get('client_height_cm').strip()
+            client_weight_input = get('client_weight_kg').strip()
             try:
                 client_weight_kg = float(get('client_weight_kg') or 0)
             except ValueError:
                 client_weight_kg = 0
+            client_id_i = 0
+            if client_id_raw:
+                try:
+                    client_id_i = int(client_id_raw)
+                except Exception:
+                    client_id_i = 0
+            client_row = None
+            if client_id_i > 0:
+                client_row = get_client_by_id(client_id_i)
+
+            if client_row:
+                _, client_name_db, _phone, _email, birthdate, height_db, weight_db, _objectives, _plan_start_date, _plan_end_date, _plan_amount, _plan_notes, _created_at = client_row
+                client_name_input = client_name_input or client_name_db or ''
+                try:
+                    client_age_value = int(client_age_input or calculate_age(birthdate) or 0)
+                except Exception:
+                    client_age_value = calculate_age(birthdate)
+                try:
+                    client_height_value = float(client_height_input or height_db or 0)
+                except Exception:
+                    client_height_value = float(height_db or 0)
+                weekly_mean_weight = get_client_latest_weekly_mean_weight(client_id_i)
+                if weekly_mean_weight is not None and weekly_mean_weight > 0:
+                    client_weight_value = weekly_mean_weight
+                else:
+                    try:
+                        client_weight_value = float(client_weight_input or weight_db or 0)
+                    except Exception:
+                        client_weight_value = float(weight_db or 0)
+            else:
+                try:
+                    client_age_value = int(client_age_input or 0)
+                except Exception:
+                    client_age_value = 0
+                try:
+                    client_height_value = float(client_height_input or 0)
+                except Exception:
+                    client_height_value = 0
+                try:
+                    client_weight_value = float(client_weight_input or client_weight_kg or 0)
+                except Exception:
+                    client_weight_value = float(client_weight_kg or 0)
+
             new_diet_id = None
             if name:
                 default_instructions = get_diet_instructions_template()
                 conn = sqlite3.connect(DB_PATH)
                 cur = conn.cursor()
                 cur.execute(
-                    "INSERT INTO diets(name, description, client_instructions, client_observations, client_weight_kg, created_at) VALUES(?,?,?,?,?,datetime('now'))",
-                    (name, description or None, default_instructions, '', client_weight_kg),
+                    "INSERT INTO diets(name, description, client_instructions, client_observations, client_diet_name, client_weight_kg, client_name, client_height_cm, client_age, created_at) VALUES(?,?,?,?,?,?,?,?,?,datetime('now'))",
+                    (
+                        name,
+                        description or None,
+                        default_instructions,
+                        '',
+                        name,
+                        client_weight_value,
+                        client_name_input or None,
+                        client_height_value,
+                        client_age_value,
+                    ),
                 )
                 new_diet_id = cur.lastrowid
                 cur.execute("UPDATE diets SET display_number = ? WHERE id = ?", (new_diet_id, new_diet_id))
+                if assign_to_client and client_id_i > 0:
+                    cur.execute("UPDATE client_diet_history SET is_active = 0, end_date = COALESCE(NULLIF(end_date, ''), CAST(date('now') AS TEXT)) WHERE client_id = ? AND is_active = 1", (client_id_i,))
+                    cur.execute(
+                        "INSERT INTO client_diet_history(client_id, diet_id, template_diet_id, start_date, end_date, is_active, notes, created_at) VALUES(?,?,?,?,?,?,?,datetime('now'))",
+                        (client_id_i, new_diet_id, None, None, None, 1, 'Creada desde el perfil del cliente'),
+                    )
                 conn.commit()
                 conn.close()
             self.send_response(303)
             if new_diet_id:
-                self.send_header('Location', f'/static/builder.html?diet_id={new_diet_id}')
+                if assign_to_client and client_id_i > 0:
+                    self.send_header('Location', f'/static/builder.html?diet_id={new_diet_id}')
+                else:
+                    self.send_header('Location', f'/static/builder.html?diet_id={new_diet_id}')
             else:
                 self.send_header('Location', '/diets?msg=' + urllib.parse.quote('Dieta creada'))
             self.end_headers()
@@ -11611,13 +12036,31 @@ class Handler(BaseHTTPRequestHandler):
                     return
 
             payload = {}
+            new_photo_blobs = {}
             for photo_key, _label in REVIEW_PHOTO_FIELDS:
+                remove_flag = get(photo_key + '_remove').strip()
                 data_url = get(photo_key + '_data_url').strip()
+                payload[photo_key + '_remove'] = remove_flag
                 payload[photo_key] = save_review_photo_data_url(data_url, client_id_i, review_date, photo_key)
+                decoded = _decode_review_photo_data_url(data_url)
+                if decoded:
+                    new_photo_blobs[photo_key] = decoded
             for measure_key, _label in REVIEW_MEASUREMENT_FIELDS:
                 payload[measure_key] = get(measure_key).strip()
 
-            upsert_client_review(client_id_i, review_date, payload, review_id=review_id_raw)
+            saved_review_id = upsert_client_review(client_id_i, review_date, payload, review_id=review_id_raw)
+            for photo_key, _label in REVIEW_PHOTO_FIELDS:
+                if str(payload.get(photo_key + '_remove') or '').strip() == '1':
+                    delete_client_review_photo_blob(saved_review_id, photo_key)
+                    continue
+                blob = new_photo_blobs.get(photo_key)
+                if blob:
+                    upsert_client_review_photo_blob(
+                        saved_review_id,
+                        photo_key,
+                        blob.get('mime_type') or 'image/jpeg',
+                        blob.get('content') or b'',
+                    )
             self.send_response(303)
             self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Revisión guardada'))
             self.end_headers()
