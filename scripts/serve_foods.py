@@ -9045,6 +9045,7 @@ class Handler(BaseHTTPRequestHandler):
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
             routines = get_routines()
             exercises = get_exercises()
+            exercise_categories = get_exercise_categories()
             clients = sorted(get_clients(), key=lambda c: (str(c[1] or '').casefold(), c[0]))
             routine_id = q.get('routine_id', [''])[0]
             selected_routine = None
@@ -9097,6 +9098,12 @@ class Handler(BaseHTTPRequestHandler):
                     for ex in sorted(exercises, key=lambda row: normalize_text(row[1] or ''))
                 ]
                 exercise_search_options_json = json.dumps(exercise_search_options, ensure_ascii=False).replace('</', '<\\/')
+                exercise_category_options_html = ''.join([
+                    f'<option value="{c[0]}">{html.escape(c[1])}</option>'
+                    for c in exercise_categories
+                ])
+                instant_primary_category_options = '<option value="">-- Grupo muscular principal (opcional) --</option>' + exercise_category_options_html
+                instant_secondary_category_options = '<option value="">-- Segundo grupo muscular (opcional) --</option>' + exercise_category_options_html
 
                 day_cards = []
                 for day_index, day_name, day_type in routine_day_rows:
@@ -9204,6 +9211,20 @@ class Handler(BaseHTTPRequestHandler):
                         <input id="exercise_search" type="text" placeholder="Buscar ejercicio por nombre o grupo" autocomplete="off" />
                         <div id="exercise_search_results" class="exercise-search-results" hidden></div>
                     </div>
+                    <details id="instant_exercise_details" class="instant-exercise-box">
+                        <summary class="instant-exercise-title">No aparece en el buscador? Crear ejercicio al instante</summary>
+                        <div class="instant-exercise-body">
+                            <input id="instant_exercise_name" type="text" placeholder="Nombre del nuevo ejercicio" />
+                            <div class="instant-exercise-row">
+                                <select id="instant_exercise_category_1">{instant_primary_category_options}</select>
+                                <select id="instant_exercise_category_2">{instant_secondary_category_options}</select>
+                            </div>
+                            <input id="instant_exercise_video_url" type="text" placeholder="Link de video (YouTube o propio)" />
+                            <input id="instant_exercise_machine_url" type="text" placeholder="Link de la máquina" />
+                            <button type="button" id="instant_exercise_create" class="instant-exercise-create">Crear ejercicio y seleccionarlo</button>
+                            <p id="instant_exercise_status" class="instant-exercise-status" hidden></p>
+                        </div>
+                    </details>
           <input name="sets_text" placeholder="Número de series" required />
           <input name="reps_text" placeholder="Número de repeticiones" required />
           <input name="notes" placeholder="Notas (opcional)" />
@@ -9225,9 +9246,53 @@ class Handler(BaseHTTPRequestHandler):
                 const exerciseSearch = document.getElementById('exercise_search');
                 const exerciseSearchResults = document.getElementById('exercise_search_results');
                 const exerciseHiddenInput = document.getElementById('exercise_id_hidden');
+                const instantExerciseNameInput = document.getElementById('instant_exercise_name');
+                const instantExerciseCategory1 = document.getElementById('instant_exercise_category_1');
+                const instantExerciseCategory2 = document.getElementById('instant_exercise_category_2');
+                const instantExerciseVideoUrlInput = document.getElementById('instant_exercise_video_url');
+                const instantExerciseMachineUrlInput = document.getElementById('instant_exercise_machine_url');
+                const instantExerciseCreateButton = document.getElementById('instant_exercise_create');
+                const instantExerciseStatus = document.getElementById('instant_exercise_status');
+                const instantExerciseDetails = document.getElementById('instant_exercise_details');
                 const exerciseModalForm = modal ? modal.querySelector('.exercise-modal-form') : null;
-                const baseExerciseOptions = {exercise_search_options_json};
+                let baseExerciseOptions = {exercise_search_options_json};
                 let lastFilteredOptions = [];
+
+                function setInstantExerciseStatus(message, isError) {{
+                    if (!instantExerciseStatus) return;
+                    if (!message) {{
+                        instantExerciseStatus.textContent = '';
+                        instantExerciseStatus.setAttribute('hidden', 'hidden');
+                        instantExerciseStatus.classList.remove('error');
+                        return;
+                    }}
+                    instantExerciseStatus.textContent = message;
+                    instantExerciseStatus.classList.toggle('error', !!isError);
+                    instantExerciseStatus.removeAttribute('hidden');
+                }}
+
+                function optionText(selectEl) {{
+                    if (!selectEl) return '';
+                    const idx = selectEl.selectedIndex;
+                    if (idx < 0) return '';
+                    return String(selectEl.options[idx].textContent || '').trim();
+                }}
+
+                function normalizeCategoryOptionText(value) {{
+                    const txt = String(value || '').trim();
+                    if (!txt || txt.startsWith('--')) return '';
+                    return txt;
+                }}
+
+                function formatExerciseSearchLabel(name, categoryMain, categorySecondary) {{
+                    const cats = [];
+                    const c1 = normalizeCategoryOptionText(categoryMain);
+                    const c2 = normalizeCategoryOptionText(categorySecondary);
+                    if (c1) cats.push(c1);
+                    if (c2 && c2 !== c1) cats.push(c2);
+                    const catText = cats.length ? cats.join(' + ') : 'Sin grupo muscular';
+                    return String(name || 'Ejercicio') + ' (' + catText + ')';
+                }}
 
                 function hideExerciseResults() {{
                     if (!exerciseSearchResults) return;
@@ -9237,7 +9302,8 @@ class Handler(BaseHTTPRequestHandler):
 
                 function renderExerciseResults(filterText) {{
                     if (!exerciseSearchResults) return;
-                    const needle = String(filterText || '').toLowerCase().trim();
+                    const rawNeedle = String(filterText || '').trim();
+                    const needle = rawNeedle.toLowerCase();
                     if (!needle) {{
                         lastFilteredOptions = [];
                         if (exerciseHiddenInput) exerciseHiddenInput.value = '';
@@ -9269,6 +9335,24 @@ class Handler(BaseHTTPRequestHandler):
                         }});
                         exerciseSearchResults.appendChild(row);
                     }});
+
+                    const hasExact = filtered.some((item) => item.label.toLowerCase() === needle);
+                    if (!hasExact && rawNeedle.length >= 2) {{
+                        const createRow = document.createElement('button');
+                        createRow.type = 'button';
+                        createRow.className = 'exercise-search-item exercise-search-item-create';
+                        createRow.textContent = '+ Crear ejercicio: ' + rawNeedle;
+                        createRow.addEventListener('click', () => {{
+                            if (instantExerciseDetails) instantExerciseDetails.open = true;
+                            if (instantExerciseNameInput) {{
+                                instantExerciseNameInput.value = rawNeedle;
+                                instantExerciseNameInput.focus();
+                            }}
+                            hideExerciseResults();
+                        }});
+                        exerciseSearchResults.appendChild(createRow);
+                    }}
+
                     if (exerciseHiddenInput) exerciseHiddenInput.value = '';
                     exerciseSearchResults.removeAttribute('hidden');
                 }}
@@ -9276,6 +9360,7 @@ class Handler(BaseHTTPRequestHandler):
                 function closeModal() {{
                     if (!modal) return;
                     hideExerciseResults();
+                    setInstantExerciseStatus('', false);
                     modal.setAttribute('hidden', 'hidden');
                 }}
 
@@ -9286,9 +9371,72 @@ class Handler(BaseHTTPRequestHandler):
                     modalTitle.textContent = 'Añadir ejercicio - ' + (dayName || 'Día');
                     if (exerciseSearch) exerciseSearch.value = '';
                     if (exerciseHiddenInput) exerciseHiddenInput.value = '';
+                    if (instantExerciseNameInput) instantExerciseNameInput.value = '';
+                    if (instantExerciseCategory1) instantExerciseCategory1.value = '';
+                    if (instantExerciseCategory2) instantExerciseCategory2.value = '';
+                    if (instantExerciseVideoUrlInput) instantExerciseVideoUrlInput.value = '';
+                    if (instantExerciseMachineUrlInput) instantExerciseMachineUrlInput.value = '';
+                    if (instantExerciseDetails) instantExerciseDetails.open = false;
+                    setInstantExerciseStatus('', false);
                     hideExerciseResults();
                     modal.removeAttribute('hidden');
                     if (exerciseSearch) exerciseSearch.focus();
+                }}
+
+                async function createExerciseInstantly() {{
+                    if (!instantExerciseNameInput) return;
+                    const name = String(instantExerciseNameInput.value || '').trim();
+                    if (!name) {{
+                        setInstantExerciseStatus('Escribe un nombre para crear el ejercicio.', true);
+                        instantExerciseNameInput.focus();
+                        return;
+                    }}
+
+                    const category1 = instantExerciseCategory1 ? String(instantExerciseCategory1.value || '').trim() : '';
+                    const category2Raw = instantExerciseCategory2 ? String(instantExerciseCategory2.value || '').trim() : '';
+                    const category2 = category2Raw && category2Raw !== category1 ? category2Raw : '';
+                    const videoUrl = instantExerciseVideoUrlInput ? String(instantExerciseVideoUrlInput.value || '').trim() : '';
+                    const machineUrl = instantExerciseMachineUrlInput ? String(instantExerciseMachineUrlInput.value || '').trim() : '';
+
+                    if (instantExerciseCreateButton) instantExerciseCreateButton.disabled = true;
+                    setInstantExerciseStatus('Creando ejercicio...', false);
+
+                    try {{
+                        const payload = {{ name }};
+                        if (category1) payload.exercise_category_id = Number(category1);
+                        if (category2) payload.exercise_category_id_2 = Number(category2);
+                        if (videoUrl) payload.video_url = videoUrl;
+                        if (machineUrl) payload.machine_url = machineUrl;
+
+                        const response = await fetch('/api/exercises', {{
+                            method: 'POST',
+                            headers: {{
+                                'Content-Type': 'application/json',
+                                'X-Requested-With': 'fetch'
+                            }},
+                            body: JSON.stringify(payload)
+                        }});
+                        if (!response.ok) throw new Error('create_failed');
+                        const created = await response.json();
+                        const createdId = Number(created.id || 0);
+                        if (!createdId) throw new Error('invalid_created_id');
+
+                        const categoryMain = created.category || optionText(instantExerciseCategory1);
+                        const categorySecondary = created.category_2 || optionText(instantExerciseCategory2);
+                        const createdLabel = formatExerciseSearchLabel(created.name || name, categoryMain, categorySecondary);
+
+                        baseExerciseOptions = baseExerciseOptions.filter((item) => Number(item.value) !== createdId);
+                        baseExerciseOptions.unshift({{ value: createdId, label: createdLabel }});
+
+                        if (exerciseSearch) exerciseSearch.value = createdLabel;
+                        if (exerciseHiddenInput) exerciseHiddenInput.value = String(createdId);
+                        hideExerciseResults();
+                        setInstantExerciseStatus('Ejercicio creado y seleccionado. Ahora pulsa Guardar.', false);
+                    }} catch (_err) {{
+                        setInstantExerciseStatus('No se pudo crear el ejercicio. Inténtalo de nuevo.', true);
+                    }} finally {{
+                        if (instantExerciseCreateButton) instantExerciseCreateButton.disabled = false;
+                    }}
                 }}
 
                 function bindAddExerciseButton(btn) {{
@@ -9544,6 +9692,10 @@ class Handler(BaseHTTPRequestHandler):
                         const text = exerciseSearch.value;
                         renderExerciseResults(text);
 
+                        if (instantExerciseNameInput && !String(instantExerciseNameInput.value || '').trim()) {{
+                            instantExerciseNameInput.value = text.trim();
+                        }}
+
                         // If user typed an exact suggestion label, bind it immediately.
                         const exact = baseExerciseOptions.find((item) => item.label.toLowerCase() === text.toLowerCase().trim());
                         if (exerciseHiddenInput && exact) exerciseHiddenInput.value = exact.value;
@@ -9574,6 +9726,19 @@ class Handler(BaseHTTPRequestHandler):
                             ev.preventDefault();
                             if (exerciseSearch) exerciseSearch.focus();
                             alert('Selecciona un ejercicio del buscador antes de guardar.');
+                        }}
+                    }});
+                }}
+                if (instantExerciseCreateButton) {{
+                    instantExerciseCreateButton.addEventListener('click', () => {{
+                        createExerciseInstantly();
+                    }});
+                }}
+                if (instantExerciseNameInput) {{
+                    instantExerciseNameInput.addEventListener('keydown', (ev) => {{
+                        if (ev.key === 'Enter') {{
+                            ev.preventDefault();
+                            createExerciseInstantly();
                         }}
                     }});
                 }}
@@ -9733,10 +9898,21 @@ class Handler(BaseHTTPRequestHandler):
         .exercise-modal-form input,.exercise-modal-form select{{padding:12px 14px;border:1px solid #d8dde6;border-radius:12px;background:#fff;color:#101318;width:100%;max-width:100%;box-sizing:border-box;}}
         .exercise-search-wrap{{display:flex;flex-direction:column;gap:6px;width:100%;}}
         .exercise-modal-form #exercise_search{{display:block;width:100% !important;max-width:100% !important;min-height:46px;box-sizing:border-box;}}
+        .instant-exercise-box{{display:grid;gap:8px;padding:10px;border:1px dashed #c9d3e0;border-radius:12px;background:#f8fafc;}}
+        .instant-exercise-title{{cursor:pointer;list-style:none;color:#475569;font-size:.86rem;font-weight:700;}}
+        .instant-exercise-title::-webkit-details-marker{{display:none;}}
+        .instant-exercise-body{{display:grid;gap:8px;margin-top:8px;}}
+        .instant-exercise-row{{display:grid;grid-template-columns:1fr 1fr;gap:8px;}}
+        .instant-exercise-create{{padding:10px 12px;border-radius:10px;border:1px solid #d8dde6;background:#fff;color:#101318;font-weight:700;box-shadow:none;}}
+        .instant-exercise-create:hover{{background:#f1f5f9;transform:none;}}
+        .instant-exercise-create:disabled{{opacity:.65;cursor:not-allowed;}}
+        .instant-exercise-status{{margin:0;font-size:.82rem;color:#166534;font-weight:700;}}
+        .instant-exercise-status.error{{color:#9f1239;}}
         .exercise-search-results{{display:flex;flex-direction:column;gap:4px;max-height:220px;overflow:auto;padding:0;border:none;background:transparent;box-shadow:none;}}
         .exercise-search-results[hidden]{{display:none !important;}}
         .exercise-search-item{{display:block;width:100%;text-align:left;padding:10px 12px;border:1px solid #d8dde6;background:#f3f5f8;color:#101318;border-radius:12px;cursor:pointer;font-size:.92rem;font-weight:600;box-shadow:none;transform:none !important;}}
         .exercise-search-item.active{{background:#e8edf5;}}
+        .exercise-search-item-create{{background:#eefbf2;border-color:#b7e4c7;color:#166534;}}
         .exercise-search-item:hover{{background:#e3e9f2;}}
         .exercise-search-empty{{padding:9px 10px;color:#6d7480;font-size:.9rem;font-weight:600;}}
         .modal-actions{{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;}}
@@ -9744,6 +9920,7 @@ class Handler(BaseHTTPRequestHandler):
         @media (max-width:640px){{
             .exercise-modal{{padding:10px;align-items:flex-start;}}
             .exercise-modal-card{{width:calc(100vw - 20px);max-height:calc(100vh - 20px);margin-top:8px;padding:14px;}}
+            .instant-exercise-row{{grid-template-columns:1fr;}}
             .modal-actions button{{flex:1 1 auto;min-width:0;}}
             .routine-assign-form{{grid-template-columns:1fr;}}
             .routine-name-form{{grid-template-columns:1fr;}}
