@@ -12,7 +12,6 @@ from food_schema import (
     supports_foods_search_fts,
 )
 import html
-import cgi
 import os
 import re
 import calendar
@@ -28,6 +27,8 @@ import io
 import time
 import hmac
 import hashlib
+from email.parser import BytesParser
+from email.policy import default as email_default_policy
 from difflib import SequenceMatcher
 
 from reportlab.pdfgen import canvas
@@ -135,6 +136,83 @@ def parse_gluten_input(value):
     if text in ('0', 'false', 'no', 'sin'):
         return 0
     return None
+
+
+class MultipartUploadedFile:
+    def __init__(self, filename, content_type, payload):
+        self.filename = str(filename or '')
+        self.type = str(content_type or 'application/octet-stream')
+        self.file = io.BytesIO(bytes(payload or b''))
+
+
+class ParsedMultipartForm:
+    def __init__(self, fields=None, files=None):
+        self._fields = fields or {}
+        self._files = files or {}
+
+    def getfirst(self, key, default=''):
+        values = self._fields.get(str(key), [])
+        return values[0] if values else default
+
+    def __contains__(self, key):
+        return str(key) in self._files
+
+    def __getitem__(self, key):
+        key_text = str(key)
+        if key_text not in self._files:
+            raise KeyError(key_text)
+        return self._files[key_text]
+
+
+def parse_multipart_form_data(rfile, headers):
+    content_type = str(headers.get('Content-Type', '') or '')
+    length_raw = str(headers.get('Content-Length', '0') or '0').strip()
+    try:
+        content_length = int(length_raw)
+    except Exception:
+        raise ValueError('invalid content length')
+    if content_length < 0:
+        raise ValueError('invalid content length')
+
+    body = rfile.read(content_length)
+    if not isinstance(body, (bytes, bytearray)):
+        raise ValueError('invalid multipart body')
+
+    header_blob = (
+        f'Content-Type: {content_type}\r\n'
+        'MIME-Version: 1.0\r\n\r\n'
+    ).encode('utf-8', errors='ignore')
+    message = BytesParser(policy=email_default_policy).parsebytes(header_blob + bytes(body))
+    if not message.is_multipart():
+        raise ValueError('multipart payload expected')
+
+    fields = {}
+    files = {}
+    for part in message.iter_parts():
+        if part.get_content_disposition() != 'form-data':
+            continue
+        field_name = part.get_param('name', header='content-disposition')
+        if not field_name:
+            continue
+
+        filename = part.get_filename()
+        payload = part.get_payload(decode=True) or b''
+        if filename is not None:
+            files[str(field_name)] = MultipartUploadedFile(
+                filename,
+                part.get_content_type() or 'application/octet-stream',
+                payload,
+            )
+            continue
+
+        charset = part.get_content_charset() or 'utf-8'
+        try:
+            text_value = bytes(payload).decode(charset, errors='replace')
+        except Exception:
+            text_value = bytes(payload).decode('utf-8', errors='replace')
+        fields.setdefault(str(field_name), []).append(text_value)
+
+    return ParsedMultipartForm(fields=fields, files=files)
 
 
 def query_terms(query):
@@ -10261,7 +10339,7 @@ class Handler(BaseHTTPRequestHandler):
             window.clientAction = clientAction;
 
             const hasFee = (text) => {{
-                return /\d/.test(text || '');
+                return /\\d/.test(text || '');
             }};
 
             const applyFilters = () => {{
@@ -14880,14 +14958,7 @@ class Handler(BaseHTTPRequestHandler):
             is_admin = self.is_admin_authenticated()
 
             try:
-                form = cgi.FieldStorage(
-                    fp=self.rfile,
-                    headers=self.headers,
-                    environ={
-                        'REQUEST_METHOD': 'POST',
-                        'CONTENT_TYPE': ctype,
-                    },
-                )
+                form = parse_multipart_form_data(self.rfile, self.headers)
             except Exception:
                 return self.send_json({'error': 'invalid multipart payload'}, status=400)
 
