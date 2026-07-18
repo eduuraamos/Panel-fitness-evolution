@@ -285,6 +285,17 @@ def ensure_routines_table(conn_or_path=None):
     )
     """
     )
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS routine_folders (
+        id INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        sort_order INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT
+    )
+    """
+    )
     conn.commit()
 
     cur.execute("PRAGMA table_info(routines)")
@@ -296,12 +307,38 @@ def ensure_routines_table(conn_or_path=None):
     if 'client_name' not in routine_cols:
         cur.execute("ALTER TABLE routines ADD COLUMN client_name TEXT")
         conn.commit()
+    if 'updated_at' not in routine_cols:
+        cur.execute("ALTER TABLE routines ADD COLUMN updated_at TEXT")
+        cur.execute("UPDATE routines SET updated_at = created_at WHERE updated_at IS NULL")
+        conn.commit()
+    if 'folder_id' not in routine_cols:
+        cur.execute("ALTER TABLE routines ADD COLUMN folder_id INTEGER")
+        conn.commit()
+    if 'sort_order' not in routine_cols:
+        cur.execute("ALTER TABLE routines ADD COLUMN sort_order INTEGER DEFAULT 0")
+        cur.execute("UPDATE routines SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0")
+        conn.commit()
 
     cur.execute("PRAGMA table_info(routine_items)")
     routine_item_cols = [r[1] for r in cur.fetchall()]
     if 'day_index' not in routine_item_cols:
         cur.execute("ALTER TABLE routine_items ADD COLUMN day_index INTEGER")
         conn.commit()
+
+    cur.execute("PRAGMA table_info(routine_folders)")
+    folder_cols = [r[1] for r in cur.fetchall()]
+    if 'updated_at' not in folder_cols:
+        cur.execute("ALTER TABLE routine_folders ADD COLUMN updated_at TEXT")
+        cur.execute("UPDATE routine_folders SET updated_at = created_at WHERE updated_at IS NULL")
+        conn.commit()
+    if 'sort_order' not in folder_cols:
+        cur.execute("ALTER TABLE routine_folders ADD COLUMN sort_order INTEGER DEFAULT 0")
+        cur.execute("UPDATE routine_folders SET sort_order = id WHERE sort_order IS NULL OR sort_order = 0")
+        conn.commit()
+
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_routines_folder_sort ON routines(COALESCE(folder_id, 0), COALESCE(sort_order, 0), id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_routine_folders_sort ON routine_folders(COALESCE(sort_order, 0), id)")
+    conn.commit()
 
     default_days = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
     for idx, day_name in enumerate(default_days):
@@ -2914,6 +2951,54 @@ def get_routines(templates_only=True):
     return rows
 
 
+def get_routine_folders():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            rf.id,
+            rf.name,
+            COALESCE(rf.sort_order, 0),
+            COALESCE(rf.created_at, ''),
+            COALESCE(rf.updated_at, ''),
+            COALESCE(COUNT(r.id), 0)
+        FROM routine_folders rf
+        LEFT JOIN routines r
+            ON r.folder_id = rf.id
+            AND COALESCE(r.is_template, 1) = 1
+        GROUP BY rf.id, rf.name, rf.sort_order, rf.created_at, rf.updated_at
+        ORDER BY COALESCE(rf.sort_order, 0), rf.id
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_routines_for_explorer():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT
+            id,
+            name,
+            description,
+            created_at,
+            COALESCE(updated_at, created_at, ''),
+            COALESCE(folder_id, 0),
+            COALESCE(sort_order, 0)
+        FROM routines
+        WHERE COALESCE(is_template, 1) = 1
+        ORDER BY COALESCE(folder_id, 0), COALESCE(sort_order, 0), id
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
 def get_routine_by_id(routine_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -3201,7 +3286,7 @@ def get_active_client_routine(client_id):
         SELECT
             h.id,
             COALESCE(h.routine_id, 0),
-            COALESCE(r.name, ''),
+            COALESCE(NULLIF(h.training_name, ''), COALESCE(r.name, '')),
             COALESCE(h.start_date, ''),
             COALESCE(h.end_date, ''),
             COALESCE(h.notes, '')
@@ -5749,6 +5834,7 @@ class Handler(BaseHTTPRequestHandler):
                         <option value="">Selecciona una rutina</option>
                         {routine_options}
                     </select>
+                    <input name="training_name" class="full" placeholder="Nombre visible para el cliente (opcional, se verá en su app)" />
                     <input name="start_date" type="date" placeholder="Inicio" />
                     <input name="end_date" type="date" placeholder="Fin" />
                     <input name="notes" class="full" placeholder="Notas de entrenamiento" />
@@ -7629,6 +7715,7 @@ class Handler(BaseHTTPRequestHandler):
                         <option value="">Selecciona una rutina</option>
                         {routine_options}
                     </select>
+                    <input name="training_name" class="full" placeholder="Nombre visible para el cliente (opcional, se verá en su app)" />
                     <input name="start_date" type="date" placeholder="Inicio" />
                     <input name="end_date" type="date" placeholder="Fin" />
                     <input name="notes" class="full" placeholder="Notas de entrenamiento" />
@@ -9068,6 +9155,13 @@ class Handler(BaseHTTPRequestHandler):
             exercises = get_exercises()
             exercise_categories = get_exercise_categories()
             clients = sorted(get_clients(), key=lambda c: (str(c[1] or '').casefold(), c[0]))
+            selected_folder_raw = q.get('folder_id', [''])[0] if 'folder_id' in q else ''
+            selected_folder_id_for_links = None
+            if selected_folder_raw != '':
+                try:
+                    selected_folder_id_for_links = int(selected_folder_raw)
+                except Exception:
+                    selected_folder_id_for_links = None
             routine_id = q.get('routine_id', [''])[0]
             selected_routine = None
             selected_is_template = True
@@ -9138,7 +9232,10 @@ class Handler(BaseHTTPRequestHandler):
                         item_id, _routine_id, _day_name, _exercise_id, exercise_name, sets_text, reps_text, notes, _sort_order, _item_day_index = item
                         safe_sets = html.escape(sets_text or '')
                         safe_reps = html.escape(reps_text or '')
-                        edit_exercise_href = '/edit_exercise?id=' + urllib.parse.quote(str(_exercise_id)) + '&return_to=' + urllib.parse.quote(f'/routines?routine_id={routine_id}')
+                        routine_return_to = f'/routines?routine_id={routine_id}'
+                        if selected_folder_id_for_links is not None:
+                            routine_return_to += '&folder_id=' + urllib.parse.quote(str(selected_folder_id_for_links))
+                        edit_exercise_href = '/edit_exercise?id=' + urllib.parse.quote(str(_exercise_id)) + '&return_to=' + urllib.parse.quote(routine_return_to)
                         cards_html.append(
                             f'<div class="routine-item-row" draggable="true" data-item-id="{item_id}">'
                             '<button type="button" class="routine-drag-handle" title="Arrastra para mover" aria-label="Arrastra para mover">⋮⋮</button>'
@@ -9159,9 +9256,12 @@ class Handler(BaseHTTPRequestHandler):
 
                     cards_html_rendered = ''.join(cards_html) or '<p style="color:#6d7480;">Sin ejercicios para este día.</p>'
                     day_cards.append(
-                        f'<section id="routine-day-{day_index_i}" class="section-card day-card">'
+                        f'<section id="routine-day-{day_index_i}" class="section-card day-card" data-routine-id="{routine_id}" data-day-index="{day_index_i}">'
                         '<div class="day-header-row">'
-                        f'<h2 class="day-title" style="margin:0;">🏷️ Día {day_index_i + 1} · <span class="day-name-inline" contenteditable="false" data-routine-id="{routine_id}" data-day-index="{day_index_i}">{html.escape(day_name or f"Dia {day_index_i + 1}")}</span></h2>'
+                        '<div class="day-header-leading">'
+                        f'<button type="button" class="day-drag-handle" draggable="true" title="Arrastra para reordenar el día" aria-label="Arrastra para reordenar el día">⋮⋮</button>'
+                        f'<h2 class="day-title" style="margin:0;">🏷️ <span class="day-name-inline" contenteditable="false" data-routine-id="{routine_id}" data-day-index="{day_index_i}">{html.escape(day_name or f"Dia {day_index_i + 1}")}</span></h2>'
+                        '</div>'
                         '<div class="day-header-actions">'
                         '<div class="day-type-segment">'
                         f'<form method="post" action="/update_routine_day" class="segment-form">'
@@ -9179,9 +9279,12 @@ class Handler(BaseHTTPRequestHandler):
                         f'<button type="submit" class="segment-btn rest {"active" if normalized_day_type == "rest" else ""}">Descanso</button>'
                         '</form>'
                         '</div>'
+                        '<button type="button" class="action-button day-toggle-btn" aria-expanded="true" data-collapsed="0">Ocultar</button>'
                         f'<button type="button" class="action-button action-edit open-add-exercise" data-day-index="{day_index_i}" data-day-name="{html.escape(day_name or "")}">+ Añadir ejercicio</button>'
                         '</div>'
+                        '<div class="day-content">'
                         f'<div class="routine-items" data-routine-id="{routine_id}" data-day-index="{day_index_i}">{cards_html_rendered}</div>'
+                        '</div>'
                         '</section>'
                     )
 
@@ -9195,6 +9298,7 @@ class Handler(BaseHTTPRequestHandler):
                     <option value="">Asignar esta rutina a cliente...</option>
                     {client_assign_options}
                 </select>
+                <input name="training_name" placeholder="Nombre visible para el cliente (opcional, se verá en su app)" />
                 <input name="start_date" type="date" placeholder="Inicio" />
                 <input name="end_date" type="date" placeholder="Fin" />
                 <input name="notes" placeholder="Notas (opcional)" />
@@ -9206,20 +9310,28 @@ class Handler(BaseHTTPRequestHandler):
     <section class="section-card">
       <h2>Editar rutina: {html.escape(routine_name)}</h2>
       <p style="color:#6d7480;margin-top:-4px;">{html.escape(routine_desc or 'Sin descripción')}</p>
-            <form method="post" action="/update_routine_name" class="routine-name-form">
+            {'<div style="margin:0 0 10px;"><a class="drive-back-btn" href="/routines' + ('?folder_id=' + urllib.parse.quote(str(selected_folder_id_for_links)) if selected_folder_id_for_links is not None else '') + '">← Volver a carpetas</a></div>' if selected_folder_id_for_links is not None else ''}
+            <div class="routine-editor-save-bar">
+                <button type="submit" form="routine-name-form-main" class="routine-save-btn">Guardar cambios de la rutina</button>
+            </div>
+            <form method="post" action="/update_routine_name" class="routine-name-form" id="routine-name-form-main">
                 <input type="hidden" name="routine_id" value="{routine_id}" />
-                <input type="hidden" name="return_to" value="/routines?routine_id={routine_id}" />
-                <label class="routine-name-label">Nombre visible para el cliente
-                    <input name="name" value="{html.escape(routine_name)}" placeholder="Nombre de la rutina" required />
+                <input type="hidden" name="return_to" value="/routines?routine_id={routine_id}{'&folder_id=' + urllib.parse.quote(str(selected_folder_id_for_links)) if selected_folder_id_for_links is not None else ''}" />
+                <label class="routine-name-label">Nombre interno (solo admin)
+                    <input name="name" value="{html.escape(routine_name)}" placeholder="Nombre interno de la rutina" required />
                 </label>
-                <button type="submit">Guardar nombre</button>
+                <button type="submit">Guardar cambios</button>
             </form>
             <div style="margin:8px 0 14px;">
                 <a class="action-button action-edit" href="/export_routine_pdf/rutina_{routine_id}.pdf?v={uuid.uuid4().hex}" target="_blank" download>Exportar PDF</a>
             </div>
             {assign_form_html}
     </section>
-    {''.join(day_cards)}
+        <div class="routine-day-board-tools">
+            <button type="button" class="action-button" id="collapse_days_btn">Contraer todos</button>
+            <button type="button" class="action-button" id="expand_days_btn">Expandir todos</button>
+        </div>
+        <div id="routine-day-board" class="routine-day-board" data-routine-id="{routine_id}">{''.join(day_cards)}</div>
     <div id="exercise-modal" class="exercise-modal" hidden>
       <div class="exercise-modal-backdrop"></div>
       <div class="exercise-modal-card">
@@ -9661,6 +9773,120 @@ class Handler(BaseHTTPRequestHandler):
                     }});
                 }}
 
+                function bindRoutineDayInteractions() {{
+                    const board = document.getElementById('routine-day-board');
+                    if (!board) return;
+                    let draggingDayCard = null;
+
+                    function getDayDragAfter(container, y) {{
+                        const cards = Array.from(container.querySelectorAll('.day-card:not(.dragging-day)'));
+                        let closest = null;
+                        let closestOffset = Number.NEGATIVE_INFINITY;
+                        cards.forEach((card) => {{
+                            const rect = card.getBoundingClientRect();
+                            const offset = y - rect.top - rect.height / 2;
+                            if (offset < 0 && offset > closestOffset) {{
+                                closestOffset = offset;
+                                closest = card;
+                            }}
+                        }});
+                        return closest;
+                    }}
+
+                    async function persistRoutineDaysOrder() {{
+                        const routineId = board.dataset.routineId || '';
+                        const orderedDayIndices = Array.from(board.querySelectorAll('.day-card'))
+                            .map((card) => card.dataset.dayIndex)
+                            .filter(Boolean)
+                            .join(',');
+                        const payload = new URLSearchParams();
+                        payload.set('routine_id', routineId);
+                        payload.set('day_indices', orderedDayIndices);
+                        const response = await fetch('/reorder_routine_days', {{
+                            method: 'POST',
+                            headers: {{
+                                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                'X-Requested-With': 'fetch'
+                            }},
+                            body: payload.toString()
+                        }});
+                        if (!response.ok) throw new Error('reorder_days_failed');
+                    }}
+
+                    board.querySelectorAll('.day-drag-handle').forEach((handle) => {{
+                        handle.addEventListener('dragstart', (ev) => {{
+                            const card = handle.closest('.day-card');
+                            if (!card) return;
+                            draggingDayCard = card;
+                            card.classList.add('dragging-day');
+                            if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+                        }});
+
+                        handle.addEventListener('dragend', () => {{
+                            if (draggingDayCard) draggingDayCard.classList.remove('dragging-day');
+                            draggingDayCard = null;
+                        }});
+                    }});
+
+                    board.addEventListener('dragover', (ev) => {{
+                        if (!draggingDayCard) return;
+                        ev.preventDefault();
+                        const after = getDayDragAfter(board, ev.clientY);
+                        if (!after) board.appendChild(draggingDayCard);
+                        else board.insertBefore(draggingDayCard, after);
+                    }});
+
+                    board.addEventListener('drop', async (ev) => {{
+                        if (!draggingDayCard) return;
+                        ev.preventDefault();
+                        try {{
+                            await persistRoutineDaysOrder();
+                        }} catch (_err) {{
+                            // fallback below will refresh anyway
+                        }} finally {{
+                            window.location.reload();
+                        }}
+                    }});
+                }}
+
+                function setDayCollapsed(dayCard, collapsed) {{
+                    if (!dayCard) return;
+                    dayCard.classList.toggle('day-collapsed', collapsed);
+                    const toggleBtn = dayCard.querySelector('.day-toggle-btn');
+                    if (!toggleBtn) return;
+                    toggleBtn.dataset.collapsed = collapsed ? '1' : '0';
+                    toggleBtn.textContent = collapsed ? 'Mostrar' : 'Ocultar';
+                    toggleBtn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+                }}
+
+                function bindRoutineDayCollapseInteractions() {{
+                    const board = document.getElementById('routine-day-board');
+                    if (!board) return;
+
+                    board.querySelectorAll('.day-card').forEach((dayCard) => {{
+                        const toggleBtn = dayCard.querySelector('.day-toggle-btn');
+                        if (!toggleBtn) return;
+                        toggleBtn.addEventListener('click', () => {{
+                            const collapsed = dayCard.classList.contains('day-collapsed');
+                            setDayCollapsed(dayCard, !collapsed);
+                        }});
+                    }});
+
+                    const collapseAllBtn = document.getElementById('collapse_days_btn');
+                    if (collapseAllBtn) {{
+                        collapseAllBtn.addEventListener('click', () => {{
+                            board.querySelectorAll('.day-card').forEach((dayCard) => setDayCollapsed(dayCard, true));
+                        }});
+                    }}
+
+                    const expandAllBtn = document.getElementById('expand_days_btn');
+                    if (expandAllBtn) {{
+                        expandAllBtn.addEventListener('click', () => {{
+                            board.querySelectorAll('.day-card').forEach((dayCard) => setDayCollapsed(dayCard, false));
+                        }});
+                    }}
+                }}
+
                 async function handleSegmentSubmit(event) {{
                     event.preventDefault();
                     const form = event.currentTarget;
@@ -9709,6 +9935,8 @@ class Handler(BaseHTTPRequestHandler):
                     form.addEventListener('submit', handleSegmentSubmit);
                 }});
                 bindRoutineItemInteractions();
+                bindRoutineDayInteractions();
+                bindRoutineDayCollapseInteractions();
                 if (exerciseSearch) {{
                     exerciseSearch.addEventListener('input', () => {{
                         const text = exerciseSearch.value;
@@ -9811,24 +10039,476 @@ class Handler(BaseHTTPRequestHandler):
             show_only_selected_editor = bool(selected_routine) and not selected_is_template
             manager_sections_html = ''
             if not show_only_selected_editor:
+                explorer_folders = get_routine_folders()
+                explorer_routines = get_routines_for_explorer()
+                selected_folder_id = None
+                if selected_folder_raw != '':
+                    try:
+                        selected_folder_id = int(selected_folder_raw)
+                    except Exception:
+                        selected_folder_id = None
+                routines_by_folder = {0: []}
+                folder_name_by_id = {0: 'Sin carpeta'}
+                for folder_row in explorer_folders:
+                    folder_id_i = int(folder_row[0])
+                    routines_by_folder[folder_id_i] = []
+                    folder_name_by_id[folder_id_i] = str(folder_row[1] or '').strip() or f'Carpeta {folder_id_i}'
+                for routine_row in explorer_routines:
+                    folder_key = int(routine_row[5] or 0)
+                    routines_by_folder.setdefault(folder_key, []).append(routine_row)
+
+                if selected_folder_id is not None and selected_folder_id not in routines_by_folder:
+                    selected_folder_id = None
+
+                folder_options_html = '<option value="">Sin carpeta</option>' + ''.join([
+                    f'<option value="{int(folder_row[0])}">{html.escape(folder_row[1] or "Carpeta")}</option>'
+                    for folder_row in explorer_folders
+                ])
+
+                def format_explorer_date(raw_value):
+                    txt = str(raw_value or '').strip()
+                    return txt.split(' ')[0] if txt else '-'
+
+                def render_explorer_routine_card(row):
+                    rid = int(row[0])
+                    row_folder_id = int(row[5] or 0)
+                    name = str(row[1] or '').strip() or f'Rutina {rid}'
+                    desc = str(row[2] or '').strip() or 'Sin descripción'
+                    created_label = format_explorer_date(row[3])
+                    updated_label = format_explorer_date(row[4])
+                    edit_href = f'/routines?routine_id={rid}&folder_id={row_folder_id}'
+                    return (
+                        f'<article class="routine-explorer-item" draggable="true" data-routine-id="{rid}">'
+                        '<div class="routine-explorer-item-head">'
+                        '<span class="routine-explorer-drag" title="Arrastra para mover">⋮⋮</span>'
+                        f'<span class="routine-explorer-id">#{rid}</span>'
+                        '</div>'
+                        f'<input class="inline-routine-name" data-routine-id="{rid}" value="{html.escape(name)}" />'
+                        f'<p class="routine-explorer-desc">{html.escape(desc)}</p>'
+                        f'<p class="routine-explorer-meta">Creada: {html.escape(created_label)} · Modificada: {html.escape(updated_label)}</p>'
+                        '<div class="routine-explorer-actions">'
+                        f'<button type="button" class="action-button inline-save-routine" data-routine-id="{rid}">Guardar nombre</button>'
+                        f'<a class="action-button action-edit" href="{edit_href}">Editar</a>'
+                        f'<a class="action-button" href="/export_routine_pdf/rutina_{rid}.pdf" target="_blank">PDF</a>'
+                        f'<form method="post" action="/delete_routine" class="routine-delete-form" onsubmit="return confirm(\'¿Eliminar esta rutina?\')"><input type="hidden" name="id" value="{rid}" /><button type="submit" class="action-button action-delete">Eliminar</button></form>'
+                        '</div>'
+                        '</article>'
+                    )
+
+                folder_grid_cards = []
+                unassigned_count = len(routines_by_folder.get(0, []))
+                folder_grid_cards.append(
+                    '<article class="drive-folder-card drive-folder-card-root" data-folder-id="0">'
+                    '<a class="drive-folder-open" href="/routines?folder_id=0">'
+                    '<span class="drive-folder-icon">📁</span>'
+                    '<span class="drive-folder-name">Sin carpeta</span>'
+                    f'<span class="drive-folder-count">{unassigned_count} rutinas</span>'
+                    '</a>'
+                    '</article>'
+                )
+
+                for folder_row in explorer_folders:
+                    folder_id_i = int(folder_row[0])
+                    folder_name = folder_name_by_id.get(folder_id_i, f'Carpeta {folder_id_i}')
+                    folder_count = len(routines_by_folder.get(folder_id_i, []))
+                    folder_grid_cards.append(
+                        f'<article class="drive-folder-card" data-folder-id="{folder_id_i}">'
+                        f'<button type="button" class="folder-drag-handle" draggable="true" data-folder-id="{folder_id_i}" title="Arrastra para ordenar carpetas">⋮⋮</button>'
+                        f'<a class="drive-folder-open" href="/routines?folder_id={folder_id_i}">'
+                        '<span class="drive-folder-icon">📁</span>'
+                        f'<span class="drive-folder-name">{html.escape(folder_name)}</span>'
+                        f'<span class="drive-folder-count" data-folder-count="{folder_id_i}">{folder_count} rutinas</span>'
+                        '</a>'
+                        '<div class="drive-folder-actions">'
+                        f'<input class="inline-folder-name" data-folder-id="{folder_id_i}" value="{html.escape(folder_name)}" />'
+                        f'<button type="button" class="action-button inline-save-folder" data-folder-id="{folder_id_i}">Guardar</button>'
+                        f'<form method="post" action="/delete_routine_folder" onsubmit="return confirm(\'¿Eliminar carpeta? Sus rutinas pasarán a Sin carpeta.\')"><input type="hidden" name="folder_id" value="{folder_id_i}" /><button type="submit" class="action-button action-delete">Eliminar</button></form>'
+                        '</div>'
+                        '</article>'
+                    )
+
+                selected_folder_name = folder_name_by_id.get(selected_folder_id, 'Sin carpeta') if selected_folder_id is not None else ''
+                active_folder_routines = routines_by_folder.get(selected_folder_id if selected_folder_id is not None else 0, [])
+                active_folder_cards_html = ''.join([render_explorer_routine_card(row) for row in active_folder_routines])
+                empty_folder_grid_html = '<p class="dropzone-empty">Crea tu primera carpeta para organizar rutinas.</p>'
+                empty_active_folder_html = '<p class="dropzone-empty">No hay rutinas en esta carpeta.</p>'
+                folder_grid_html = ''.join(folder_grid_cards) if folder_grid_cards else empty_folder_grid_html
+                active_folder_list_html = active_folder_cards_html or empty_active_folder_html
+                move_target_items = ['<button type="button" class="move-target" data-target-folder="0">Sin carpeta</button>'] + [
+                    f'<button type="button" class="move-target" data-target-folder="{int(folder_row[0])}">{html.escape(folder_name_by_id.get(int(folder_row[0]), "Carpeta"))}</button>'
+                    for folder_row in explorer_folders
+                ]
+
+                routines_by_folder_json = json.dumps(
+                    {
+                        str(folder_id): [int(row[0]) for row in rows]
+                        for folder_id, rows in routines_by_folder.items()
+                    },
+                    ensure_ascii=False,
+                ).replace('</', '<\\/')
+
+                if selected_folder_id is None:
+                    explorer_body_html = (
+                        '<div id="routine-explorer-home" class="routine-explorer-home">'
+                        '<div class="drive-toolbar">'
+                        '<span class="drive-breadcrumb-current">Rutinas existentes</span>'
+                        '</div>'
+                        '<form method="post" action="/add_routine_folder" class="routine-folder-create-form">'
+                        '<input name="name" placeholder="Nueva carpeta" required />'
+                        '<button type="submit">Crear carpeta</button>'
+                        '</form>'
+                        f'<div id="routine-folders" class="drive-folder-grid">{folder_grid_html}</div>'
+                        '</div>'
+                    )
+                else:
+                    explorer_body_html = (
+                        '<div id="routine-explorer-folder" class="routine-explorer-folder" '
+                        f'data-current-folder="{selected_folder_id}" '
+                        f'data-folder-map="{html.escape(routines_by_folder_json, quote=True)}">'
+                        '<div class="drive-toolbar">'
+                        '<a class="drive-back-btn" href="/routines">← Volver</a>'
+                        '<a class="drive-breadcrumb-link" href="/routines">Rutinas existentes</a>'
+                        '<span class="drive-breadcrumb-sep">&gt;</span>'
+                        f'<span class="drive-breadcrumb-current">{html.escape(selected_folder_name)}</span>'
+                        '</div>'
+                        '<div class="folder-view-layout">'
+                        '<section class="folder-view-main">'
+                        '<div class="folder-view-back-row"><a class="drive-back-btn drive-back-btn-strong" href="/routines">← Volver a Rutinas existentes</a></div>'
+                        f'<h3 class="folder-view-title">{html.escape(selected_folder_name)}</h3>'
+                        f'<div id="current-folder-list" class="routine-dropzone" data-folder-id="{selected_folder_id}">{active_folder_list_html}</div>'
+                        '</section>'
+                        '<aside class="folder-view-side">'
+                        '<p class="folder-view-side-title">Mover rutinas a:</p>'
+                        f'<div class="move-targets">{"".join(move_target_items)}</div>'
+                        '</aside>'
+                        '</div>'
+                        '</div>'
+                    )
+
                 manager_sections_html = f'''
     <section class="section-card">
             <h2>➕ Nueva rutina</h2>
             <form method="post" action="/add_routine">
-                <input name="name" placeholder="Nombre de la rutina" required />
+                <input name="name" placeholder="Nombre interno (solo admin)" required />
                 <input name="description" placeholder="Descripción" />
-                <button type="submit">Crear rutina</button>
+                <select name="folder_id">{folder_options_html}</select>
+                <button type="submit">Guardar rutina</button>
             </form>
     </section>
     <section class="section-card">
-            <h2>Rutinas existentes</h2>
-            <div class="diet-cards">
-                                {''.join([f'<div class="diet-card"><div class="diet-card-head"><span class="diet-card-id">#{r[0]}</span><span class="diet-card-date">{html.escape(r[3].split(" ")[0] if r[3] else "")}</span></div><h3 class="diet-card-name">{html.escape(r[1])}</h3><p class="diet-card-desc">{html.escape(r[2] or "Sin descripción")}</p><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:auto;"><a class="action-button action-edit" href="/routines?routine_id={r[0]}">Abrir creador</a><a class="action-button action-edit" href="/export_routine_pdf/rutina_{r[0]}.pdf" target="_blank">PDF</a><form method="post" action="/delete_routine" style="margin:0;"><input type="hidden" name="id" value="{r[0]}" /><button type="submit" class="action-button action-delete">Borrar</button></form></div></div>' for r in routines]) if routines else '<p style="color:#6d7480;">No hay rutinas creadas todavía.</p>'}
-            </div>
+            <details id="routine-existing-details" class="routine-explorer-details" {'open' if selected_folder_id is not None else ''}>
+                <summary>📁 Rutinas existentes</summary>
+                <div id="routine-explorer" class="routine-explorer-wrap">{explorer_body_html}</div>
+            </details>
+            <script>
+                (function() {{
+                    const explorer = document.getElementById('routine-explorer');
+                    if (!explorer) return;
+
+                    const foldersContainer = document.getElementById('routine-folders');
+                    const folderView = document.getElementById('routine-explorer-folder');
+                    const currentFolderList = document.getElementById('current-folder-list');
+                    let draggingRoutine = null;
+                    let sourceDropzone = null;
+                    let draggingFolderCard = null;
+                    let draggingRoutineId = null;
+
+                    const folderMap = folderView
+                        ? JSON.parse(folderView.dataset.folderMap || '{{}}')
+                        : {{}};
+
+                    function currentFolderKey() {{
+                        return folderView ? String(folderView.dataset.currentFolder || '0') : '0';
+                    }}
+
+                    function postEncoded(url, data) {{
+                        return fetch(url, {{
+                            method: 'POST',
+                            headers: {{
+                                'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+                                'X-Requested-With': 'fetch'
+                            }},
+                            body: new URLSearchParams(data).toString()
+                        }});
+                    }}
+
+                    function getDropzoneRoutineIds(dropzone) {{
+                        if (!dropzone) return [];
+                        return Array.from(dropzone.querySelectorAll('.routine-explorer-item'))
+                            .map((card) => card.dataset.routineId)
+                            .filter(Boolean);
+                    }}
+
+                    function refreshFolderCounts() {{
+                        Object.keys(folderMap).forEach((folderId) => {{
+                            const badge = document.querySelector('[data-folder-count="' + folderId + '"]');
+                            if (badge) badge.textContent = String((folderMap[folderId] || []).length) + ' rutinas';
+                        }});
+                        if (currentFolderList) {{
+                            const count = getDropzoneRoutineIds(currentFolderList).length;
+                            let empty = currentFolderList.querySelector('.dropzone-empty');
+                            if (!count && !empty) {{
+                                empty = document.createElement('p');
+                                empty.className = 'dropzone-empty';
+                                empty.textContent = 'No hay rutinas en esta carpeta.';
+                                currentFolderList.appendChild(empty);
+                            }}
+                            if (count && empty) empty.remove();
+                        }}
+                    }}
+
+                    function getDragAfter(container, y, selector) {{
+                        const elements = Array.from(container.querySelectorAll(selector + ':not(.dragging)'));
+                        let closest = null;
+                        let closestOffset = Number.NEGATIVE_INFINITY;
+                        elements.forEach((el) => {{
+                            const rect = el.getBoundingClientRect();
+                            const offset = y - rect.top - rect.height / 2;
+                            if (offset < 0 && offset > closestOffset) {{
+                                closestOffset = offset;
+                                closest = el;
+                            }}
+                        }});
+                        return closest;
+                    }}
+
+                    async function persistDropzone(dropzone) {{
+                        const folderId = dropzone.dataset.folderId || '';
+                        const routineIds = getDropzoneRoutineIds(dropzone).join(',');
+                        const response = await postEncoded('/reorder_routines_in_folder', {{ folder_id: folderId, routine_ids: routineIds }});
+                        if (!response.ok) throw new Error('persist_failed');
+                    }}
+
+                    async function persistFolderIds(folderId, ids) {{
+                        const response = await postEncoded('/reorder_routines_in_folder', {{
+                            folder_id: folderId,
+                            routine_ids: (ids || []).join(','),
+                        }});
+                        if (!response.ok) throw new Error('persist_failed');
+                    }}
+
+                    async function persistFoldersOrder() {{
+                        if (!foldersContainer) return;
+                        const folderIds = Array.from(foldersContainer.querySelectorAll('.routine-folder-card[data-folder-id]'))
+                            .map((card) => card.dataset.folderId)
+                            .filter(Boolean)
+                            .join(',');
+                        const response = await postEncoded('/reorder_routine_folders', {{ folder_ids: folderIds }});
+                        if (!response.ok) throw new Error('folders_reorder_failed');
+                    }}
+
+                    async function saveRoutineName(button) {{
+                        const routineId = button.dataset.routineId || '';
+                        const input = document.querySelector('.inline-routine-name[data-routine-id="' + routineId + '"]');
+                        if (!input) return;
+                        const name = String(input.value || '').trim();
+                        if (!name) {{
+                            input.focus();
+                            return;
+                        }}
+                        button.disabled = true;
+                        try {{
+                            const response = await postEncoded('/update_routine_name', {{
+                                routine_id: routineId,
+                                name: name,
+                                return_to: '/routines'
+                            }});
+                            if (!response.ok) throw new Error('rename_failed');
+                        }} catch (_err) {{
+                            window.location.reload();
+                        }} finally {{
+                            button.disabled = false;
+                        }}
+                    }}
+
+                    async function saveFolderName(button) {{
+                        const folderId = button.dataset.folderId || '';
+                        const input = document.querySelector('.inline-folder-name[data-folder-id="' + folderId + '"]');
+                        if (!input) return;
+                        const name = String(input.value || '').trim();
+                        if (!name) {{
+                            input.focus();
+                            return;
+                        }}
+                        button.disabled = true;
+                        try {{
+                            const response = await postEncoded('/update_routine_folder', {{ folder_id: folderId, name: name }});
+                            if (!response.ok) throw new Error('folder_rename_failed');
+                        }} catch (_err) {{
+                            window.location.reload();
+                        }} finally {{
+                            button.disabled = false;
+                        }}
+                    }}
+
+                    explorer.addEventListener('click', (ev) => {{
+                        const saveRoutineBtn = ev.target.closest('.inline-save-routine');
+                        if (saveRoutineBtn) {{
+                            ev.preventDefault();
+                            saveRoutineName(saveRoutineBtn);
+                            return;
+                        }}
+                        const saveFolderBtn = ev.target.closest('.inline-save-folder');
+                        if (saveFolderBtn) {{
+                            ev.preventDefault();
+                            saveFolderName(saveFolderBtn);
+                        }}
+                    }});
+
+                    explorer.addEventListener('keydown', (ev) => {{
+                        const routineInput = ev.target.closest('.inline-routine-name');
+                        if (routineInput && ev.key === 'Enter') {{
+                            ev.preventDefault();
+                            const btn = document.querySelector('.inline-save-routine[data-routine-id="' + routineInput.dataset.routineId + '"]');
+                            if (btn) saveRoutineName(btn);
+                        }}
+                        const folderInput = ev.target.closest('.inline-folder-name');
+                        if (folderInput && ev.key === 'Enter') {{
+                            ev.preventDefault();
+                            const btn = document.querySelector('.inline-save-folder[data-folder-id="' + folderInput.dataset.folderId + '"]');
+                            if (btn) saveFolderName(btn);
+                        }}
+                    }});
+
+                    explorer.addEventListener('dragstart', (ev) => {{
+                        const routineCard = ev.target.closest('.routine-explorer-item');
+                        if (routineCard) {{
+                            draggingRoutine = routineCard;
+                            sourceDropzone = routineCard.closest('.routine-dropzone');
+                            draggingRoutineId = String(routineCard.dataset.routineId || '');
+                            routineCard.classList.add('dragging');
+                            if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+                            return;
+                        }}
+
+                        const folderHandle = ev.target.closest('.folder-drag-handle');
+                        if (folderHandle) {{
+                            const folderId = folderHandle.dataset.folderId || '';
+                            draggingFolderCard = document.querySelector('.routine-folder-card[data-folder-id="' + folderId + '"]');
+                            if (draggingFolderCard) {{
+                                draggingFolderCard.classList.add('dragging');
+                                draggingFolderCard.classList.add('dragging-folder');
+                                if (ev.dataTransfer) ev.dataTransfer.effectAllowed = 'move';
+                            }}
+                        }}
+                    }});
+
+                    explorer.addEventListener('dragend', async () => {{
+                        if (draggingRoutine) draggingRoutine.classList.remove('dragging');
+                        draggingRoutine = null;
+                        sourceDropzone = null;
+                        draggingRoutineId = null;
+
+                        if (draggingFolderCard) {{
+                            draggingFolderCard.classList.remove('dragging');
+                            draggingFolderCard.classList.remove('dragging-folder');
+                            draggingFolderCard = null;
+                            try {{
+                                await persistFoldersOrder();
+                            }} catch (_err) {{
+                                window.location.reload();
+                            }}
+                        }}
+                    }});
+
+                    explorer.addEventListener('dragover', (ev) => {{
+                        if (folderView && currentFolderList && draggingRoutine) {{
+                            const insideList = ev.target.closest('#current-folder-list');
+                            if (!insideList) return;
+                            ev.preventDefault();
+                            const after = getDragAfter(currentFolderList, ev.clientY, '.routine-explorer-item');
+                            if (!after) currentFolderList.appendChild(draggingRoutine);
+                            else currentFolderList.insertBefore(draggingRoutine, after);
+                            return;
+                        }}
+
+                        const dropzone = ev.target.closest('.routine-dropzone');
+                        if (!folderView && draggingRoutine && dropzone) {{
+                            ev.preventDefault();
+                            const after = getDragAfter(dropzone, ev.clientY, '.routine-explorer-item');
+                            if (!after) dropzone.appendChild(draggingRoutine);
+                            else dropzone.insertBefore(draggingRoutine, after);
+                            return;
+                        }}
+
+                        if (draggingFolderCard && foldersContainer) {{
+                            const folderCard = ev.target.closest('.routine-folder-card[data-folder-id]');
+                            if (!folderCard || folderCard === draggingFolderCard) return;
+                            ev.preventDefault();
+                            const after = getDragAfter(foldersContainer, ev.clientY, '.routine-folder-card[data-folder-id]');
+                            if (!after) foldersContainer.appendChild(draggingFolderCard);
+                            else foldersContainer.insertBefore(draggingFolderCard, after);
+                        }}
+                    }});
+
+                    explorer.addEventListener('drop', async (ev) => {{
+                        if (folderView && draggingRoutine && currentFolderList) {{
+                            const dropOnTarget = ev.target.closest('.move-target');
+                            if (dropOnTarget) {{
+                                ev.preventDefault();
+                                const sourceFolder = currentFolderKey();
+                                const targetFolder = String(dropOnTarget.dataset.targetFolder || '0');
+                                if (!draggingRoutineId) return;
+                                try {{
+                                    folderMap[sourceFolder] = (folderMap[sourceFolder] || []).filter((id) => String(id) !== draggingRoutineId);
+                                    if (!folderMap[targetFolder]) folderMap[targetFolder] = [];
+                                    if (!folderMap[targetFolder].includes(draggingRoutineId)) folderMap[targetFolder].push(draggingRoutineId);
+                                    if (sourceFolder === targetFolder) return;
+                                    if (draggingRoutine && draggingRoutine.parentElement === currentFolderList) draggingRoutine.remove();
+                                    await persistFolderIds(sourceFolder, folderMap[sourceFolder]);
+                                    await persistFolderIds(targetFolder, folderMap[targetFolder]);
+                                    refreshFolderCounts();
+                                }} catch (_err) {{
+                                    window.location.reload();
+                                }}
+                                return;
+                            }}
+
+                            const inList = ev.target.closest('#current-folder-list');
+                            if (inList) {{
+                                ev.preventDefault();
+                                try {{
+                                    const ids = getDropzoneRoutineIds(currentFolderList);
+                                    folderMap[currentFolderKey()] = ids;
+                                    await persistFolderIds(currentFolderKey(), ids);
+                                    refreshFolderCounts();
+                                }} catch (_err) {{
+                                    window.location.reload();
+                                }}
+                                return;
+                            }}
+                        }}
+
+                        const dropzone = ev.target.closest('.routine-dropzone');
+                        if (folderView || !draggingRoutine || !dropzone) return;
+                        ev.preventDefault();
+                        const currentSource = sourceDropzone;
+                        try {{
+                            await persistDropzone(dropzone);
+                            if (currentSource && currentSource !== dropzone) await persistDropzone(currentSource);
+                            refreshFolderCounts();
+                        }} catch (_err) {{
+                            window.location.reload();
+                        }}
+                    }});
+
+                    explorer.addEventListener('dragover', (ev) => {{
+                        const moveTarget = ev.target.closest('.move-target');
+                        if (folderView && draggingRoutine && moveTarget) ev.preventDefault();
+                    }});
+
+                    refreshFolderCounts();
+                }})();
+            </script>
     </section>
 '''
 
             routine_summary_html = render_routine_series_summary_html(routine_id_i) if selected_routine else ''
+            routines_page_primary_html = ''
+            if selected_routine:
+                routines_page_primary_html = routine_editor_html + manager_sections_html + routine_summary_html
+            else:
+                routines_page_primary_html = manager_sections_html + routine_editor_html + routine_summary_html
 
             page = f'''
 <!doctype html>
@@ -9862,10 +10542,74 @@ class Handler(BaseHTTPRequestHandler):
     .action-edit:hover{{background:#232933;}}
     .action-delete{{border:none;background:#8b1b20;color:#fff;}}
     .action-delete:hover{{background:#6f1116;}}
+        .routine-explorer-details > summary{{cursor:pointer;list-style:none;font-size:1.08rem;font-weight:800;color:#101318;}}
+        .routine-explorer-details > summary::-webkit-details-marker{{display:none;}}
+        .routine-explorer-wrap{{display:grid;gap:14px;margin-top:14px;}}
+        .routine-explorer-home,.routine-explorer-folder{{display:grid;gap:14px;}}
+        .drive-toolbar{{display:flex;align-items:center;gap:8px;padding:2px 0 4px;}}
+        .drive-back-btn{{display:inline-flex;align-items:center;justify-content:center;padding:7px 10px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;text-decoration:none;font-weight:700;font-size:.85rem;}}
+        .drive-back-btn:hover{{background:#f5f7fa;}}
+        .drive-breadcrumb-link{{font-weight:700;color:#4a5568;text-decoration:none;}}
+        .drive-breadcrumb-link:hover{{color:#101318;}}
+        .drive-breadcrumb-current{{font-weight:800;color:#101318;}}
+        .drive-breadcrumb-sep{{color:#9aa2ad;}}
+        .routine-folder-create-form{{display:grid;grid-template-columns:minmax(220px,1fr) auto;gap:8px;align-items:center;}}
+        .routine-folder-create-form button{{width:auto;min-width:150px;}}
+        .drive-folder-grid{{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));}}
+        .drive-folder-card{{position:relative;background:#fff;border:1px solid #e5eaf1;border-radius:16px;padding:12px 12px 10px;box-shadow:0 8px 22px rgba(16,19,24,.06);display:grid;gap:8px;}}
+        .drive-folder-card-root{{border-style:dashed;background:#fbfdff;}}
+        .drive-folder-open{{display:grid;gap:2px;text-decoration:none;color:#101318;padding:6px;border-radius:12px;}}
+        .drive-folder-open:hover{{background:#f7f9fc;}}
+        .drive-folder-icon{{font-size:1.08rem;}}
+        .drive-folder-name{{font-size:.96rem;font-weight:800;letter-spacing:-.01em;}}
+        .drive-folder-count{{font-size:.78rem;color:#6d7480;font-weight:700;}}
+        .drive-folder-actions{{display:grid;grid-template-columns:1fr auto auto;gap:6px;align-items:center;}}
+        .drive-folder-actions form{{margin:0;display:inline-flex;}}
+        .drive-folder-actions .action-button{{padding:7px 10px;font-size:.82rem;}}
+        .routine-folders-grid{{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));}}
+        .routine-folder-card{{background:#fbfcfe;border:1px solid #e3e8f0;border-radius:14px;padding:12px;display:flex;flex-direction:column;gap:10px;}}
+        .routine-folder-card.dragging-folder{{opacity:.55;}}
+        .routine-folder-head{{display:flex;align-items:center;gap:8px;min-height:30px;}}
+        .routine-folder-head h3{{margin:0;font-size:.98rem;color:#101318;}}
+        .folder-drag-handle{{position:absolute;top:10px;right:10px;padding:4px 7px;border:1px solid #d8dde6;background:#fff;color:#6d7480;border-radius:10px;box-shadow:none;cursor:grab;line-height:1;z-index:2;}}
+        .folder-drag-handle:hover{{background:#f4f7fb;transform:none;}}
+        .folder-count-badge{{margin-left:auto;display:inline-flex;align-items:center;justify-content:center;padding:4px 9px;border-radius:999px;background:#edf2f9;color:#243043;font-size:.78rem;font-weight:800;}}
+        .inline-folder-name{{flex:1;min-width:120px;padding:8px 10px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;font-weight:700;}}
+        .routine-folder-actions{{display:flex;gap:8px;flex-wrap:wrap;}}
+        .routine-folder-actions form{{display:inline-flex;margin:0;}}
+        .folder-view-layout{{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:14px;align-items:start;}}
+        .folder-view-main{{background:#fff;border:1px solid #e5eaf1;border-radius:16px;padding:12px;}}
+        .folder-view-back-row{{margin:0 0 8px;}}
+        .drive-back-btn-strong{{font-size:.9rem;padding:9px 12px;border-color:#cfd8e6;background:#f8fbff;}}
+        .drive-back-btn-strong:hover{{background:#edf4ff;}}
+        .folder-view-title{{margin:0 0 10px;font-size:1.05rem;color:#101318;}}
+        .folder-view-side{{background:#fff;border:1px solid #e5eaf1;border-radius:16px;padding:12px;display:grid;gap:10px;}}
+        .folder-view-side-title{{margin:0;font-size:.82rem;color:#6d7480;font-weight:800;text-transform:uppercase;letter-spacing:.04em;}}
+        .move-targets{{display:flex;flex-direction:column;gap:6px;}}
+        .move-target{{padding:9px 10px;border:1px dashed #cbd5e1;border-radius:10px;background:#f8fbff;color:#334155;font-weight:700;font-size:.84rem;box-shadow:none;text-align:left;}}
+        .move-target:hover{{background:#edf5ff;transform:none;border-color:#9fbce0;}}
+        .routine-dropzone{{display:flex;flex-direction:column;gap:8px;min-height:56px;padding:2px;}}
+        .dropzone-empty{{margin:0;padding:10px 12px;border:1px dashed #c8d3e2;border-radius:12px;background:#f8fbff;color:#6d7480;font-size:.86rem;font-weight:600;}}
+        .routine-explorer-item{{background:#fff;border:1px solid #dbe2ed;border-radius:12px;padding:10px;display:grid;gap:7px;}}
+        .routine-explorer-item.dragging{{opacity:.45;}}
+        .routine-explorer-item-head{{display:flex;align-items:center;gap:8px;}}
+        .routine-explorer-drag{{font-size:.9rem;color:#97a0ad;}}
+        .routine-explorer-id{{font-size:.78rem;font-weight:800;color:#6d7480;}}
+        .inline-routine-name{{padding:9px 10px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;font-weight:700;}}
+        .routine-explorer-desc{{margin:0;font-size:.84rem;color:#6d7480;line-height:1.3;}}
+        .routine-explorer-meta{{margin:0;font-size:.74rem;color:#87909e;}}
+        .routine-explorer-actions{{display:flex;align-items:center;gap:7px;flex-wrap:wrap;}}
+        .routine-delete-form{{display:inline-flex;margin:0;}}
+        .inline-save-routine,.inline-save-folder{{box-shadow:none;}}
         .day-card{{display:flex;flex-direction:column;gap:12px;}}
+        .day-card.day-collapsed .day-content{{display:none;}}
         .day-header-row{{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;}}
         .day-header-actions{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;}}
         .day-title{{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}}
+        .day-content{{display:block;}}
+        .day-toggle-btn{{padding:9px 11px !important;min-width:88px;font-size:.82rem;font-weight:700;}}
+        .routine-day-board-tools{{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin:0 0 10px;}}
+        .routine-day-board-tools .action-button{{padding:8px 12px;font-size:.84rem;}}
         .routine-items{{display:flex;flex-direction:column;gap:0;margin-top:4px;border-top:1px solid #eef1f5;width:100%;align-self:stretch;}}
         .routine-item-row{{display:grid;grid-template-columns:18px minmax(0,1fr) auto;column-gap:6px;align-items:center;padding:4px 0;border-bottom:1px solid #eef1f5;width:100%;}}
         .routine-item-row.dragging{{opacity:.45;}}
@@ -9887,6 +10631,9 @@ class Handler(BaseHTTPRequestHandler):
         .routine-summary-table thead th{{text-align:left;padding:8px 10px;background:#f8fafc;border-bottom:1px solid #e8ebef;font-size:.8rem;color:#6d7480;text-transform:uppercase;letter-spacing:.03em;}}
         .routine-summary-table tbody td{{padding:8px 10px;border-bottom:1px solid #eef1f5;font-size:.92rem;}}
         .routine-summary-table tbody td:last-child{{text-align:right;font-weight:800;color:#101318;}}
+        .routine-editor-save-bar{{display:flex;justify-content:flex-end;margin:2px 0 10px;}}
+        .routine-save-btn{{background:#0f766e !important;color:#fff !important;border:none !important;border-radius:10px !important;padding:10px 14px !important;font-weight:800 !important;box-shadow:0 8px 18px rgba(15,118,110,.24) !important;}}
+        .routine-save-btn:hover{{background:#0b5f59 !important;}}
         .routine-name-form{{display:grid;grid-template-columns:minmax(280px,1fr) auto;gap:8px;align-items:end;margin:8px 0 2px;}}
         .routine-name-label{{display:flex;flex-direction:column;gap:6px;font-size:.78rem;color:#6d7480;font-weight:700;}}
         .routine-name-label input{{padding:10px 12px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;}}
@@ -9940,6 +10687,15 @@ class Handler(BaseHTTPRequestHandler):
         .modal-actions{{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;}}
         .modal-actions button{{padding:10px 14px;width:auto !important;min-width:110px;box-shadow:none;}}
         @media (max-width:640px){{
+            .routine-folder-create-form{{grid-template-columns:1fr;}}
+            .drive-folder-grid{{grid-template-columns:1fr;}}
+            .drive-folder-actions{{grid-template-columns:1fr;}}
+            .folder-view-layout{{grid-template-columns:1fr;}}
+            .routine-folders-grid{{grid-template-columns:1fr;}}
+            .routine-folder-head{{flex-wrap:wrap;}}
+            .folder-count-badge{{margin-left:0;}}
+            .routine-day-board-tools{{justify-content:stretch;}}
+            .routine-day-board-tools .action-button{{flex:1;}}
             .exercise-modal{{padding:10px;align-items:flex-start;}}
             .exercise-modal-card{{width:calc(100vw - 20px);max-height:calc(100vh - 20px);margin-top:8px;padding:14px;}}
             .instant-exercise-row{{grid-template-columns:1fr;}}
@@ -9958,9 +10714,7 @@ class Handler(BaseHTTPRequestHandler):
     {home_link()}
         <h1>{'📋 Edición de rutina de cliente' if show_only_selected_editor else '📋 Creación de rutinas'}</h1>
     {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
-        {manager_sections_html}
-    {routine_editor_html}
-        {routine_summary_html}
+        {routines_page_primary_html}
   </div>
 </body>
 </html>
@@ -11840,13 +12594,30 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/add_routine':
             name = get('name').strip()
             description = get('description').strip()
+            folder_id_raw = get('folder_id').strip()
+            folder_id_i = None
+            if folder_id_raw:
+                try:
+                    folder_id_i = int(folder_id_raw)
+                except Exception:
+                    folder_id_i = None
             new_routine_id = None
             if name:
                 conn = sqlite3.connect(DB_PATH)
                 cur = conn.cursor()
+                if folder_id_i is None:
+                    cur.execute(
+                        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM routines WHERE COALESCE(is_template, 1) = 1 AND folder_id IS NULL"
+                    )
+                else:
+                    cur.execute(
+                        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM routines WHERE COALESCE(is_template, 1) = 1 AND folder_id = ?",
+                        (folder_id_i,),
+                    )
+                next_sort_order = int(cur.fetchone()[0] or 1)
                 cur.execute(
-                    "INSERT INTO routines(name, description, created_at) VALUES(?,?,datetime('now'))",
-                    (name, description or None),
+                    "INSERT INTO routines(name, description, created_at, updated_at, folder_id, sort_order) VALUES(?,?,datetime('now'),datetime('now'),?,?)",
+                    (name, description or None, folder_id_i, next_sort_order),
                 )
                 new_routine_id = cur.lastrowid
                 conn.commit()
@@ -11864,24 +12635,209 @@ class Handler(BaseHTTPRequestHandler):
             routine_id = get('routine_id').strip()
             name = get('name').strip()
             return_to = get('return_to').strip() or '/routines'
+            is_fetch = self.headers.get('X-Requested-With', '').lower() == 'fetch'
             try:
                 routine_id_i = int(routine_id)
             except Exception:
+                if is_fetch:
+                    return self.send_json({'error': 'invalid routine id'}, status=400)
                 self.send_response(400)
                 self.end_headers()
                 return
             if not name:
+                if is_fetch:
+                    return self.send_json({'error': 'name required'}, status=400)
                 self.send_response(303)
                 self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('El nombre no puede estar vacío'))
                 self.end_headers()
                 return
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
-            cur.execute("UPDATE routines SET name = ? WHERE id = ?", (name, routine_id_i))
+            cur.execute("UPDATE routines SET name = ?, updated_at = datetime('now') WHERE id = ?", (name, routine_id_i))
             conn.commit()
             conn.close()
+            if is_fetch:
+                return self.send_json({'ok': True, 'routine_id': routine_id_i, 'name': name})
             self.send_response(303)
             self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Rutina renombrada'))
+            self.end_headers()
+            return
+
+        if path == '/add_routine_folder':
+            name = get('name').strip()
+            is_fetch = self.headers.get('X-Requested-With', '').lower() == 'fetch'
+            if not name:
+                if is_fetch:
+                    return self.send_json({'error': 'name required'}, status=400)
+                self.send_response(303)
+                self.send_header('Location', '/routines?msg=' + urllib.parse.quote('El nombre de carpeta es obligatorio'))
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM routine_folders")
+            next_sort_order = int(cur.fetchone()[0] or 1)
+            cur.execute(
+                "INSERT INTO routine_folders(name, sort_order, created_at, updated_at) VALUES(?,?,datetime('now'),datetime('now'))",
+                (name, next_sort_order),
+            )
+            folder_id = int(cur.lastrowid)
+            conn.commit()
+            conn.close()
+
+            if is_fetch:
+                return self.send_json({'ok': True, 'id': folder_id, 'name': name})
+            self.send_response(303)
+            self.send_header('Location', '/routines?msg=' + urllib.parse.quote('Carpeta creada'))
+            self.end_headers()
+            return
+
+        if path == '/update_routine_folder':
+            folder_id = get('folder_id').strip()
+            name = get('name').strip()
+            is_fetch = self.headers.get('X-Requested-With', '').lower() == 'fetch'
+            try:
+                folder_id_i = int(folder_id)
+            except Exception:
+                if is_fetch:
+                    return self.send_json({'error': 'invalid folder id'}, status=400)
+                self.send_response(400)
+                self.end_headers()
+                return
+            if not name:
+                if is_fetch:
+                    return self.send_json({'error': 'name required'}, status=400)
+                self.send_response(303)
+                self.send_header('Location', '/routines?msg=' + urllib.parse.quote('Nombre de carpeta obligatorio'))
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE routine_folders SET name = ?, updated_at = datetime('now') WHERE id = ?",
+                (name, folder_id_i),
+            )
+            conn.commit()
+            conn.close()
+
+            if is_fetch:
+                return self.send_json({'ok': True, 'id': folder_id_i, 'name': name})
+            self.send_response(303)
+            self.send_header('Location', '/routines?msg=' + urllib.parse.quote('Carpeta renombrada'))
+            self.end_headers()
+            return
+
+        if path == '/delete_routine_folder':
+            folder_id = get('folder_id').strip() or get('id').strip()
+            is_fetch = self.headers.get('X-Requested-With', '').lower() == 'fetch'
+            try:
+                folder_id_i = int(folder_id)
+            except Exception:
+                if is_fetch:
+                    return self.send_json({'error': 'invalid folder id'}, status=400)
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE routines SET folder_id = NULL, updated_at = datetime('now') WHERE folder_id = ? AND COALESCE(is_template, 1) = 1",
+                (folder_id_i,),
+            )
+            cur.execute("DELETE FROM routine_folders WHERE id = ?", (folder_id_i,))
+            conn.commit()
+            conn.close()
+
+            if is_fetch:
+                return self.send_json({'ok': True, 'id': folder_id_i})
+            self.send_response(303)
+            self.send_header('Location', '/routines?msg=' + urllib.parse.quote('Carpeta eliminada'))
+            self.end_headers()
+            return
+
+        if path == '/reorder_routine_folders':
+            folder_ids_raw = get('folder_ids').strip()
+            is_fetch = self.headers.get('X-Requested-With', '').lower() == 'fetch'
+            parsed_ids = []
+            for token in folder_ids_raw.split(','):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    parsed_ids.append(int(token))
+                except Exception:
+                    continue
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM routine_folders ORDER BY COALESCE(sort_order, 0), id")
+            existing_ids = [int(r[0]) for r in cur.fetchall()]
+            existing_set = set(existing_ids)
+            ordered_ids = [fid for fid in parsed_ids if fid in existing_set]
+            for fid in existing_ids:
+                if fid not in ordered_ids:
+                    ordered_ids.append(fid)
+            for idx, fid in enumerate(ordered_ids, start=1):
+                cur.execute(
+                    "UPDATE routine_folders SET sort_order = ?, updated_at = datetime('now') WHERE id = ?",
+                    (idx, fid),
+                )
+            conn.commit()
+            conn.close()
+
+            if is_fetch:
+                return self.send_json({'ok': True})
+            self.send_response(303)
+            self.send_header('Location', '/routines?msg=' + urllib.parse.quote('Orden de carpetas actualizado'))
+            self.end_headers()
+            return
+
+        if path == '/reorder_routines_in_folder':
+            folder_id_raw = get('folder_id').strip()
+            routine_ids_raw = get('routine_ids').strip()
+            is_fetch = self.headers.get('X-Requested-With', '').lower() == 'fetch'
+            folder_id_i = None
+            if folder_id_raw:
+                try:
+                    folder_id_i = int(folder_id_raw)
+                except Exception:
+                    if is_fetch:
+                        return self.send_json({'error': 'invalid folder id'}, status=400)
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+
+            parsed_ids = []
+            for token in routine_ids_raw.split(','):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    parsed_ids.append(int(token))
+                except Exception:
+                    continue
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM routines WHERE COALESCE(is_template, 1) = 1")
+            valid_ids = {int(r[0]) for r in cur.fetchall()}
+            ordered_ids = [rid for rid in parsed_ids if rid in valid_ids]
+
+            for idx, rid in enumerate(ordered_ids, start=1):
+                cur.execute(
+                    "UPDATE routines SET folder_id = ?, sort_order = ?, updated_at = datetime('now') WHERE id = ? AND COALESCE(is_template, 1) = 1",
+                    (folder_id_i, idx, rid),
+                )
+            conn.commit()
+            conn.close()
+
+            if is_fetch:
+                return self.send_json({'ok': True})
+            self.send_response(303)
+            self.send_header('Location', '/routines?msg=' + urllib.parse.quote('Orden de rutinas actualizado'))
             self.end_headers()
             return
 
@@ -12113,6 +13069,85 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json({'ok': True})
             self.send_response(303)
             self.send_header('Location', f'/routines?routine_id={routine_id_i}&msg=' + urllib.parse.quote('Orden actualizado'))
+            self.end_headers()
+            return
+
+        if path == '/reorder_routine_days':
+            routine_id = get('routine_id').strip()
+            day_indices_raw = get('day_indices').strip()
+            is_fetch = self.headers.get('X-Requested-With', '').lower() == 'fetch'
+
+            try:
+                routine_id_i = int(routine_id)
+            except Exception:
+                if is_fetch:
+                    return self.send_json({'error': 'invalid routine id'}, status=400)
+                self.send_response(303)
+                self.send_header('Location', '/routines?msg=' + urllib.parse.quote('No se pudo reordenar los días'))
+                self.end_headers()
+                return
+
+            parsed_day_indices = []
+            seen = set()
+            for token in day_indices_raw.split(','):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    idx = int(token)
+                except Exception:
+                    continue
+                if idx in seen:
+                    continue
+                seen.add(idx)
+                parsed_day_indices.append(idx)
+
+            ensure_routine_days_for_routine(routine_id_i)
+
+            conn = sqlite3.connect(DB_PATH)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT day_index, day_name FROM routine_days WHERE routine_id = ? ORDER BY day_index",
+                (routine_id_i,),
+            )
+            day_rows = cur.fetchall()
+            existing_indices = [int(r[0]) for r in day_rows]
+            existing_set = set(existing_indices)
+
+            ordered_old_indices = [idx for idx in parsed_day_indices if idx in existing_set]
+            for idx in existing_indices:
+                if idx not in ordered_old_indices:
+                    ordered_old_indices.append(idx)
+
+            # First pass: move to temporary indices to avoid UNIQUE conflicts.
+            for old_idx in existing_indices:
+                cur.execute(
+                    "UPDATE routine_days SET day_index = ? WHERE routine_id = ? AND day_index = ?",
+                    (old_idx + 1000, routine_id_i, old_idx),
+                )
+                cur.execute(
+                    "UPDATE routine_items SET day_index = ? WHERE routine_id = ? AND day_index = ?",
+                    (old_idx + 1000, routine_id_i, old_idx),
+                )
+
+            for new_idx, old_idx in enumerate(ordered_old_indices):
+                cur.execute(
+                    "UPDATE routine_days SET day_index = ? WHERE routine_id = ? AND day_index = ?",
+                    (new_idx, routine_id_i, old_idx + 1000),
+                )
+                cur.execute(
+                    "UPDATE routine_items SET day_index = ? WHERE routine_id = ? AND day_index = ?",
+                    (new_idx, routine_id_i, old_idx + 1000),
+                )
+
+            conn.commit()
+            conn.close()
+
+            if is_fetch:
+                return self.send_json({'ok': True})
+
+            self.send_response(303)
+            self.send_header('Location', f'/routines?routine_id={routine_id_i}&msg=' + urllib.parse.quote('Días reordenados'))
             self.end_headers()
             return
 
