@@ -5104,7 +5104,14 @@ def build_routine_pdf(routine_id):
 
     items = get_routine_items(routine_id)
     series_summary = get_routine_series_totals(routine_id)
-    exercise_lookup = {e[0]: {'name': e[1], 'video_url': (e[7] or '').strip()} for e in get_exercises()}
+    exercise_lookup = {
+        e[0]: {
+            'name': e[1],
+            'video_url': (e[7] or '').strip(),
+            'machine_url': (e[8] or '').strip(),
+        }
+        for e in get_exercises()
+    }
     routine_days = get_routine_days(routine_id)
     if routine_days:
         ordered_days = [(int(day_index), day_name or f'Día {int(day_index) + 1}') for day_index, day_name, _day_type in routine_days]
@@ -5163,16 +5170,11 @@ def build_routine_pdf(routine_id):
 
     def draw_header(y_top):
         pdf.setFillColor(colors.HexColor('#f8fafc'))
-        pdf.roundRect(24, y_top - 56, 794, 58, 8, stroke=0, fill=1)
+        pdf.roundRect(24, y_top - 34, 794, 36, 8, stroke=0, fill=1)
         pdf.setFillColor(colors.HexColor('#0f172a'))
         pdf.setFont('Helvetica-Bold', 18)
         pdf.drawString(30, y_top - 6, fit_text(routine_title, 760, font_name='Helvetica-Bold', font_size=18))
-        pdf.setFillColor(colors.HexColor('#475569'))
-        pdf.setFont('Helvetica', 10)
-        pdf.drawString(30, y_top - 24, f"Descripción: {routine[2] or '-'}")
-        pdf.drawString(30, y_top - 38, f"Creada: {routine[3] or '-'}")
-        pdf.drawString(30, y_top - 48, f"ID: {routine[0]}")
-        return y_top - 72
+        return y_top - 50
 
     buffer = io.BytesIO()
     pdf = canvas.Canvas(buffer, pagesize=A4)
@@ -5218,21 +5220,25 @@ def build_routine_pdf(routine_id):
 
     pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
     pdf.setLineWidth(0.8)
-    used_video_links = []
-    used_video_ids = set()
+    used_exercise_links = []
+    used_exercise_ids = set()
 
     for day_index, day in ordered_days:
         day_items = grouped_items.get(day_index, [])
         item_lines = []
-        for item in day_items:
+        for item_order, item in enumerate(day_items, start=1):
             item_id, _routine_id, _day_name, _exercise_id, exercise_name, sets_text, reps_text, notes, _sort_order, _item_day_index = item
-            if _exercise_id in exercise_lookup and _exercise_id not in used_video_ids:
+            if _exercise_id in exercise_lookup and _exercise_id not in used_exercise_ids:
                 exercise_data = exercise_lookup.get(_exercise_id) or {}
                 video_url = normalize_video_url(exercise_data.get('video_url') or '')
-                if video_url:
-                    used_video_ids.add(_exercise_id)
-                    used_video_links.append((exercise_data.get('name') or exercise_name or 'Ejercicio', video_url))
-            parts = [exercise_name or 'Ejercicio']
+                machine_url = normalize_video_url(exercise_data.get('machine_url') or '')
+                used_exercise_ids.add(_exercise_id)
+                used_exercise_links.append({
+                    'name': exercise_data.get('name') or exercise_name or 'Ejercicio',
+                    'video_url': video_url,
+                    'machine_url': machine_url,
+                })
+            parts = [f'{item_order}. {exercise_name or "Ejercicio"}']
             if sets_text:
                 parts.append(f'Series: {sets_text}')
             if reps_text:
@@ -5306,41 +5312,56 @@ def build_routine_pdf(routine_id):
     y -= 34
 
     pdf.setFont('Helvetica', 9)
-    if used_video_links:
-        for index, (exercise_name, video_url) in enumerate(used_video_links, start=1):
-            lines = wrap_text(f'{index}. {exercise_name} - {video_url}', content_width - 16, font_name='Helvetica', font_size=9)
-            for line in lines:
-                if y - 14 < bottom:
-                    draw_page_number(f'Página {pdf.getPageNumber()}')
-                    pdf.showPage()
-                    pdf.setPageSize(A4)
-                    pdf.setPageCompression(0)
-                    pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
-                    pdf.setLineWidth(0.8)
-                    y = draw_header(top)
-                    pdf.setFillColor(colors.HexColor('#f1f5f9'))
-                    pdf.roundRect(left, y - 22, content_width, 20, 6, stroke=0, fill=1)
+    if used_exercise_links:
+        for index, exercise_link in enumerate(used_exercise_links, start=1):
+            exercise_name = str(exercise_link.get('name') or 'Ejercicio')
+            video_url = str(exercise_link.get('video_url') or '').strip()
+            machine_url = str(exercise_link.get('machine_url') or '').strip()
+            entry_lines = []
+
+            if video_url:
+                entry_lines.append((f'{index}. {exercise_name} - Video: {video_url}', video_url))
+            if machine_url:
+                label_prefix = f'{index}. {exercise_name} - ' if not video_url else '   '
+                entry_lines.append((f'{label_prefix}Máquina: {machine_url}', machine_url))
+            if not entry_lines:
+                entry_lines.append((f'{index}. {exercise_name} - Sin links asociados', ''))
+
+            for entry_text, entry_url in entry_lines:
+                lines = wrap_text(entry_text, content_width - 16, font_name='Helvetica', font_size=9)
+                for line in lines:
+                    if y - 14 < bottom:
+                        draw_page_number(f'Página {pdf.getPageNumber()}')
+                        pdf.showPage()
+                        pdf.setPageSize(A4)
+                        pdf.setPageCompression(0)
+                        pdf.setStrokeColor(colors.HexColor('#e2e8f0'))
+                        pdf.setLineWidth(0.8)
+                        y = draw_header(top)
+                        pdf.setFillColor(colors.HexColor('#f1f5f9'))
+                        pdf.roundRect(left, y - 22, content_width, 20, 6, stroke=0, fill=1)
+                        pdf.setFillColor(colors.HexColor('#0f172a'))
+                        pdf.setFont('Helvetica-Bold', 11)
+                        pdf.drawString(left + 8, y - 16, 'Link de ejercicios')
+                        y -= 34
+                        pdf.setFont('Helvetica', 9)
                     pdf.setFillColor(colors.HexColor('#0f172a'))
-                    pdf.setFont('Helvetica-Bold', 11)
-                    pdf.drawString(left + 8, y - 16, 'Link de ejercicios')
-                    y -= 34
-                    pdf.setFont('Helvetica', 9)
-                pdf.setFillColor(colors.HexColor('#0f172a'))
-                rendered_line = fit_text(line, content_width - 16, font_name='Helvetica', font_size=9)
-                pdf.drawString(left + 8, y, rendered_line)
-                pdf.linkURL(
-                    video_url,
-                    (left + 8, y - 2, left + 8 + pdf.stringWidth(rendered_line, 'Helvetica', 9), y + 10),
-                    relative=0,
-                    thickness=0,
-                    color=colors.transparent,
-                )
-                y -= 12
-            y -= 6
+                    rendered_line = fit_text(line, content_width - 16, font_name='Helvetica', font_size=9)
+                    pdf.drawString(left + 8, y, rendered_line)
+                    if entry_url:
+                        pdf.linkURL(
+                            entry_url,
+                            (left + 8, y - 2, left + 8 + pdf.stringWidth(rendered_line, 'Helvetica', 9), y + 10),
+                            relative=0,
+                            thickness=0,
+                            color=colors.transparent,
+                        )
+                    y -= 12
+                y -= 6
     else:
         pdf.setFillColor(colors.HexColor('#64748b'))
         pdf.setFont('Helvetica', 10)
-        pdf.drawString(left + 8, y, 'No hay links de video asociados a los ejercicios de esta rutina.')
+        pdf.drawString(left + 8, y, 'No hay ejercicios asociados a esta rutina.')
 
     draw_page_number(f'Página {pdf.getPageNumber()}')
     pdf.showPage()
@@ -8320,7 +8341,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
             self.send_header('Pragma', 'no-cache')
             self.send_header('Expires', '0')
-            self.send_header('Content-Disposition', f'inline; filename="rutina_{routine_id}.pdf"; filename*=UTF-8\'\'rutina_{routine_id}.pdf')
+            self.send_header('Content-Disposition', f'attachment; filename="rutina_{routine_id}.pdf"; filename*=UTF-8\'\'rutina_{routine_id}.pdf')
             self.send_header('Content-Length', str(len(pdf)))
             self.end_headers()
             self.wfile.write(pdf)
@@ -9117,11 +9138,12 @@ class Handler(BaseHTTPRequestHandler):
                         item_id, _routine_id, _day_name, _exercise_id, exercise_name, sets_text, reps_text, notes, _sort_order, _item_day_index = item
                         safe_sets = html.escape(sets_text or '')
                         safe_reps = html.escape(reps_text or '')
+                        edit_exercise_href = '/edit_exercise?id=' + urllib.parse.quote(str(_exercise_id)) + '&return_to=' + urllib.parse.quote(f'/routines?routine_id={routine_id}')
                         cards_html.append(
                             f'<div class="routine-item-row" draggable="true" data-item-id="{item_id}">'
                             '<button type="button" class="routine-drag-handle" title="Arrastra para mover" aria-label="Arrastra para mover">⋮⋮</button>'
                             '<div class="routine-item-main">'
-                            f'<p class="routine-item-name"><span class="routine-item-order">{exercise_index}.</span> {html.escape(exercise_name or "Ejercicio")}</p>'
+                            f'<p class="routine-item-name"><span class="routine-item-order">{exercise_index}.</span> <a class="routine-item-edit-link" href="{edit_exercise_href}">{html.escape(exercise_name or "Ejercicio")}</a></p>'
                             '<div class="routine-item-editline">'
                             '<label class="routine-item-label">Series '
                             f'<input class="routine-item-edit" data-field="sets_text" value="{safe_sets}" placeholder="-" />'
@@ -9193,7 +9215,7 @@ class Handler(BaseHTTPRequestHandler):
                 <button type="submit">Guardar nombre</button>
             </form>
             <div style="margin:8px 0 14px;">
-                <a class="action-button action-edit" href="/export_routine_pdf/rutina_{routine_id}.pdf" target="_blank">Exportar PDF</a>
+                <a class="action-button action-edit" href="/export_routine_pdf/rutina_{routine_id}.pdf?v={uuid.uuid4().hex}" target="_blank" download>Exportar PDF</a>
             </div>
             {assign_form_html}
     </section>
@@ -10134,6 +10156,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == '/edit_exercise':
             q = urllib.parse.parse_qs(parsed.query)
             eid = q.get('id', [''])[0]
+            return_to = q.get('return_to', [''])[0].strip() or '/exercises'
             try:
                 eid_i = int(eid)
             except Exception:
@@ -10187,6 +10210,7 @@ class Handler(BaseHTTPRequestHandler):
       <h1>Editar ejercicio</h1>
       <form method="post" action="/edit_exercise">
         <input type="hidden" name="id" value="{eid}" />
+                <input type="hidden" name="return_to" value="{html.escape(return_to, quote=True)}" />
         <label>Nombre<input name="name" value="{html.escape(name)}" required /></label>
                 <label>Grupo muscular<select name="category_id">
                     <option value="">-- Sin grupo muscular --</option>
@@ -10201,7 +10225,7 @@ class Handler(BaseHTTPRequestHandler):
         <label class="full">Notas<textarea name="notes">{html.escape(notes or '')}</textarea></label>
         <div class="actions full">
           <button type="submit">Guardar cambios</button>
-          <a class="secondary-link" href="/exercises">Volver</a>
+                    <a class="secondary-link" href="{html.escape(return_to, quote=True)}">Volver</a>
         </div>
       </form>
     </div>
@@ -12745,6 +12769,7 @@ class Handler(BaseHTTPRequestHandler):
             video_url = getp('video_url').strip()
             machine_url = getp('machine_url').strip()
             notes = getp('notes').strip()
+            return_to = getp('return_to').strip() or '/exercises'
             cat_id = None
             if category_id:
                 try:
@@ -12768,7 +12793,7 @@ class Handler(BaseHTTPRequestHandler):
             conn.commit()
             conn.close()
             self.send_response(303)
-            self.send_header('Location', '/exercises?msg=' + urllib.parse.quote('Ejercicio actualizado'))
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Ejercicio actualizado'))
             self.end_headers()
             return
 

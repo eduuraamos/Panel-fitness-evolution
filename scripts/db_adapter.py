@@ -135,6 +135,28 @@ def _translate_sql(sql):
     return out
 
 
+def _is_read_query(sql):
+    head = str(sql or '').lstrip().upper()
+    return head.startswith('SELECT') or head.startswith('WITH')
+
+
+def _is_transient_pg_error(exc):
+    text = str(exc or '').lower()
+    transient_markers = [
+        'server closed the connection unexpectedly',
+        'ssl syscall error',
+        'could not receive data from server',
+        'connection not open',
+        'connection already closed',
+        'eof detected',
+        'terminating connection',
+        'connection reset by peer',
+        'broken pipe',
+        "can't assign requested address",
+    ]
+    return any(marker in text for marker in transient_markers)
+
+
 def _parse_pragma_table_info(sql):
     m = re.match(r"\s*PRAGMA\s+table_info\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*;?\s*$", sql, flags=re.IGNORECASE)
     return m.group(1) if m else None
@@ -166,7 +188,14 @@ class PostgresCursor:
         self._lastrowid_pending = False
         query_seq = _next_perf_seq()
         started_at = time.perf_counter()
-        self._raw.execute(translated, params)
+        try:
+            self._raw.execute(translated, params)
+        except Exception as exc:
+            if not (_is_read_query(translated) and _is_transient_pg_error(exc)):
+                raise
+            if not self._conn_wrapper._reconnect_cursor(self):
+                raise
+            self._raw.execute(translated, params)
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
         self._last_query_seq = query_seq
         self._last_query_sql = translated
@@ -352,10 +381,29 @@ class PostgresConnection:
         except Exception:
             pass
         if self._pool is not None:
-            self._pool.putconn(self._raw)
+            self._pool.putconn(self._raw, close=True)
         else:
             self._raw.close()
         self._returned = True
+
+    def _reconnect_cursor(self, pg_cursor):
+        if self._pool is None:
+            return False
+        try:
+            try:
+                pg_cursor._raw.close()
+            except Exception:
+                pass
+            try:
+                self._pool.putconn(self._raw, close=True)
+            except Exception:
+                pass
+            self._raw = self._pool.getconn()
+            self._returned = False
+            pg_cursor._raw = self._raw.cursor()
+            return True
+        except Exception:
+            return False
 
 
 class SqliteCompatModule:
@@ -386,7 +434,7 @@ class SqliteCompatModule:
             except Exception:
                 pass
             if conn_wrapper._pool is not None and not conn_wrapper._returned:
-                conn_wrapper._pool.putconn(conn_wrapper._raw)
+                conn_wrapper._pool.putconn(conn_wrapper._raw, close=True)
                 conn_wrapper._returned = True
             return
 
@@ -401,8 +449,11 @@ class SqliteCompatModule:
             dsn = _env_database_url()
             request_conn = _request_conn_wrapper() if _is_request_active() else None
             if request_conn is not None:
-                _log_perf("reuse", engine="postgres", scope="request")
-                return request_conn
+                if getattr(request_conn._raw, 'closed', 0):
+                    _clear_request_conn_wrapper()
+                else:
+                    _log_perf("reuse", engine="postgres", scope="request")
+                    return request_conn
 
             pool = _get_postgres_pool(dsn)
             started_at = time.perf_counter()
