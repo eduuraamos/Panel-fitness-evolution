@@ -2179,9 +2179,14 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
             question_parts.append(
                 '<article class="iq-question" '
                 f'data-question-wrapper="{qid}">'
-                f'<label class="iq-question-title">{label}{required_badge}</label>'
+                '<div class="iq-question-head">'
+                f'<div class="iq-q-index">{section_idx}.{len(question_parts) + 1}</div>'
+                '<div class="iq-question-copy">'
+                f'<div class="iq-question-title">{label}{required_badge}</div>'
                 f'{help_html}'
-                f'{input_html}'
+                '</div>'
+                '</div>'
+                f'<div class="iq-answer-shell">{input_html}</div>'
                 f'<div class="iq-save-status" data-save-status="{qid}"></div>'
                 '</article>'
             )
@@ -2190,9 +2195,14 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
         section_help_html = f'<p class="iq-section-help">{html.escape(section_help)}</p>' if section_help else ''
         sections_html.append(
             '<section class="iq-section">'
-            f'<h3>{section_idx}. {html.escape(str(section.get("title") or "Sección"))}</h3>'
+            '<div class="iq-section-head">'
+            f'<div class="iq-section-tag">Bloque {section_idx}</div>'
+            f'<h3>{html.escape(str(section.get("title") or "Sección"))}</h3>'
+            '</div>'
             f'{section_help_html}'
+            '<div class="iq-section-body">'
             + ''.join(question_parts) +
+            '</div>'
             '</section>'
         )
 
@@ -2250,6 +2260,7 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
     styles_html = (
         '<style>'
         '.iq-wrap{--iq-panel:#ffffff;--iq-line:#dbe4f0;--iq-line-strong:#c8d4e5;--iq-text:#101828;--iq-muted:#667085;--iq-primary:#2563eb;--iq-primary-soft:#e8f0ff;--iq-shadow:0 12px 30px rgba(16,24,40,.07);--iq-shadow-hover:0 18px 40px rgba(16,24,40,.10);display:grid;gap:16px;color:var(--iq-text);}'
+        '.iq-top{display:grid;gap:14px;position:sticky;top:0;z-index:10;padding:10px 0 4px;background:linear-gradient(180deg,rgba(244,247,253,.97) 0%,rgba(244,247,253,.86) 64%,rgba(244,247,253,0) 100%);backdrop-filter:saturate(1.2) blur(10px);}'
         '.iq-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;padding:20px;border:1px solid var(--iq-line);border-radius:24px;background:linear-gradient(145deg,#ffffff 0%,#f7faff 58%,#f4f8ff 100%);box-shadow:var(--iq-shadow);align-items:start;}'
         '.iq-head-main{display:flex;align-items:flex-start;gap:14px;min-width:0;}'
         '.iq-icon{width:56px;height:56px;border-radius:18px;background:radial-gradient(circle at 30% 25%,#dbeafe 0%,#c7d9ff 45%,#bfd3ff 100%);display:flex;align-items:center;justify-content:center;color:#1d4ed8;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(37,99,235,.14);font-size:1.35rem;}'
@@ -2270,15 +2281,23 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
         '.iq-admin-assignment-form label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;color:var(--iq-muted);font-weight:700;}'
         '.iq-admin-assignment-form select{padding:11px 12px;border:1px solid var(--iq-line-strong);border-radius:12px;min-width:260px;background:#fff;}'
         '.iq-actions-top{display:flex;gap:10px;flex-wrap:wrap;}'
-        '.iq-section{border:1px solid var(--iq-line);border-radius:22px;background:var(--iq-panel);padding:16px;display:grid;gap:12px;box-shadow:var(--iq-shadow);transition:transform .2s ease, box-shadow .25s ease, border-color .2s ease;}'
+        '.iq-sections{display:grid;gap:18px;}'
+        '.iq-section{border:1px solid var(--iq-line);border-radius:24px;background:var(--iq-panel);padding:16px;display:grid;gap:12px;box-shadow:var(--iq-shadow);transition:transform .2s ease, box-shadow .25s ease, border-color .2s ease;}'
         '.iq-section:hover{transform:translateY(-1px);box-shadow:var(--iq-shadow-hover);border-color:#cdd8ea;}'
-        '.iq-section h3{margin:0;font-size:1.12rem;line-height:1.2;letter-spacing:-.02em;color:var(--iq-text);}'
+        '.iq-section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;flex-wrap:wrap;}'
+        '.iq-section-tag{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;background:#eef2ff;color:#3447a4;font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;}'
+        '.iq-section h3{margin:0;font-size:1.18rem;line-height:1.2;letter-spacing:-.02em;color:var(--iq-text);}'
         '.iq-section-help{margin:0;color:var(--iq-muted);font-size:.9rem;line-height:1.45;}'
-        '.iq-question{display:grid;gap:10px;padding:14px;border:1px solid #e7edf6;border-radius:18px;background:linear-gradient(180deg,#fcfdff 0%,#f9fbff 100%);transition:border-color .2s ease, box-shadow .25s ease, transform .2s ease;}'
+        '.iq-section-body{display:grid;gap:12px;}'
+        '.iq-question{display:grid;gap:12px;padding:16px;border:1px solid #e7edf6;border-radius:20px;background:linear-gradient(180deg,#fcfdff 0%,#f9fbff 100%);transition:border-color .2s ease, box-shadow .25s ease, transform .2s ease;}'
         '.iq-question:hover{border-color:#cddaf4;box-shadow:0 10px 24px rgba(16,24,40,.05);transform:translateY(-1px);}'
+        '.iq-question-head{display:flex;gap:12px;align-items:flex-start;}'
+        '.iq-q-index{width:30px;height:30px;border-radius:999px;background:#e8efff;color:#1d4ed8;font-weight:800;font-size:.78rem;display:flex;align-items:center;justify-content:center;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(37,99,235,.10);}'
+        '.iq-question-copy{min-width:0;display:grid;gap:4px;}'
         '.iq-question-title{font-weight:800;color:var(--iq-text);font-size:.98rem;line-height:1.4;}'
         '.iq-required{color:#b91c1c;}'
         '.iq-help{margin:0;color:var(--iq-muted);font-size:.84rem;line-height:1.45;}'
+        '.iq-answer-shell{display:grid;gap:8px;}'
         '.iq-input{width:100%;padding:12px 14px;border:1px solid #d7deed;border-radius:14px;background:#fff;color:var(--iq-text);box-sizing:border-box;font:inherit;font-size:16px;outline:none;transition:border-color .2s ease, box-shadow .2s ease, background .2s ease;}'
         '.iq-input:focus{border-color:var(--iq-primary);box-shadow:0 0 0 4px rgba(37,99,235,.12);background:#fff;}'
         'textarea.iq-input{min-height:120px;resize:vertical;line-height:1.45;}'
@@ -2292,6 +2311,7 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
         '.iq-file-list li a:hover{text-decoration:underline;}'
         '.iq-save-status{font-size:.76rem;font-weight:700;min-height:1em;color:var(--iq-muted);}'
         '.iq-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;}'
+        '.iq-actions-sticky{position:sticky;bottom:0;z-index:9;padding:14px 0 0;background:linear-gradient(180deg,rgba(244,247,253,0) 0%,rgba(244,247,253,.96) 38%,rgba(244,247,253,.98) 100%);}'
         '.iq-btn{display:inline-flex;align-items:center;justify-content:center;padding:11px 14px;border:1px solid var(--iq-line-strong);border-radius:14px;background:#fff;color:var(--iq-text);text-decoration:none;font-weight:800;cursor:pointer;transition:transform .2s ease, box-shadow .25s ease, background .2s ease, border-color .2s ease;box-shadow:0 8px 18px rgba(16,24,40,.06);}'
         '.iq-btn:hover{background:#f8fafc;transform:translateY(-1px);border-color:#cfd8e6;}'
         '.iq-btn-primary{background:linear-gradient(90deg,#1d4ed8 0%,#2563eb 55%,#0ea5e9 100%);color:#fff;border:none;box-shadow:0 14px 28px rgba(37,99,235,.24);}'
@@ -2299,7 +2319,7 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
         '.iq-btn-secondary{background:#fff;}'
         '.iq-empty{color:var(--iq-muted);font-style:italic;}'
         '@media (max-width:1100px){.iq-head{grid-template-columns:1fr;}.iq-status{min-width:0;}.iq-choice-list{grid-template-columns:repeat(2,minmax(0,1fr));}.iq-admin-assignment-form{width:100%;}.iq-admin-assignment-form select{min-width:0;flex:1 1 260px;}}'
-        '@media (max-width:760px){.iq-wrap{gap:14px;}.iq-head{padding:16px;border-radius:20px;}.iq-head-main{gap:12px;}.iq-icon{width:50px;height:50px;border-radius:16px;font-size:1.2rem;}.iq-status{padding:12px 14px;border-radius:16px;}.iq-progress{padding:14px;border-radius:18px;}.iq-section{padding:14px;border-radius:18px;}.iq-question{padding:12px;border-radius:16px;}.iq-actions{justify-content:stretch;}.iq-btn{width:100%;}.iq-choice-list{grid-template-columns:1fr;}.iq-admin-assignment-form{padding:12px;border-radius:16px;}.iq-admin-assignment-form label,.iq-admin-assignment-form button{width:100%;}.iq-admin-assignment-form select{width:100%;}.iq-admin-assignment-form button{justify-content:center;}}'
+        '@media (max-width:760px){.iq-wrap{gap:14px;}.iq-top{top:0;padding-top:0;}.iq-head{padding:16px;border-radius:20px;}.iq-head-main{gap:12px;}.iq-icon{width:50px;height:50px;border-radius:16px;font-size:1.2rem;}.iq-status{padding:12px 14px;border-radius:16px;}.iq-progress{padding:14px;border-radius:18px;}.iq-section{padding:14px;border-radius:18px;}.iq-question{padding:12px;border-radius:16px;}.iq-question-head{gap:10px;}.iq-q-index{width:28px;height:28px;}.iq-actions{justify-content:stretch;}.iq-btn{width:100%;}.iq-choice-list{grid-template-columns:1fr;}.iq-admin-assignment-form{padding:12px;border-radius:16px;}.iq-admin-assignment-form label,.iq-admin-assignment-form button{width:100%;}.iq-admin-assignment-form select{width:100%;}.iq-admin-assignment-form button{justify-content:center;}.iq-actions-sticky{padding-top:10px;}}'
         '@media (prefers-reduced-motion:reduce){.iq-section,.iq-question,.iq-btn,.iq-input,.iq-choice-item,.iq-progress-fill{transition:none !important;}}'
         '</style>'
     )
@@ -2310,6 +2330,7 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
         f'data-client-id="{int(client_id)}" '
         f'data-admin-mode="{1 if admin_mode else 0}" '
         f'data-status="{html.escape(str(assignment.get("status") or "draft"), quote=True)}">'
+        '<div class="iq-top">'
         '<div class="iq-head">'
         '<div class="iq-head-main">'
         '<div class="iq-icon">🧾</div>'
@@ -2331,6 +2352,7 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
         '</div>'
         '<div class="iq-progress-bar"><div class="iq-progress-fill" style="width:' + str(progress_pct) + '%"></div></div>'
         '</div>'
+        '</div>'
         + versions_html +
         ('' if not (admin_mode and show_admin_controls) else (
             '<div class="iq-actions-top">'
@@ -2338,8 +2360,8 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
             f'<a class="iq-btn iq-btn-secondary" href="{html.escape(export_href, quote=True)}" target="_blank">Exportar PDF</a>'
             '</div>'
         ))
-        + ''.join(sections_html) +
-        '<div class="iq-actions">'
+        + '<div class="iq-sections">' + ''.join(sections_html) + '</div>'
+        + '<div class="iq-actions iq-actions-sticky">'
         '<button type="button" class="iq-btn iq-btn-primary" id="iq-submit-btn">Enviar cuestionario</button>'
         '</div>'
         + script_html +
