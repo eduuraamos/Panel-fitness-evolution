@@ -12,6 +12,7 @@ from food_schema import (
     supports_foods_search_fts,
 )
 import html
+import cgi
 import os
 import re
 import calendar
@@ -42,6 +43,7 @@ STATIC_BASE_DIR = os.path.join(os.path.dirname(__file__), STATIC_DIR)
 UPLOADS_DIR = os.environ.get("UPLOADS_DIR", os.path.join(DATA_DIR, "uploads"))
 UPLOADS_FOODS_DIR = os.path.join(UPLOADS_DIR, "foods")
 UPLOADS_REVIEWS_DIR = os.path.join(UPLOADS_DIR, "reviews")
+UPLOADS_QUESTIONNAIRE_DIR = os.path.join(STATIC_BASE_DIR, "uploads", "questionnaire")
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8005"))
 CLIENT_PORTAL_SECRET = os.environ.get("CLIENT_PORTAL_SECRET", "nutrition-app-client-portal")
@@ -839,6 +841,2940 @@ def ensure_client_reviews_table(conn_or_path=None):
     conn.commit()
     if should_close:
         conn.close()
+
+
+def get_initial_questionnaire_default_definition():
+    return {
+        'title': 'Cuestionario Inicial',
+        'description': 'Formulario base para conocer al cliente antes de iniciar la planificación.',
+        'sections': [
+            {
+                'key': 'personal_data',
+                'title': 'Datos personales',
+                'help_text': 'Datos básicos de identificación y contexto del cliente.',
+                'questions': [
+                    {'key': 'full_name', 'label': 'Nombre y apellidos', 'type': 'text_short', 'required': 1},
+                    {'key': 'age', 'label': 'Edad', 'type': 'number', 'required': 0},
+                    {'key': 'birthdate', 'label': 'Fecha de nacimiento', 'type': 'date', 'required': 0},
+                    {'key': 'height_cm', 'label': 'Altura (cm)', 'type': 'number', 'required': 0},
+                    {'key': 'weight_kg', 'label': 'Peso (kg)', 'type': 'number', 'required': 0},
+                    {'key': 'phone', 'label': 'Teléfono', 'type': 'text_short', 'required': 0},
+                    {'key': 'address_city', 'label': 'Domicilio y ciudad', 'type': 'text_short', 'required': 0},
+                    {'key': 'how_met', 'label': '¿Cómo me has conocido?', 'type': 'text_long', 'required': 0},
+                    {'key': 'why_hire', 'label': '¿Qué te ha hecho querer contratar mis servicios?', 'type': 'text_long', 'required': 0},
+                ],
+            },
+            {
+                'key': 'par_q',
+                'title': 'PAR-Q',
+                'help_text': 'Cuestionario de seguridad y salud previa.',
+                'questions': [
+                    {'key': 'parq_respiratory_heart', 'label': '¿Padeces alguna enfermedad respiratoria o de corazón?', 'type': 'yes_no', 'required': 1},
+                    {'key': 'parq_respiratory_heart_detail', 'label': 'Amplía la información', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'parq_respiratory_heart', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'parq_injuries_joint', 'label': '¿Tienes lesiones o problemas musculares o articulares?', 'type': 'yes_no', 'required': 1},
+                    {'key': 'parq_injuries_joint_detail', 'label': 'Describe lesiones o molestias', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'parq_injuries_joint', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'parq_hernia', 'label': '¿Tienes hernias u otras afecciones similares?', 'type': 'yes_no', 'required': 1},
+                    {'key': 'parq_hernia_detail', 'label': 'Amplía la información', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'parq_hernia', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'parq_sleep', 'label': '¿Tienes problemas para conciliar el sueño?', 'type': 'yes_no', 'required': 1},
+                    {'key': 'parq_smoke', 'label': '¿Fumas?', 'type': 'yes_no', 'required': 1},
+                    {'key': 'parq_smoke_detail', 'label': 'Si fumas, ¿cuánto?', 'type': 'text_short', 'required': 0, 'condition': {'depends_on_key': 'parq_smoke', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'parq_alcohol', 'label': '¿Bebes alcohol?', 'type': 'yes_no', 'required': 1},
+                    {'key': 'parq_alcohol_detail', 'label': 'Si bebes, ¿qué y qué cantidad?', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'parq_alcohol', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'parq_chronic', 'label': '¿Padeces hipertensión, diabetes o enfermedad crónica?', 'type': 'yes_no', 'required': 1},
+                    {'key': 'parq_chronic_detail', 'label': 'Amplía la información', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'parq_chronic', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'parq_cholesterol', 'label': '¿Tienes el colesterol alto?', 'type': 'yes_no', 'required': 1},
+                ],
+            },
+            {
+                'key': 'personal_info',
+                'title': 'Información personal',
+                'questions': [
+                    {'key': 'diseases', 'label': 'Enfermedades', 'type': 'text_long', 'required': 0},
+                    {'key': 'blood_group', 'label': 'Grupo sanguíneo', 'type': 'dropdown', 'required': 0, 'options': ['No lo sé', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-']},
+                    {'key': 'smoker_status', 'label': 'Fumador', 'type': 'single_choice', 'required': 0, 'options': ['No', 'Ocasional', 'Sí']},
+                    {'key': 'diabetic_status', 'label': 'Diabético', 'type': 'yes_no', 'required': 0},
+                    {'key': 'celiac_status', 'label': 'Celíaco', 'type': 'yes_no', 'required': 0},
+                    {'key': 'food_intolerances', 'label': 'Intolerancias o alergias alimentarias', 'type': 'text_long', 'required': 0},
+                    {'key': 'stress_work', 'label': 'Nivel de estrés laboral (1-10)', 'type': 'number', 'required': 0},
+                    {'key': 'stress_outside', 'label': 'Nivel de estrés fuera del trabajo (1-10)', 'type': 'number', 'required': 0},
+                ],
+            },
+            {
+                'key': 'training',
+                'title': 'Entrenamiento',
+                'questions': [
+                    {'key': 'current_training', 'label': '¿Cómo entrenas actualmente y en los últimos meses?', 'type': 'text_long', 'required': 1},
+                    {'key': 'current_training_files', 'label': 'Adjunta tu rutina actual (PDF/Word/Excel/imagen)', 'type': 'file_multi', 'required': 0},
+                    {'key': 'exercises_dislike', 'label': 'Ejercicios que no te gusten o con malas sensaciones', 'type': 'text_long', 'required': 0},
+                    {'key': 'exercises_like', 'label': 'Ejercicios que te gusten especialmente', 'type': 'text_long', 'required': 0},
+                    {'key': 'days_wanted', 'label': '¿Cuántos días te gustaría entrenar?', 'type': 'number', 'required': 0},
+                    {'key': 'days_real', 'label': '¿Cuántos días puedes entrenar realmente?', 'type': 'number', 'required': 0},
+                    {'key': 'does_cardio', 'label': '¿Realizas cardio actualmente?', 'type': 'yes_no', 'required': 0},
+                    {'key': 'cardio_sessions', 'label': '¿Cuántas sesiones de cardio?', 'type': 'number', 'required': 0, 'condition': {'depends_on_key': 'does_cardio', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'cardio_type', 'label': '¿En qué consisten?', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'does_cardio', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'training_time', 'label': '¿En qué momento del día entrenas?', 'type': 'text_short', 'required': 0},
+                    {'key': 'plays_sport', 'label': '¿Practicas algún deporte?', 'type': 'yes_no', 'required': 0},
+                    {'key': 'sport_detail', 'label': '¿Qué deporte y frecuencia?', 'type': 'text_short', 'required': 0, 'condition': {'depends_on_key': 'plays_sport', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'injury_history', 'label': 'Lesiones, historial médico o molestias actuales', 'type': 'text_long', 'required': 0},
+                ],
+            },
+            {
+                'key': 'goals',
+                'title': 'Objetivos',
+                'questions': [
+                    {'key': 'main_goal', 'label': '¿Cuál es tu objetivo?', 'type': 'text_long', 'required': 1},
+                    {'key': 'expectations', 'label': '¿Qué esperas conseguir con esta planificación?', 'type': 'text_long', 'required': 0},
+                    {'key': 'bad_experiences', 'label': '¿Has tenido malas experiencias con otras asesorías?', 'type': 'yes_no', 'required': 0},
+                    {'key': 'bad_experiences_detail', 'label': 'Si sí, cuéntame qué ocurrió', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'bad_experiences', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'important_missing_info', 'label': '¿Hay información importante que no te haya preguntado?', 'type': 'text_long', 'required': 0},
+                    {'key': 'has_smartwatch', 'label': '¿Dispones de reloj inteligente o contador de pasos?', 'type': 'yes_no', 'required': 0},
+                ],
+            },
+            {
+                'key': 'supplementation',
+                'title': 'Suplementación',
+                'questions': [
+                    {'key': 'used_supplements', 'label': '¿Has utilizado suplementación deportiva?', 'type': 'yes_no', 'required': 0},
+                    {'key': 'current_supplements', 'label': '¿Qué suplementos utilizas actualmente?', 'type': 'text_long', 'required': 0},
+                    {'key': 'wants_supplements', 'label': '¿Te gustaría utilizar suplementación?', 'type': 'yes_no', 'required': 0},
+                ],
+            },
+            {
+                'key': 'nutrition',
+                'title': 'Nutrición',
+                'questions': [
+                    {'key': 'current_diet_desc', 'label': 'Describe cómo es actualmente tu alimentación', 'type': 'text_long', 'required': 1},
+                    {'key': 'current_diet_files', 'label': 'Adjunta tu dieta actual (si dispones de ella)', 'type': 'file_multi', 'required': 0},
+                    {'key': 'macros', 'label': 'Si cuentas macronutrientes, indícalos', 'type': 'text_short', 'required': 0},
+                    {'key': 'diet_help_goal', 'label': '¿Tu alimentación te está acercando a tu objetivo?', 'type': 'yes_no', 'required': 0},
+                    {'key': 'weight_trend', 'label': '¿Tu alimentación hace que subas, mantengas o bajes de peso?', 'type': 'single_choice', 'required': 0, 'options': ['Subo', 'Mantengo', 'Bajo', 'No lo sé']},
+                    {'key': 'has_hunger', 'label': '¿Pasas hambre con la dieta?', 'type': 'yes_no', 'required': 0},
+                    {'key': 'hunger_moments', 'label': 'Si sí, ¿en qué momentos?', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'has_hunger', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'more_appetite_when', 'label': '¿Cuándo tienes más apetito?', 'type': 'text_short', 'required': 0},
+                    {'key': 'eats_outside', 'label': '¿Comes fuera de casa?', 'type': 'yes_no', 'required': 0},
+                    {'key': 'food_allergies', 'label': '¿Tienes alergias alimentarias?', 'type': 'yes_no', 'required': 0},
+                    {'key': 'food_allergies_detail', 'label': '¿Cuáles?', 'type': 'text_long', 'required': 0, 'condition': {'depends_on_key': 'food_allergies', 'operator': 'equals', 'value': 'yes'}},
+                    {'key': 'favorite_foods', 'label': '¿Cuáles son tus alimentos favoritos?', 'type': 'text_long', 'required': 0},
+                    {'key': 'disliked_foods', 'label': '¿Qué alimentos no te gustan?', 'type': 'text_long', 'required': 0},
+                    {'key': 'usual_drinks', 'label': '¿Qué bebidas consumes habitualmente?', 'type': 'text_long', 'required': 0},
+                    {'key': 'job_type', 'label': '¿En qué consiste tu trabajo? (activo/sedentario)', 'type': 'text_long', 'required': 0},
+                ],
+            },
+        ],
+    }
+
+
+def ensure_initial_questionnaire_tables(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS initial_questionnaire_versions (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'draft',
+            is_active INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            published_at TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS initial_questionnaire_sections (
+            id INTEGER PRIMARY KEY,
+            version_id INTEGER NOT NULL,
+            section_key TEXT,
+            title TEXT NOT NULL,
+            help_text TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            FOREIGN KEY(version_id) REFERENCES initial_questionnaire_versions(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS initial_questionnaire_questions (
+            id INTEGER PRIMARY KEY,
+            section_id INTEGER NOT NULL,
+            question_key TEXT,
+            label TEXT NOT NULL,
+            question_type TEXT NOT NULL,
+            is_required INTEGER NOT NULL DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            help_text TEXT,
+            placeholder TEXT,
+            options_json TEXT,
+            validation_json TEXT,
+            condition_json TEXT,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(section_id) REFERENCES initial_questionnaire_sections(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_initial_questionnaire_assignments (
+            id INTEGER PRIMARY KEY,
+            client_id INTEGER NOT NULL,
+            version_id INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            requested_by_admin INTEGER NOT NULL DEFAULT 0,
+            requested_at TEXT NOT NULL,
+            submitted_at TEXT,
+            last_saved_at TEXT,
+            UNIQUE(client_id, version_id),
+            FOREIGN KEY(client_id) REFERENCES clients(id),
+            FOREIGN KEY(version_id) REFERENCES initial_questionnaire_versions(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_initial_questionnaire_answers (
+            id INTEGER PRIMARY KEY,
+            assignment_id INTEGER NOT NULL,
+            question_id INTEGER NOT NULL,
+            value_text TEXT,
+            value_json TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE(assignment_id, question_id),
+            FOREIGN KEY(assignment_id) REFERENCES client_initial_questionnaire_assignments(id),
+            FOREIGN KEY(question_id) REFERENCES initial_questionnaire_questions(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_initial_questionnaire_files (
+            id INTEGER PRIMARY KEY,
+            assignment_id INTEGER NOT NULL,
+            question_id INTEGER NOT NULL,
+            original_name TEXT NOT NULL,
+            stored_path TEXT NOT NULL,
+            mime_type TEXT,
+            size_bytes INTEGER,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(assignment_id) REFERENCES client_initial_questionnaire_assignments(id),
+            FOREIGN KEY(question_id) REFERENCES initial_questionnaire_questions(id)
+        )
+        """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_initial_q_sections_version ON initial_questionnaire_sections(version_id, sort_order, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_initial_q_questions_section ON initial_questionnaire_questions(section_id, sort_order, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_initial_q_assign_client ON client_initial_questionnaire_assignments(client_id, requested_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_initial_q_answers_assignment ON client_initial_questionnaire_answers(assignment_id, question_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_initial_q_files_assignment ON client_initial_questionnaire_files(assignment_id, question_id)")
+    conn.commit()
+
+    cur.execute("SELECT COUNT(*) FROM initial_questionnaire_versions")
+    count_row = cur.fetchone()
+    if int(count_row[0] or 0) == 0:
+        definition = get_initial_questionnaire_default_definition()
+        cur.execute(
+            "INSERT INTO initial_questionnaire_versions(title, description, status, is_active, created_at, published_at) VALUES(?,?, 'published', 1, datetime('now'), datetime('now'))",
+            (definition.get('title') or 'Cuestionario Inicial', definition.get('description') or ''),
+        )
+        version_id = int(cur.lastrowid)
+        question_ids_by_key = {}
+        pending_conditions = []
+        for s_idx, section in enumerate(definition.get('sections') or [], start=1):
+            cur.execute(
+                "INSERT INTO initial_questionnaire_sections(version_id, section_key, title, help_text, sort_order, is_active) VALUES(?,?,?,?,?,1)",
+                (
+                    version_id,
+                    str(section.get('key') or '').strip() or None,
+                    str(section.get('title') or f'Sección {s_idx}').strip(),
+                    str(section.get('help_text') or '').strip() or None,
+                    s_idx,
+                ),
+            )
+            section_id = int(cur.lastrowid)
+            for q_idx, question in enumerate(section.get('questions') or [], start=1):
+                options_json = None
+                options = question.get('options')
+                if isinstance(options, list):
+                    options_json = json.dumps([str(x) for x in options], ensure_ascii=False)
+                condition_json = None
+                condition = question.get('condition')
+                if isinstance(condition, dict):
+                    pending_conditions.append((section_id, str(question.get('key') or ''), dict(condition)))
+                cur.execute(
+                    """
+                    INSERT INTO initial_questionnaire_questions(
+                        section_id, question_key, label, question_type, is_required, is_active,
+                        help_text, placeholder, options_json, validation_json, condition_json, sort_order
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        section_id,
+                        str(question.get('key') or '').strip() or None,
+                        str(question.get('label') or f'Pregunta {q_idx}').strip(),
+                        str(question.get('type') or 'text_short').strip(),
+                        1 if int(question.get('required') or 0) == 1 else 0,
+                        1,
+                        str(question.get('help_text') or '').strip() or None,
+                        str(question.get('placeholder') or '').strip() or None,
+                        options_json,
+                        None,
+                        condition_json,
+                        q_idx,
+                    ),
+                )
+                qid = int(cur.lastrowid)
+                qkey = str(question.get('key') or '').strip()
+                if qkey:
+                    question_ids_by_key[qkey] = qid
+
+        for _section_id, question_key, condition in pending_conditions:
+            depends_on_key = str(condition.get('depends_on_key') or '').strip()
+            depends_on_id = question_ids_by_key.get(depends_on_key)
+            if not depends_on_id:
+                continue
+            normalized = {
+                'depends_on_question_id': int(depends_on_id),
+                'operator': str(condition.get('operator') or 'equals').strip(),
+                'value': condition.get('value'),
+            }
+            cur.execute(
+                "UPDATE initial_questionnaire_questions SET condition_json = ? WHERE question_key = ?",
+                (json.dumps(normalized, ensure_ascii=False), question_key),
+            )
+        conn.commit()
+
+    if should_close:
+        conn.close()
+
+
+def get_initial_questionnaire_versions():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, COALESCE(description, ''), COALESCE(status, 'draft'), COALESCE(is_active, 0),
+               COALESCE(created_at, ''), COALESCE(published_at, '')
+        FROM initial_questionnaire_versions
+        ORDER BY id DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def get_active_initial_questionnaire_version_id():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id FROM initial_questionnaire_versions WHERE is_active = 1 ORDER BY id DESC LIMIT 1"
+    )
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return int(row[0])
+    versions = get_initial_questionnaire_versions()
+    return int(versions[0][0]) if versions else 0
+
+
+def get_initial_questionnaire_structure(version_id, include_inactive=False):
+    version_id_i = int(version_id or 0)
+    if version_id_i <= 0:
+        return {'version': None, 'sections': []}
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, COALESCE(description, ''), COALESCE(status, 'draft'), COALESCE(is_active, 0),
+               COALESCE(created_at, ''), COALESCE(published_at, '')
+        FROM initial_questionnaire_versions WHERE id = ? LIMIT 1
+        """,
+        (version_id_i,),
+    )
+    version = cur.fetchone()
+    if not version:
+        conn.close()
+        return {'version': None, 'sections': []}
+
+    section_where = '' if include_inactive else 'AND COALESCE(is_active, 1) = 1'
+    cur.execute(
+        f"""
+        SELECT id, COALESCE(section_key, ''), title, COALESCE(help_text, ''), COALESCE(sort_order, 0), COALESCE(is_active, 1)
+        FROM initial_questionnaire_sections
+        WHERE version_id = ? {section_where}
+        ORDER BY COALESCE(sort_order, 0), id
+        """,
+        (version_id_i,),
+    )
+    section_rows = cur.fetchall()
+
+    sections = []
+    for sid, section_key, title, help_text, sort_order, is_active in section_rows:
+        q_where = '' if include_inactive else 'AND COALESCE(is_active, 1) = 1'
+        cur.execute(
+            f"""
+            SELECT id, COALESCE(question_key, ''), label, question_type, COALESCE(is_required, 0), COALESCE(is_active, 1),
+                   COALESCE(help_text, ''), COALESCE(placeholder, ''), COALESCE(options_json, ''),
+                   COALESCE(validation_json, ''), COALESCE(condition_json, ''), COALESCE(sort_order, 0)
+            FROM initial_questionnaire_questions
+            WHERE section_id = ? {q_where}
+            ORDER BY COALESCE(sort_order, 0), id
+            """,
+            (int(sid),),
+        )
+        questions = []
+        for qrow in cur.fetchall():
+            (
+                qid,
+                question_key,
+                label,
+                question_type,
+                is_required,
+                q_active,
+                q_help_text,
+                placeholder,
+                options_json,
+                validation_json,
+                condition_json,
+                q_sort_order,
+            ) = qrow
+            try:
+                options = json.loads(options_json) if options_json else []
+            except Exception:
+                options = []
+            if not isinstance(options, list):
+                options = []
+            try:
+                validation = json.loads(validation_json) if validation_json else {}
+            except Exception:
+                validation = {}
+            if not isinstance(validation, dict):
+                validation = {}
+            try:
+                condition = json.loads(condition_json) if condition_json else None
+            except Exception:
+                condition = None
+            if not isinstance(condition, dict):
+                condition = None
+            questions.append(
+                {
+                    'id': int(qid),
+                    'question_key': question_key,
+                    'label': label,
+                    'question_type': question_type,
+                    'is_required': int(is_required or 0),
+                    'is_active': int(q_active or 0),
+                    'help_text': q_help_text,
+                    'placeholder': placeholder,
+                    'options': options,
+                    'validation': validation,
+                    'condition': condition,
+                    'sort_order': int(q_sort_order or 0),
+                }
+            )
+        sections.append(
+            {
+                'id': int(sid),
+                'section_key': section_key,
+                'title': title,
+                'help_text': help_text,
+                'sort_order': int(sort_order or 0),
+                'is_active': int(is_active or 0),
+                'questions': questions,
+            }
+        )
+    conn.close()
+    return {
+        'version': {
+            'id': int(version[0]),
+            'title': version[1],
+            'description': version[2],
+            'status': version[3],
+            'is_active': int(version[4] or 0),
+            'created_at': version[5],
+            'published_at': version[6],
+        },
+        'sections': sections,
+    }
+
+
+def get_or_create_client_questionnaire_assignment(client_id, version_id=None, requested_by_admin=0):
+    client_id_i = int(client_id or 0)
+    if client_id_i <= 0:
+        return None
+    version_id_i = int(version_id or 0) if int(version_id or 0) > 0 else get_active_initial_questionnaire_version_id()
+    if version_id_i <= 0:
+        return None
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, client_id, version_id, COALESCE(status, 'draft'), COALESCE(requested_by_admin, 0),
+               COALESCE(requested_at, ''), COALESCE(submitted_at, ''), COALESCE(last_saved_at, '')
+        FROM client_initial_questionnaire_assignments
+        WHERE client_id = ? AND version_id = ?
+        LIMIT 1
+        """,
+        (client_id_i, version_id_i),
+    )
+    row = cur.fetchone()
+    if not row:
+        cur.execute(
+            """
+            INSERT INTO client_initial_questionnaire_assignments(
+                client_id, version_id, status, requested_by_admin, requested_at, submitted_at, last_saved_at
+            ) VALUES(?,?, 'draft', ?, datetime('now'), NULL, datetime('now'))
+            """,
+            (client_id_i, version_id_i, 1 if int(requested_by_admin or 0) == 1 else 0),
+        )
+        assignment_id = int(cur.lastrowid)
+        conn.commit()
+        cur.execute(
+            """
+            SELECT id, client_id, version_id, COALESCE(status, 'draft'), COALESCE(requested_by_admin, 0),
+                   COALESCE(requested_at, ''), COALESCE(submitted_at, ''), COALESCE(last_saved_at, '')
+            FROM client_initial_questionnaire_assignments
+            WHERE id = ?
+            LIMIT 1
+            """,
+            (assignment_id,),
+        )
+        row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'id': int(row[0]),
+        'client_id': int(row[1]),
+        'version_id': int(row[2]),
+        'status': row[3] or 'draft',
+        'requested_by_admin': int(row[4] or 0),
+        'requested_at': row[5],
+        'submitted_at': row[6],
+        'last_saved_at': row[7],
+    }
+
+
+def get_client_questionnaire_assignment(client_id, assignment_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, client_id, version_id, COALESCE(status, 'draft'), COALESCE(requested_by_admin, 0),
+               COALESCE(requested_at, ''), COALESCE(submitted_at, ''), COALESCE(last_saved_at, '')
+        FROM client_initial_questionnaire_assignments
+        WHERE client_id = ? AND id = ?
+        LIMIT 1
+        """,
+        (int(client_id), int(assignment_id)),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'id': int(row[0]),
+        'client_id': int(row[1]),
+        'version_id': int(row[2]),
+        'status': row[3] or 'draft',
+        'requested_by_admin': int(row[4] or 0),
+        'requested_at': row[5],
+        'submitted_at': row[6],
+        'last_saved_at': row[7],
+    }
+
+
+def get_client_questionnaire_answers_map(assignment_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT question_id, COALESCE(value_text, ''), COALESCE(value_json, '')
+        FROM client_initial_questionnaire_answers
+        WHERE assignment_id = ?
+        """,
+        (int(assignment_id),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = {}
+    for question_id, value_text, value_json in rows:
+        parsed_json = None
+        if value_json:
+            try:
+                parsed_json = json.loads(value_json)
+            except Exception:
+                parsed_json = None
+        out[int(question_id)] = {
+            'value_text': value_text,
+            'value_json': parsed_json,
+        }
+    return out
+
+
+def save_client_questionnaire_answer(assignment_id, question_id, value_text=None, value_json=None):
+    value_text_db = None if value_text is None else str(value_text)
+    value_json_db = None
+    if value_json is not None:
+        try:
+            value_json_db = json.dumps(value_json, ensure_ascii=False)
+        except Exception:
+            value_json_db = None
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_initial_questionnaire_answers(assignment_id, question_id, value_text, value_json, updated_at)
+        VALUES(?,?,?,?,datetime('now'))
+        ON CONFLICT(assignment_id, question_id)
+        DO UPDATE SET
+            value_text = excluded.value_text,
+            value_json = excluded.value_json,
+            updated_at = datetime('now')
+        """,
+        (int(assignment_id), int(question_id), value_text_db, value_json_db),
+    )
+    cur.execute(
+        "UPDATE client_initial_questionnaire_assignments SET last_saved_at = datetime('now') WHERE id = ?",
+        (int(assignment_id),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_client_questionnaire_submitted(assignment_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE client_initial_questionnaire_assignments
+        SET status = 'submitted', submitted_at = datetime('now'), last_saved_at = datetime('now')
+        WHERE id = ?
+        """,
+        (int(assignment_id),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_client_questionnaire_assignments(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT a.id, a.client_id, a.version_id, COALESCE(a.status, 'draft'), COALESCE(a.requested_by_admin, 0),
+               COALESCE(a.requested_at, ''), COALESCE(a.submitted_at, ''), COALESCE(a.last_saved_at, ''),
+               COALESCE(v.title, ''), COALESCE(v.is_active, 0), COALESCE(v.status, 'draft')
+        FROM client_initial_questionnaire_assignments a
+        LEFT JOIN initial_questionnaire_versions v ON v.id = a.version_id
+        WHERE a.client_id = ?
+        ORDER BY a.id DESC
+        """,
+        (int(client_id),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        out.append(
+            {
+                'id': int(row[0]),
+                'client_id': int(row[1]),
+                'version_id': int(row[2]),
+                'status': row[3] or 'draft',
+                'requested_by_admin': int(row[4] or 0),
+                'requested_at': row[5],
+                'submitted_at': row[6],
+                'last_saved_at': row[7],
+                'version_title': row[8] or 'Cuestionario',
+                'version_is_active': int(row[9] or 0),
+                'version_status': row[10] or 'draft',
+            }
+        )
+    return out
+
+
+def request_initial_questionnaire_version_for_client(client_id, version_id):
+    assignment = get_or_create_client_questionnaire_assignment(client_id, version_id=version_id, requested_by_admin=1)
+    if not assignment:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE client_initial_questionnaire_assignments
+        SET status = 'draft', requested_by_admin = 1, requested_at = datetime('now')
+        WHERE id = ?
+        """,
+        (int(assignment['id']),),
+    )
+    conn.commit()
+    conn.close()
+    return get_client_questionnaire_assignment(client_id, assignment['id'])
+
+
+def save_client_questionnaire_file(assignment_id, question_id, original_name, mime_type, content_bytes):
+    os.makedirs(UPLOADS_QUESTIONNAIRE_DIR, exist_ok=True)
+    name = str(original_name or 'archivo').strip() or 'archivo'
+    safe_name = re.sub(r'[^A-Za-z0-9._-]+', '_', name)
+    ext = ''
+    if '.' in safe_name:
+        ext = safe_name.rsplit('.', 1)[1].lower()
+        ext = re.sub(r'[^a-z0-9]+', '', ext)
+        ext = ('.' + ext) if ext else ''
+    stored_name = f"q_{int(assignment_id)}_{int(question_id)}_{uuid.uuid4().hex}{ext}"
+    full_path = os.path.join(UPLOADS_QUESTIONNAIRE_DIR, stored_name)
+    with open(full_path, 'wb') as f:
+        f.write(content_bytes or b'')
+    public_path = f"/static/uploads/questionnaire/{stored_name}"
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_initial_questionnaire_files(
+            assignment_id, question_id, original_name, stored_path, mime_type, size_bytes, created_at
+        ) VALUES(?,?,?,?,?,?,datetime('now'))
+        """,
+        (
+            int(assignment_id),
+            int(question_id),
+            name,
+            public_path,
+            str(mime_type or ''),
+            int(len(content_bytes or b'')),
+        ),
+    )
+    file_id = int(cur.lastrowid)
+    cur.execute(
+        "UPDATE client_initial_questionnaire_assignments SET last_saved_at = datetime('now') WHERE id = ?",
+        (int(assignment_id),),
+    )
+    conn.commit()
+    conn.close()
+    return {
+        'id': file_id,
+        'assignment_id': int(assignment_id),
+        'question_id': int(question_id),
+        'original_name': name,
+        'stored_path': public_path,
+        'mime_type': str(mime_type or ''),
+        'size_bytes': int(len(content_bytes or b'')),
+    }
+
+
+def list_client_questionnaire_files(assignment_id, question_id=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if question_id is None:
+        cur.execute(
+            """
+            SELECT id, assignment_id, question_id, COALESCE(original_name, ''), COALESCE(stored_path, ''),
+                   COALESCE(mime_type, ''), COALESCE(size_bytes, 0), COALESCE(created_at, '')
+            FROM client_initial_questionnaire_files
+            WHERE assignment_id = ?
+            ORDER BY id ASC
+            """,
+            (int(assignment_id),),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT id, assignment_id, question_id, COALESCE(original_name, ''), COALESCE(stored_path, ''),
+                   COALESCE(mime_type, ''), COALESCE(size_bytes, 0), COALESCE(created_at, '')
+            FROM client_initial_questionnaire_files
+            WHERE assignment_id = ? AND question_id = ?
+            ORDER BY id ASC
+            """,
+            (int(assignment_id), int(question_id)),
+        )
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        out.append(
+            {
+                'id': int(row[0]),
+                'assignment_id': int(row[1]),
+                'question_id': int(row[2]),
+                'original_name': row[3],
+                'stored_path': row[4],
+                'mime_type': row[5],
+                'size_bytes': int(row[6] or 0),
+                'created_at': row[7],
+            }
+        )
+    return out
+
+
+def create_initial_questionnaire_version_copy(title='', description='', source_version_id=None):
+    source_version_id_i = int(source_version_id or 0)
+    if source_version_id_i <= 0:
+        source_version_id_i = get_active_initial_questionnaire_version_id()
+    source = get_initial_questionnaire_structure(source_version_id_i, include_inactive=True)
+    if not source.get('version'):
+        return None
+
+    version_title = str(title or '').strip() or f"{source['version']['title']} (copia)"
+    version_description = str(description or '').strip() or str(source['version'].get('description') or '').strip()
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO initial_questionnaire_versions(title, description, status, is_active, created_at, published_at) VALUES(?,?, 'draft', 0, datetime('now'), NULL)",
+        (version_title, version_description),
+    )
+    new_version_id = int(cur.lastrowid)
+
+    question_id_map = {}
+    for s_idx, section in enumerate(source.get('sections') or [], start=1):
+        cur.execute(
+            """
+            INSERT INTO initial_questionnaire_sections(version_id, section_key, title, help_text, sort_order, is_active)
+            VALUES(?,?,?,?,?,?)
+            """,
+            (
+                new_version_id,
+                str(section.get('section_key') or '').strip() or None,
+                str(section.get('title') or f'Sección {s_idx}').strip(),
+                str(section.get('help_text') or '').strip() or None,
+                int(section.get('sort_order') or s_idx),
+                1 if int(section.get('is_active') or 0) == 1 else 0,
+            ),
+        )
+        new_section_id = int(cur.lastrowid)
+        for q_idx, question in enumerate(section.get('questions') or [], start=1):
+            cur.execute(
+                """
+                INSERT INTO initial_questionnaire_questions(
+                    section_id, question_key, label, question_type, is_required, is_active,
+                    help_text, placeholder, options_json, validation_json, condition_json, sort_order
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    new_section_id,
+                    str(question.get('question_key') or '').strip() or None,
+                    str(question.get('label') or f'Pregunta {q_idx}').strip(),
+                    str(question.get('question_type') or 'text_short').strip(),
+                    1 if int(question.get('is_required') or 0) == 1 else 0,
+                    1 if int(question.get('is_active') or 0) == 1 else 0,
+                    str(question.get('help_text') or '').strip() or None,
+                    str(question.get('placeholder') or '').strip() or None,
+                    json.dumps(question.get('options') or [], ensure_ascii=False),
+                    json.dumps(question.get('validation') or {}, ensure_ascii=False),
+                    json.dumps(question.get('condition') or {}, ensure_ascii=False) if question.get('condition') else None,
+                    int(question.get('sort_order') or q_idx),
+                ),
+            )
+            question_id_map[int(question.get('id') or 0)] = int(cur.lastrowid)
+
+    # Rewire condition references to new question ids.
+    cur.execute(
+        "SELECT id, COALESCE(condition_json, '') FROM initial_questionnaire_questions WHERE section_id IN (SELECT id FROM initial_questionnaire_sections WHERE version_id = ?)",
+        (new_version_id,),
+    )
+    for qid, condition_json in cur.fetchall():
+        if not condition_json:
+            continue
+        try:
+            condition = json.loads(condition_json)
+        except Exception:
+            continue
+        if not isinstance(condition, dict):
+            continue
+        old_dep = int(condition.get('depends_on_question_id') or 0)
+        if old_dep <= 0:
+            continue
+        new_dep = question_id_map.get(old_dep)
+        if not new_dep:
+            continue
+        condition['depends_on_question_id'] = int(new_dep)
+        cur.execute(
+            "UPDATE initial_questionnaire_questions SET condition_json = ? WHERE id = ?",
+            (json.dumps(condition, ensure_ascii=False), int(qid)),
+        )
+
+    conn.commit()
+    conn.close()
+    return new_version_id
+
+
+def publish_initial_questionnaire_version(version_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE initial_questionnaire_versions SET is_active = 0")
+    cur.execute(
+        "UPDATE initial_questionnaire_versions SET status = 'published', is_active = 1, published_at = datetime('now') WHERE id = ?",
+        (int(version_id),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_initial_questionnaire_section(version_id, title='Nueva sección'):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM initial_questionnaire_sections WHERE version_id = ?",
+        (int(version_id),),
+    )
+    next_sort = int(cur.fetchone()[0] or 1)
+    cur.execute(
+        "INSERT INTO initial_questionnaire_sections(version_id, section_key, title, help_text, sort_order, is_active) VALUES(?,?,?,?,?,1)",
+        (int(version_id), None, str(title or 'Nueva sección').strip(), None, next_sort),
+    )
+    section_id = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+    return section_id
+
+
+def update_initial_questionnaire_section(section_id, title=None, help_text=None, is_active=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    sets = []
+    vals = []
+    if title is not None:
+        sets.append("title = ?")
+        vals.append(str(title).strip() or 'Sección')
+    if help_text is not None:
+        sets.append("help_text = ?")
+        vals.append(str(help_text).strip() or None)
+    if is_active is not None:
+        sets.append("is_active = ?")
+        vals.append(1 if int(is_active or 0) == 1 else 0)
+    if sets:
+        vals.append(int(section_id))
+        cur.execute(f"UPDATE initial_questionnaire_sections SET {', '.join(sets)} WHERE id = ?", tuple(vals))
+        conn.commit()
+    conn.close()
+
+
+def delete_initial_questionnaire_section(section_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM initial_questionnaire_questions WHERE section_id = ?", (int(section_id),))
+    qids = [int(r[0]) for r in cur.fetchall()]
+    if qids:
+        placeholders = ','.join(['?'] * len(qids))
+        cur.execute(f"DELETE FROM client_initial_questionnaire_answers WHERE question_id IN ({placeholders})", tuple(qids))
+        cur.execute(f"DELETE FROM client_initial_questionnaire_files WHERE question_id IN ({placeholders})", tuple(qids))
+    cur.execute("DELETE FROM initial_questionnaire_questions WHERE section_id = ?", (int(section_id),))
+    cur.execute("DELETE FROM initial_questionnaire_sections WHERE id = ?", (int(section_id),))
+    conn.commit()
+    conn.close()
+
+
+def reorder_initial_questionnaire_sections(version_id, section_ids):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    ordered = []
+    seen = set()
+    for sid in section_ids or []:
+        try:
+            sid_i = int(sid)
+        except Exception:
+            continue
+        if sid_i in seen:
+            continue
+        seen.add(sid_i)
+        ordered.append(sid_i)
+    cur.execute("SELECT id FROM initial_questionnaire_sections WHERE version_id = ? ORDER BY sort_order, id", (int(version_id),))
+    for (sid,) in cur.fetchall():
+        sid_i = int(sid)
+        if sid_i not in seen:
+            ordered.append(sid_i)
+    for idx, sid_i in enumerate(ordered, start=1):
+        cur.execute("UPDATE initial_questionnaire_sections SET sort_order = ? WHERE id = ?", (idx, sid_i))
+    conn.commit()
+    conn.close()
+
+
+def add_initial_questionnaire_question(section_id, label='Nueva pregunta', question_type='text_short'):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM initial_questionnaire_questions WHERE section_id = ?",
+        (int(section_id),),
+    )
+    next_sort = int(cur.fetchone()[0] or 1)
+    cur.execute(
+        """
+        INSERT INTO initial_questionnaire_questions(
+            section_id, question_key, label, question_type, is_required, is_active,
+            help_text, placeholder, options_json, validation_json, condition_json, sort_order
+        ) VALUES(?,?,?,?,0,1,NULL,NULL,'[]','{}',NULL,?)
+        """,
+        (int(section_id), None, str(label or 'Nueva pregunta').strip(), str(question_type or 'text_short').strip(), next_sort),
+    )
+    question_id = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+    return question_id
+
+
+def update_initial_questionnaire_question(question_id, payload):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    allowed_types = {
+        'text_short', 'text_long', 'number', 'date', 'yes_no',
+        'single_choice', 'multi_choice', 'dropdown', 'file_multi'
+    }
+    label = str(payload.get('label') or '').strip() or 'Pregunta'
+    question_type = str(payload.get('question_type') or 'text_short').strip()
+    if question_type not in allowed_types:
+        question_type = 'text_short'
+    is_required = 1 if int(payload.get('is_required') or 0) == 1 else 0
+    is_active = 1 if int(payload.get('is_active') or 0) == 1 else 0
+    help_text = str(payload.get('help_text') or '').strip() or None
+    placeholder = str(payload.get('placeholder') or '').strip() or None
+    question_key = str(payload.get('question_key') or '').strip() or None
+    options = payload.get('options')
+    if not isinstance(options, list):
+        options = []
+    options = [str(x).strip() for x in options if str(x).strip()]
+    validation = payload.get('validation') if isinstance(payload.get('validation'), dict) else {}
+    condition = payload.get('condition') if isinstance(payload.get('condition'), dict) else None
+    condition_json = json.dumps(condition, ensure_ascii=False) if condition else None
+
+    cur.execute(
+        """
+        UPDATE initial_questionnaire_questions
+        SET question_key = ?, label = ?, question_type = ?, is_required = ?, is_active = ?,
+            help_text = ?, placeholder = ?, options_json = ?, validation_json = ?, condition_json = ?
+        WHERE id = ?
+        """,
+        (
+            question_key,
+            label,
+            question_type,
+            is_required,
+            is_active,
+            help_text,
+            placeholder,
+            json.dumps(options, ensure_ascii=False),
+            json.dumps(validation, ensure_ascii=False),
+            condition_json,
+            int(question_id),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_initial_questionnaire_question(question_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM client_initial_questionnaire_answers WHERE question_id = ?", (int(question_id),))
+    cur.execute("DELETE FROM client_initial_questionnaire_files WHERE question_id = ?", (int(question_id),))
+    cur.execute("DELETE FROM initial_questionnaire_questions WHERE id = ?", (int(question_id),))
+    conn.commit()
+    conn.close()
+
+
+def reorder_initial_questionnaire_questions(section_id, question_ids):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    ordered = []
+    seen = set()
+    for qid in question_ids or []:
+        try:
+            qid_i = int(qid)
+        except Exception:
+            continue
+        if qid_i in seen:
+            continue
+        seen.add(qid_i)
+        ordered.append(qid_i)
+    cur.execute("SELECT id FROM initial_questionnaire_questions WHERE section_id = ? ORDER BY sort_order, id", (int(section_id),))
+    for (qid,) in cur.fetchall():
+        qid_i = int(qid)
+        if qid_i not in seen:
+            ordered.append(qid_i)
+    for idx, qid_i in enumerate(ordered, start=1):
+        cur.execute("UPDATE initial_questionnaire_questions SET sort_order = ? WHERE id = ?", (idx, qid_i))
+    conn.commit()
+    conn.close()
+
+
+def build_initial_questionnaire_payload(client_id, assignment_id=None, include_inactive=False):
+    if assignment_id:
+        assignment = get_client_questionnaire_assignment(client_id, assignment_id)
+    else:
+        assignment = None
+    if not assignment:
+        assignment = get_or_create_client_questionnaire_assignment(client_id)
+    if not assignment:
+        return None
+    structure = get_initial_questionnaire_structure(assignment['version_id'], include_inactive=include_inactive)
+    answers = get_client_questionnaire_answers_map(assignment['id'])
+    files = list_client_questionnaire_files(assignment['id'])
+    files_by_question = {}
+    for f in files:
+        files_by_question.setdefault(int(f['question_id']), []).append(f)
+    return {
+        'assignment': assignment,
+        'structure': structure,
+        'answers': answers,
+        'files_by_question': files_by_question,
+    }
+
+
+def build_initial_questionnaire_pdf(client_id, assignment_id):
+    payload = build_initial_questionnaire_payload(client_id, assignment_id=assignment_id, include_inactive=True)
+    if not payload:
+        return None
+    structure = payload['structure']
+    if not structure.get('version'):
+        return None
+    answers = payload['answers']
+    files_by_question = payload['files_by_question']
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=A4)
+    width, height = A4
+    margin_x = 36
+    y = height - 48
+
+    def new_page():
+        nonlocal y
+        pdf.showPage()
+        y = height - 48
+
+    def draw_line(text, size=11, bold=False, extra=4):
+        nonlocal y
+        if y < 56:
+            new_page()
+        font_name = 'Helvetica-Bold' if bold else 'Helvetica'
+        pdf.setFont(font_name, size)
+        pdf.drawString(margin_x, y, str(text or ''))
+        y -= (size + extra)
+
+    version_title = structure['version'].get('title') or 'Cuestionario Inicial'
+    draw_line('Cuestionario Inicial', size=16, bold=True, extra=8)
+    draw_line('Version: ' + str(version_title), size=10)
+    draw_line('Cliente ID: ' + str(int(client_id)), size=10)
+    draw_line('Asignación ID: ' + str(int(assignment_id)), size=10)
+    draw_line('Estado: ' + str(payload['assignment'].get('status') or 'draft'), size=10, extra=12)
+
+    for section in structure.get('sections') or []:
+        draw_line(section.get('title') or 'Sección', size=13, bold=True, extra=6)
+        if section.get('help_text'):
+            draw_line(section.get('help_text'), size=9, extra=5)
+        for question in section.get('questions') or []:
+            qid = int(question.get('id') or 0)
+            answer_row = answers.get(qid) or {}
+            value = answer_row.get('value_text') or ''
+            value_json = answer_row.get('value_json')
+            if isinstance(value_json, list):
+                value = ', '.join([str(v) for v in value_json if str(v).strip()])
+            elif isinstance(value_json, dict) and value_json:
+                value = json.dumps(value_json, ensure_ascii=False)
+            value = value.strip() if isinstance(value, str) else str(value or '')
+            if not value:
+                value = '-'
+            draw_line('• ' + str(question.get('label') or 'Pregunta'), size=10, bold=True, extra=2)
+            for chunk in re.split(r'\n+', value):
+                txt = chunk.strip()
+                if not txt:
+                    continue
+                if len(txt) > 120:
+                    while txt:
+                        draw_line('  ' + txt[:120], size=10, extra=2)
+                        txt = txt[120:]
+                else:
+                    draw_line('  ' + txt, size=10, extra=2)
+            f_list = files_by_question.get(qid) or []
+            if f_list:
+                draw_line('  Adjuntos: ' + ', '.join([str(f.get('original_name') or 'archivo') for f in f_list]), size=9, extra=2)
+        y -= 4
+
+    pdf.save()
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, assignment_id=None, show_admin_controls=False):
+    payload = build_initial_questionnaire_payload(client_id, assignment_id=assignment_id, include_inactive=bool(admin_mode))
+    if not payload:
+        return '<p class="empty">No se pudo cargar el cuestionario.</p>'
+
+    assignment = payload['assignment']
+    structure = payload['structure']
+    answers = payload['answers']
+    files_by_question = payload['files_by_question']
+    version = structure.get('version') or {}
+
+    sections_html = []
+    flat_questions_payload = []
+    total_required = 0
+    total_required_answered = 0
+
+    for section_idx, section in enumerate(structure.get('sections') or [], start=1):
+        question_parts = []
+        for question in section.get('questions') or []:
+            qid = int(question.get('id') or 0)
+            qtype = str(question.get('question_type') or 'text_short')
+            required = int(question.get('is_required') or 0) == 1
+            label = html.escape(str(question.get('label') or 'Pregunta'))
+            help_text = str(question.get('help_text') or '').strip()
+            placeholder = html.escape(str(question.get('placeholder') or '').strip())
+            options = question.get('options') if isinstance(question.get('options'), list) else []
+            condition = question.get('condition') if isinstance(question.get('condition'), dict) else None
+            condition_attr = html.escape(json.dumps(condition, ensure_ascii=False), quote=True) if condition else ''
+
+            answer_row = answers.get(qid) or {}
+            value_text = str(answer_row.get('value_text') or '')
+            value_json = answer_row.get('value_json')
+
+            answered = False
+            if qtype == 'multi_choice':
+                answered = isinstance(value_json, list) and any(str(v).strip() for v in value_json)
+            elif qtype == 'file_multi':
+                answered = bool(files_by_question.get(qid))
+            else:
+                answered = bool(value_text.strip())
+            if required:
+                total_required += 1
+                if answered:
+                    total_required_answered += 1
+
+            flat_questions_payload.append({'id': qid, 'type': qtype, 'required': required, 'condition': condition})
+
+            common_attrs = (
+                f'data-question-id="{qid}" '
+                f'data-question-type="{html.escape(qtype)}" '
+                f'data-required="{1 if required else 0}" '
+                f'data-condition="{condition_attr}"'
+            )
+
+            input_html = ''
+            if qtype == 'text_long':
+                input_html = f'<textarea class="iq-input" {common_attrs} placeholder="{placeholder}">{html.escape(value_text)}</textarea>'
+            elif qtype == 'number':
+                input_html = f'<input class="iq-input" type="number" step="any" {common_attrs} value="{html.escape(value_text)}" placeholder="{placeholder}" />'
+            elif qtype == 'date':
+                input_html = f'<input class="iq-input" type="date" {common_attrs} value="{html.escape(value_text)}" />'
+            elif qtype in ('yes_no', 'single_choice', 'dropdown'):
+                if qtype == 'yes_no':
+                    select_options = [('', 'Selecciona una opción'), ('yes', 'Sí'), ('no', 'No')]
+                else:
+                    select_options = [('', 'Selecciona una opción')] + [(str(x), str(x)) for x in options]
+                current = str(value_text or '')
+                option_html = []
+                for opt_value, opt_label in select_options:
+                    selected = ' selected' if opt_value == current else ''
+                    option_html.append(f'<option value="{html.escape(opt_value)}"{selected}>{html.escape(opt_label)}</option>')
+                input_html = f'<select class="iq-input" {common_attrs}>' + ''.join(option_html) + '</select>'
+            elif qtype == 'multi_choice':
+                selected_values = [str(v) for v in value_json] if isinstance(value_json, list) else []
+                choice_html = []
+                for opt in options:
+                    opt_text = str(opt)
+                    checked = ' checked' if opt_text in selected_values else ''
+                    choice_html.append(
+                        '<label class="iq-choice-item">'
+                        f'<input type="checkbox" class="iq-input iq-input-multi" {common_attrs} data-option-value="{html.escape(opt_text)}"{checked} />'
+                        f'<span>{html.escape(opt_text)}</span>'
+                        '</label>'
+                    )
+                input_html = '<div class="iq-choice-list">' + ''.join(choice_html) + '</div>'
+            elif qtype == 'file_multi':
+                existing_files = files_by_question.get(qid) or []
+                list_html = ''.join([
+                    f'<li><a href="{html.escape(str(f.get("stored_path") or ""), quote=True)}" target="_blank">{html.escape(str(f.get("original_name") or "archivo"))}</a></li>'
+                    for f in existing_files
+                ])
+                input_html = (
+                    f'<input class="iq-file-input" type="file" {common_attrs} multiple '
+                    'accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.webp" />'
+                    f'<ul class="iq-file-list" data-file-list-for="{qid}">{list_html}</ul>'
+                )
+            else:
+                input_html = f'<input class="iq-input" type="text" {common_attrs} value="{html.escape(value_text)}" placeholder="{placeholder}" />'
+
+            required_badge = ' <span class="iq-required">*</span>' if required else ''
+            help_html = f'<p class="iq-help">{html.escape(help_text)}</p>' if help_text else ''
+            question_parts.append(
+                '<article class="iq-question" '
+                f'data-question-wrapper="{qid}">'
+                f'<label class="iq-question-title">{label}{required_badge}</label>'
+                f'{help_html}'
+                f'{input_html}'
+                f'<div class="iq-save-status" data-save-status="{qid}"></div>'
+                '</article>'
+            )
+
+        section_help = str(section.get('help_text') or '').strip()
+        section_help_html = f'<p class="iq-section-help">{html.escape(section_help)}</p>' if section_help else ''
+        sections_html.append(
+            '<section class="iq-section">'
+            f'<h3>{section_idx}. {html.escape(str(section.get("title") or "Sección"))}</h3>'
+            f'{section_help_html}'
+            + ''.join(question_parts) +
+            '</section>'
+        )
+
+    progress_pct = int(round((float(total_required_answered) / float(total_required)) * 100.0)) if total_required > 0 else 0
+    status_text = 'Enviado' if str(assignment.get('status') or '') == 'submitted' else 'Borrador'
+
+    versions_html = ''
+    if admin_mode and show_admin_controls:
+        assignment_rows = list_client_questionnaire_assignments(client_id)
+        option_rows = []
+        for row in assignment_rows:
+            selected = ' selected' if int(row['id']) == int(assignment['id']) else ''
+            label = f"V{int(row['version_id'])} · {row['version_title']} · {row['status']}"
+            option_rows.append(f'<option value="{int(row["id"])}"{selected}>{html.escape(label)}</option>')
+        versions_html = (
+            '<form method="get" class="iq-admin-assignment-form">'
+            f'<input type="hidden" name="id" value="{int(client_id)}" />'
+            '<input type="hidden" name="section" value="questionnaire" />'
+            '<label>Asignación/version'
+            f'<select name="questionnaire_assignment_id">{"".join(option_rows)}</select>'
+            '</label>'
+            '<button type="submit">Abrir</button>'
+            '</form>'
+        )
+
+    qmeta_json = json.dumps(flat_questions_payload, ensure_ascii=False)
+    return_to_json = json.dumps(str(return_to or ''), ensure_ascii=False)
+    export_href = f'/export_initial_questionnaire_pdf?client_id={int(client_id)}&assignment_id={int(assignment["id"])}'
+
+    script_html = (
+        '<script>'
+        '(function(){'
+        'const root=document.currentScript&&document.currentScript.parentElement;'
+        'if(!root||!root.classList.contains("iq-wrap")){return;}'
+        'const assignmentId=Number(root.dataset.assignmentId||0);'
+        'const clientId=Number(root.dataset.clientId||0);'
+        f'const qMeta={qmeta_json};'
+        f'const returnTo={return_to_json};'
+        'let saveTimer=null;'
+        'function setStatus(qid,msg,ok){const el=root.querySelector(`[data-save-status="${qid}"]`);if(!el){return;}el.textContent=msg||"";el.style.color=ok?"#166534":"#9f1239";}'
+        'function serializeInput(input){const qid=Number(input.dataset.questionId||0);const qtype=String(input.dataset.questionType||"text_short");if(qtype==="multi_choice"){const all=Array.from(root.querySelectorAll(`input.iq-input-multi[data-question-id="${qid}"]`));const vals=all.filter(x=>x.checked).map(x=>String(x.dataset.optionValue||""));return {question_id:qid,value_json:vals};}return {question_id:qid,value_text:String(input.value||"")};}'
+        'function evaluateCondition(cond){if(!cond||typeof cond!=="object"){return true;}const dep=Number(cond.depends_on_question_id||0);if(!dep){return true;}const sample=root.querySelector(`[data-question-id="${dep}"]`);if(!sample){return true;}const op=String(cond.operator||"equals");const expected=String(cond.value||"");const depType=String(sample.dataset.questionType||"text_short");let actual="";if(depType==="multi_choice"){const all=Array.from(root.querySelectorAll(`input.iq-input-multi[data-question-id="${dep}"]`));actual=all.filter(x=>x.checked).map(x=>String(x.dataset.optionValue||""));if(op==="equals"){return actual.includes(expected);}if(op==="not_equals"){return !actual.includes(expected);}if(op==="contains"){return actual.includes(expected);}return true;}actual=String(sample.value||"").trim();if(op==="equals"){return actual===expected;}if(op==="not_equals"){return actual!==expected;}if(op==="contains"){return actual.toLowerCase().includes(expected.toLowerCase());}return true;}'
+        'function refreshVisibility(){qMeta.forEach((q)=>{const wrap=root.querySelector(`[data-question-wrapper="${q.id}"]`);if(!wrap){return;}wrap.style.display=evaluateCondition(q.condition)?"":"none";});}'
+        'async function postEncoded(url,data){const body=new URLSearchParams();Object.keys(data||{}).forEach((k)=>{if(data[k]===undefined||data[k]===null){return;}if(Array.isArray(data[k])){body.set(k,JSON.stringify(data[k]));}else{body.set(k,String(data[k]));}});const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded;charset=UTF-8","X-Requested-With":"fetch"},body:body.toString()});if(!r.ok){throw new Error("request_failed");}return await r.json().catch(()=>({ok:true}));}'
+        'function queueSave(input){const qid=Number(input.dataset.questionId||0);if(!qid){return;}if(saveTimer){clearTimeout(saveTimer);}saveTimer=setTimeout(async()=>{const data=serializeInput(input);data.assignment_id=assignmentId;data.client_id=clientId;setStatus(qid,"Guardando...",true);try{await postEncoded("/save_client_initial_questionnaire_answer",data);setStatus(qid,"Guardado",true);}catch(_e){setStatus(qid,"Error al guardar",false);}refreshVisibility();},300);}'
+        'root.querySelectorAll(".iq-input").forEach((input)=>{input.addEventListener("change",()=>queueSave(input));input.addEventListener("blur",()=>queueSave(input));if(input.classList.contains("iq-input-multi")){input.addEventListener("click",()=>queueSave(input));}});'
+        'root.querySelectorAll(".iq-file-input").forEach((input)=>{input.addEventListener("change",async()=>{const qid=Number(input.dataset.questionId||0);const files=Array.from(input.files||[]);if(!qid||!files.length){return;}for(const f of files){const fd=new FormData();fd.append("assignment_id",String(assignmentId));fd.append("client_id",String(clientId));fd.append("question_id",String(qid));fd.append("file",f);setStatus(qid,"Subiendo archivo...",true);try{const r=await fetch("/upload_client_initial_questionnaire_file",{method:"POST",headers:{"X-Requested-With":"fetch"},body:fd});if(!r.ok){throw new Error("upload_failed");}const j=await r.json();const list=root.querySelector(`[data-file-list-for="${qid}"]`);if(list&&j&&j.file){const li=document.createElement("li");const a=document.createElement("a");a.href=String(j.file.stored_path||"#");a.target="_blank";a.textContent=String(j.file.original_name||"archivo");li.appendChild(a);list.appendChild(li);}setStatus(qid,"Archivo subido",true);}catch(_e){setStatus(qid,"Error al subir",false);}}queueSave(input);input.value="";});});'
+        'const submitBtn=root.querySelector("#iq-submit-btn");if(submitBtn){submitBtn.addEventListener("click",async()=>{submitBtn.disabled=true;try{await postEncoded("/submit_client_initial_questionnaire",{assignment_id:assignmentId,client_id:clientId,return_to:returnTo});window.location.reload();}catch(_e){submitBtn.disabled=false;alert("No se pudo enviar el cuestionario");}});}'
+        'const printBtn=root.querySelector("#iq-print-btn");if(printBtn){printBtn.addEventListener("click",()=>window.print());}'
+        'refreshVisibility();'
+        '})();'
+        '</script>'
+    )
+
+    styles_html = (
+        '<style>'
+        '.iq-wrap{display:grid;gap:14px;}'
+        '.iq-head h2{margin:0;font-size:1.2rem;color:#101318;}'
+        '.iq-meta{margin:4px 0 0;color:#6d7480;font-size:.86rem;}'
+        '.iq-progress{height:10px;border-radius:999px;background:#edf2f7;overflow:hidden;margin-top:6px;}'
+        '.iq-progress-bar{height:100%;background:linear-gradient(90deg,#0f766e,#10b981);}'
+        '.iq-progress-text{margin:6px 0 0;color:#475569;font-size:.82rem;font-weight:700;}'
+        '.iq-admin-assignment-form{display:flex;gap:8px;flex-wrap:wrap;align-items:end;border:1px solid #e8ebef;padding:10px;border-radius:12px;background:#fff;}'
+        '.iq-admin-assignment-form label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;color:#64748b;font-weight:700;}'
+        '.iq-admin-assignment-form select{padding:8px 10px;border:1px solid #d8dde6;border-radius:10px;min-width:260px;}'
+        '.iq-actions-top{display:flex;gap:8px;flex-wrap:wrap;}'
+        '.iq-section{border:1px solid #e8ebef;border-radius:14px;background:#fff;padding:12px;display:grid;gap:10px;}'
+        '.iq-section h3{margin:0;font-size:1.05rem;color:#101318;}'
+        '.iq-section-help{margin:0;color:#6d7480;font-size:.86rem;}'
+        '.iq-question{display:grid;gap:6px;padding:8px;border:1px solid #edf2f7;border-radius:10px;background:#fbfdff;}'
+        '.iq-question-title{font-weight:800;color:#101318;font-size:.92rem;}'
+        '.iq-required{color:#b91c1c;}'
+        '.iq-help{margin:0;color:#6d7480;font-size:.8rem;}'
+        '.iq-input{width:100%;padding:10px 11px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;box-sizing:border-box;}'
+        'textarea.iq-input{min-height:110px;resize:vertical;}'
+        '.iq-choice-list{display:grid;gap:6px;}'
+        '.iq-choice-item{display:flex;gap:8px;align-items:center;font-size:.9rem;color:#1f2937;}'
+        '.iq-file-list{margin:0;padding-left:18px;display:grid;gap:4px;}'
+        '.iq-file-list li a{color:#0f172a;text-decoration:none;font-weight:700;font-size:.84rem;}'
+        '.iq-file-list li a:hover{text-decoration:underline;}'
+        '.iq-save-status{font-size:.75rem;font-weight:700;min-height:1em;}'
+        '.iq-actions{display:flex;justify-content:flex-end;}'
+        '.iq-btn{display:inline-flex;align-items:center;justify-content:center;padding:9px 12px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;text-decoration:none;font-weight:700;cursor:pointer;}'
+        '.iq-btn:hover{background:#f8fafc;}'
+        '.iq-btn-primary{background:#0f766e;color:#fff;border:none;}'
+        '.iq-btn-primary:hover{background:#0b5f59;}'
+        '.iq-btn-secondary{background:#fff;}'
+        '@media (max-width:720px){.iq-actions{justify-content:stretch;}.iq-btn{width:100%;}}'
+        '</style>'
+    )
+
+    return (
+        '<div class="iq-wrap" '
+        f'data-assignment-id="{int(assignment["id"])}" '
+        f'data-client-id="{int(client_id)}" '
+        f'data-admin-mode="{1 if admin_mode else 0}" '
+        f'data-status="{html.escape(str(assignment.get("status") or "draft"), quote=True)}">'
+        '<div class="iq-head">'
+        f'<h2>{html.escape(str(version.get("title") or "Cuestionario Inicial"))}</h2>'
+        f'<p class="iq-meta">Estado: {html.escape(status_text)} · Último guardado: {html.escape(str(assignment.get("last_saved_at") or "-"))}</p>'
+        '<div class="iq-progress"><div class="iq-progress-bar" style="width:' + str(progress_pct) + '%"></div></div>'
+        f'<p class="iq-progress-text">Progreso de obligatorias: {total_required_answered}/{total_required} ({progress_pct}%)</p>'
+        '</div>'
+        + versions_html +
+        ('' if not (admin_mode and show_admin_controls) else (
+            '<div class="iq-actions-top">'
+            '<button type="button" class="iq-btn" id="iq-print-btn">Imprimir</button>'
+            f'<a class="iq-btn iq-btn-secondary" href="{html.escape(export_href, quote=True)}" target="_blank">Exportar PDF</a>'
+            '</div>'
+        ))
+        + ''.join(sections_html) +
+        '<div class="iq-actions">'
+        '<button type="button" class="iq-btn iq-btn-primary" id="iq-submit-btn">Enviar cuestionario</button>'
+        '</div>'
+        + script_html +
+        styles_html +
+        '</div>'
+    )
+
+
+def render_initial_questionnaire_editor_page(version_id=None, msg=''):
+    versions = get_initial_questionnaire_versions()
+    active_id = get_active_initial_questionnaire_version_id()
+    selected_version_id = int(version_id or 0)
+    if selected_version_id <= 0:
+        selected_version_id = active_id
+    if selected_version_id <= 0 and versions:
+        selected_version_id = int(versions[0][0])
+
+    structure = get_initial_questionnaire_structure(selected_version_id, include_inactive=True) if selected_version_id > 0 else {'version': None, 'sections': []}
+    version = structure.get('version') or {}
+
+    version_options = []
+    for row in versions:
+        vid = int(row[0])
+        title = str(row[1] or 'Cuestionario')
+        status = str(row[3] or 'draft')
+        is_active = int(row[4] or 0) == 1
+        selected = ' selected' if vid == selected_version_id else ''
+        suffix = ' · ACTIVA' if is_active else ''
+        version_options.append(
+            f'<option value="{vid}"{selected}>V{vid} · {html.escape(title)} · {html.escape(status)}{suffix}</option>'
+        )
+
+    section_blocks = []
+    for section in structure.get('sections') or []:
+        sid = int(section.get('id') or 0)
+        question_rows = []
+        for question in section.get('questions') or []:
+            qid = int(question.get('id') or 0)
+            options_text = json.dumps(question.get('options') or [], ensure_ascii=False)
+            validation_text = json.dumps(question.get('validation') or {}, ensure_ascii=False)
+            condition_text = json.dumps(question.get('condition') or {}, ensure_ascii=False)
+            question_rows.append(
+                '<details class="iqe-q">'
+                f'<summary>{html.escape(str(question.get("label") or "Pregunta"))}</summary>'
+                '<form method="post" action="/initial_questionnaire_editor" class="iqe-form">'
+                '<input type="hidden" name="action" value="update_question" />'
+                f'<input type="hidden" name="question_id" value="{qid}" />'
+                f'<input type="hidden" name="version_id" value="{selected_version_id}" />'
+                '<label>Etiqueta<input name="label" value="' + html.escape(str(question.get('label') or ''), quote=True) + '" /></label>'
+                '<label>Tipo<select name="question_type">'
+                + ''.join([
+                    f'<option value="{t}"{" selected" if str(question.get("question_type") or "") == t else ""}>{t}</option>'
+                    for t in ('text_short', 'text_long', 'number', 'date', 'yes_no', 'single_choice', 'multi_choice', 'dropdown', 'file_multi')
+                ])
+                + '</select></label>'
+                '<label>Obligatoria<select name="is_required"><option value="0">No</option><option value="1"'
+                + (' selected' if int(question.get('is_required') or 0) == 1 else '')
+                + '>Sí</option></select></label>'
+                '<label>Activa<select name="is_active"><option value="1"'
+                + (' selected' if int(question.get('is_active') or 0) == 1 else '')
+                + '>Sí</option><option value="0"'
+                + (' selected' if int(question.get('is_active') or 0) != 1 else '')
+                + '>No</option></select></label>'
+                '<label>Ayuda<input name="help_text" value="' + html.escape(str(question.get('help_text') or ''), quote=True) + '" /></label>'
+                '<label>Placeholder<input name="placeholder" value="' + html.escape(str(question.get('placeholder') or ''), quote=True) + '" /></label>'
+                '<label>Opciones (JSON array)<textarea name="options_json">' + html.escape(options_text) + '</textarea></label>'
+                '<label>Validación (JSON object)<textarea name="validation_json">' + html.escape(validation_text) + '</textarea></label>'
+                '<label>Condición (JSON object)<textarea name="condition_json">' + html.escape(condition_text) + '</textarea></label>'
+                '<div class="iqe-actions">'
+                '<button type="submit">Guardar pregunta</button>'
+                '</div>'
+                '</form>'
+                '<form method="post" action="/initial_questionnaire_editor" class="iqe-inline">'
+                '<input type="hidden" name="action" value="delete_question" />'
+                f'<input type="hidden" name="question_id" value="{qid}" />'
+                f'<input type="hidden" name="version_id" value="{selected_version_id}" />'
+                '<button type="submit" class="danger">Eliminar pregunta</button>'
+                '</form>'
+                '</details>'
+            )
+
+        section_blocks.append(
+            '<section class="iqe-section">'
+            f'<h3>{html.escape(str(section.get("title") or "Sección"))}</h3>'
+            '<form method="post" action="/initial_questionnaire_editor" class="iqe-form">'
+            '<input type="hidden" name="action" value="update_section" />'
+            f'<input type="hidden" name="section_id" value="{sid}" />'
+            f'<input type="hidden" name="version_id" value="{selected_version_id}" />'
+            '<label>Título<input name="title" value="' + html.escape(str(section.get('title') or ''), quote=True) + '" /></label>'
+            '<label>Ayuda<input name="help_text" value="' + html.escape(str(section.get('help_text') or ''), quote=True) + '" /></label>'
+            '<label>Activa<select name="is_active"><option value="1"'
+            + (' selected' if int(section.get('is_active') or 0) == 1 else '')
+            + '>Sí</option><option value="0"'
+            + (' selected' if int(section.get('is_active') or 0) != 1 else '')
+            + '>No</option></select></label>'
+            '<div class="iqe-actions"><button type="submit">Guardar sección</button></div>'
+            '</form>'
+            '<form method="post" action="/initial_questionnaire_editor" class="iqe-form">'
+            '<input type="hidden" name="action" value="add_question" />'
+            f'<input type="hidden" name="section_id" value="{sid}" />'
+            f'<input type="hidden" name="version_id" value="{selected_version_id}" />'
+            '<label>Nueva pregunta<input name="label" placeholder="Nueva pregunta" /></label>'
+            '<label>Tipo<select name="question_type">'
+            + ''.join([f'<option value="{t}">{t}</option>' for t in ('text_short', 'text_long', 'number', 'date', 'yes_no', 'single_choice', 'multi_choice', 'dropdown', 'file_multi')])
+            + '</select></label>'
+            '<div class="iqe-actions"><button type="submit">Añadir pregunta</button></div>'
+            '</form>'
+            '<div class="iqe-questions">' + ''.join(question_rows) + '</div>'
+            '<form method="post" action="/initial_questionnaire_editor" class="iqe-inline">'
+            '<input type="hidden" name="action" value="delete_section" />'
+            f'<input type="hidden" name="section_id" value="{sid}" />'
+            f'<input type="hidden" name="version_id" value="{selected_version_id}" />'
+            '<button type="submit" class="danger">Eliminar sección</button>'
+            '</form>'
+            '</section>'
+        )
+
+    return f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <title>Editor de cuestionario inicial</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:#f6f7f9;color:#101318;}}
+        .page{{max-width:1100px;margin:0 auto;padding:24px;display:grid;gap:12px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:14px;padding:14px;}}
+        .msg{{padding:10px;border-radius:10px;background:#fef4ea;border:1px solid #f5dcc0;color:#4d3217;}}
+        .row{{display:flex;gap:8px;flex-wrap:wrap;align-items:end;}}
+        .iqe-form{{display:grid;gap:8px;grid-template-columns:repeat(2,minmax(180px,1fr));}}
+        .iqe-form label{{display:flex;flex-direction:column;gap:4px;font-size:.8rem;color:#64748b;font-weight:700;}}
+        .iqe-form input,.iqe-form select,.iqe-form textarea,.row select,.row input{{font:inherit;padding:8px 10px;border:1px solid #d8dde6;border-radius:9px;background:#fff;color:#101318;}}
+        .iqe-form textarea{{min-height:80px;resize:vertical;grid-column:1 / -1;}}
+        .iqe-actions{{grid-column:1 / -1;display:flex;justify-content:flex-end;}}
+        button{{padding:8px 12px;border-radius:9px;border:1px solid #d8dde6;background:#fff;color:#101318;font-weight:700;cursor:pointer;}}
+        .danger{{border-color:#fecaca;background:#fff1f2;color:#9f1239;}}
+        .iqe-section{{border:1px solid #e8ebef;border-radius:12px;padding:10px;display:grid;gap:8px;}}
+        .iqe-q{{border:1px solid #edf2f7;border-radius:10px;padding:8px;background:#fbfdff;}}
+        .iqe-q summary{{cursor:pointer;font-weight:700;}}
+        .iqe-inline{{margin-top:6px;}}
+    </style>
+</head>
+<body>
+    <div class="page">
+        {home_link()}
+        <div class="card">
+            <h1>Editor de Cuestionario Inicial</h1>
+            {'<div class="msg">' + html.escape(msg) + '</div>' if msg else ''}
+            <form method="get" class="row" action="/initial_questionnaire_editor">
+                <label>Versión
+                    <select name="version_id">{''.join(version_options)}</select>
+                </label>
+                <button type="submit">Abrir</button>
+            </form>
+            <div class="row" style="margin-top:8px;">
+                <form method="post" action="/initial_questionnaire_editor">
+                    <input type="hidden" name="action" value="publish_version" />
+                    <input type="hidden" name="version_id" value="{selected_version_id}" />
+                    <button type="submit">Publicar versión actual</button>
+                </form>
+                <form method="post" action="/initial_questionnaire_editor" class="row">
+                    <input type="hidden" name="action" value="create_version_copy" />
+                    <input type="hidden" name="source_version_id" value="{selected_version_id}" />
+                    <input name="title" placeholder="Título de nueva versión" />
+                    <button type="submit">Clonar versión</button>
+                </form>
+            </div>
+            <p style="margin:8px 0 0;color:#64748b;">Versión activa: <strong>{int(active_id or 0)}</strong> · Editando: <strong>{int(selected_version_id or 0)}</strong></p>
+        </div>
+        <div class="card">
+            <h2>Secciones</h2>
+            <form method="post" action="/initial_questionnaire_editor" class="row">
+                <input type="hidden" name="action" value="add_section" />
+                <input type="hidden" name="version_id" value="{selected_version_id}" />
+                <input name="title" placeholder="Nueva sección" />
+                <button type="submit">Añadir sección</button>
+            </form>
+            <div style="display:grid;gap:10px;margin-top:10px;">{''.join(section_blocks)}</div>
+        </div>
+    </div>
+</body>
+</html>
+    '''
+
+
+def get_weekly_feedback_default_definition():
+    return {
+        'title': 'Feedback Semanal',
+        'description': 'Formulario semanal para registrar sensaciones, cumplimiento y ajustes necesarios.',
+        'sections': [
+            {
+                'key': 'weekly_feedback',
+                'title': 'Feedback semanal',
+                'help_text': 'Respuestas pensadas para revisar la semana de forma simple y rápida.',
+                'questions': [
+                    {
+                        'key': 'training_days_missed',
+                        'label': '¿Cuántos días entrenaste esta semana? ¿Cuántos te saltaste?',
+                        'type': 'text_long',
+                        'required': 0,
+                        'help_text': '',
+                        'placeholder': 'Cuéntame cómo fue tu entrenamiento esta semana',
+                    },
+                    {
+                        'key': 'cardio_missed',
+                        'label': '¿Cuántos días fallaste con el cardio?',
+                        'type': 'single_choice',
+                        'required': 0,
+                        'help_text': '',
+                        'options': ['💚 Ninguna', '💛 1', '🧡 2-3', '❤️ Más de 3'],
+                    },
+                    {
+                        'key': 'planned_meals_missed',
+                        'label': '¿Cuántas comidas planificadas te saltaste esta semana?',
+                        'type': 'single_choice',
+                        'required': 0,
+                        'help_text': '',
+                        'options': ['💚 Ninguna', '💛 1', '🧡 2-3', '❤️ Más de 3'],
+                    },
+                    {
+                        'key': 'nutrition_adherence',
+                        'label': '¿Seguiste el plan nutricional al 100%?',
+                        'type': 'single_choice',
+                        'required': 0,
+                        'help_text': '',
+                        'options': [
+                            '✅ Sí',
+                            '⚠️ No, pero en su mayoría',
+                            '😓 No, tuve varias desviaciones',
+                            '❌ No, bastante mal, me costó seguirlo',
+                        ],
+                    },
+                    {
+                        'key': 'failure_aspects',
+                        'label': '¿En qué aspectos crees que fallaste esta semana?',
+                        'type': 'multi_choice',
+                        'required': 0,
+                        'help_text': '',
+                        'options': [
+                            '🏋️‍♂️ Falta de entrenamiento',
+                            '😞 Poca motivación',
+                            '🍔 Mala organización de comidas',
+                            '💤 Falta de descanso o sueño',
+                            '😵 Estrés o factores externos',
+                            '🔥 Ninguno',
+                        ],
+                    },
+                    {
+                        'key': 'week_rating',
+                        'label': '¿Cómo valorarías tu semana en general?',
+                        'type': 'number',
+                        'required': 0,
+                        'help_text': '',
+                        'placeholder': '1-10',
+                        'validation': {'min': 1, 'max': 10},
+                    },
+                    {
+                        'key': 'need_plan_changes',
+                        'label': '¿Sientes que necesitas cambios en tu plan?',
+                        'type': 'single_choice',
+                        'required': 0,
+                        'help_text': '',
+                        'options': [
+                            '🙌 No, me siento bien con el plan actual.',
+                            '💪🥗 Sí, necesito ajustes en la alimentación y/o entrenamiento.',
+                            '📉 Sí, no estoy progresando y necesito cambios.',
+                        ],
+                    },
+                    {
+                        'key': 'weekly_comments',
+                        'label': '¿Algo más que quieras comentarme sobre tu progreso esta semana?',
+                        'type': 'text_long',
+                        'required': 0,
+                        'help_text': '',
+                        'placeholder': 'Escribe aquí cualquier detalle adicional',
+                    },
+                ],
+            }
+        ],
+    }
+
+
+def _weekly_feedback_parse_options_text(value):
+    options = []
+    for raw_line in re.split(r'[\n\r]+', str(value or '').strip()):
+        option = raw_line.strip()
+        if option and option not in options:
+            options.append(option)
+    return options
+
+
+def ensure_weekly_feedback_tables(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS weekly_feedback_versions (
+        id INTEGER PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        status TEXT NOT NULL DEFAULT 'draft',
+        is_active INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        published_at TEXT
+    )
+    """
+    )
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS weekly_feedback_sections (
+        id INTEGER PRIMARY KEY,
+        version_id INTEGER NOT NULL,
+        section_key TEXT,
+        title TEXT NOT NULL,
+        help_text TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        FOREIGN KEY(version_id) REFERENCES weekly_feedback_versions(id)
+    )
+    """
+    )
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS weekly_feedback_questions (
+        id INTEGER PRIMARY KEY,
+        section_id INTEGER NOT NULL,
+        question_key TEXT,
+        label TEXT NOT NULL,
+        question_type TEXT NOT NULL DEFAULT 'text_long',
+        is_required INTEGER NOT NULL DEFAULT 0,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        help_text TEXT,
+        placeholder TEXT,
+        options_json TEXT,
+        validation_json TEXT,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        FOREIGN KEY(section_id) REFERENCES weekly_feedback_sections(id)
+    )
+    """
+    )
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_weekly_feedback_submissions (
+        id INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL,
+        version_id INTEGER NOT NULL,
+        scheduled_date TEXT,
+        submitted_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(client_id) REFERENCES clients(id),
+        FOREIGN KEY(version_id) REFERENCES weekly_feedback_versions(id)
+    )
+    """
+    )
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_weekly_feedback_answers (
+        submission_id INTEGER NOT NULL,
+        question_id INTEGER NOT NULL,
+        value_text TEXT,
+        value_json TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(submission_id, question_id),
+        FOREIGN KEY(submission_id) REFERENCES client_weekly_feedback_submissions(id) ON DELETE CASCADE,
+        FOREIGN KEY(question_id) REFERENCES weekly_feedback_questions(id)
+    )
+    """
+    )
+    cur.execute(
+        """
+    CREATE TABLE IF NOT EXISTS client_weekly_feedback_schedule (
+        id INTEGER PRIMARY KEY,
+        client_id INTEGER NOT NULL UNIQUE,
+        weekday INTEGER NOT NULL DEFAULT 1,
+        repeat_enabled INTEGER NOT NULL DEFAULT 1,
+        is_active INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(client_id) REFERENCES clients(id)
+    )
+    """
+    )
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_weekly_feedback_sections_version ON weekly_feedback_sections(version_id, sort_order, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_weekly_feedback_questions_section ON weekly_feedback_questions(section_id, sort_order, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_weekly_feedback_submissions_client_date ON client_weekly_feedback_submissions(client_id, submitted_at DESC, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_weekly_feedback_answers_submission ON client_weekly_feedback_answers(submission_id, question_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_weekly_feedback_schedule_client ON client_weekly_feedback_schedule(client_id)")
+
+    cur.execute("SELECT COUNT(*) FROM weekly_feedback_versions")
+    has_versions = int(cur.fetchone()[0] or 0)
+    if has_versions == 0:
+        definition = get_weekly_feedback_default_definition()
+        cur.execute(
+            "INSERT INTO weekly_feedback_versions(title, description, status, is_active, created_at, published_at) VALUES(?,?, 'published', 1, datetime('now'), datetime('now'))",
+            (definition.get('title') or 'Feedback Semanal', definition.get('description') or ''),
+        )
+        version_id = int(cur.lastrowid)
+        for s_idx, section in enumerate(definition.get('sections') or [], start=1):
+            cur.execute(
+                "INSERT INTO weekly_feedback_sections(version_id, section_key, title, help_text, sort_order, is_active) VALUES(?,?,?,?,?,1)",
+                (
+                    version_id,
+                    str(section.get('key') or '').strip() or None,
+                    str(section.get('title') or f'Sección {s_idx}').strip(),
+                    str(section.get('help_text') or '').strip() or None,
+                    int(section.get('sort_order') or s_idx),
+                ),
+            )
+            section_id = int(cur.lastrowid)
+            for q_idx, question in enumerate(section.get('questions') or [], start=1):
+                cur.execute(
+                    """
+                    INSERT INTO weekly_feedback_questions(
+                        section_id, question_key, label, question_type, is_required, is_active,
+                        help_text, placeholder, options_json, validation_json, sort_order
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        section_id,
+                        str(question.get('key') or '').strip() or None,
+                        str(question.get('label') or f'Pregunta {q_idx}').strip(),
+                        str(question.get('type') or 'text_long').strip(),
+                        1 if int(question.get('required') or 0) == 1 else 0,
+                        1,
+                        str(question.get('help_text') or '').strip() or None,
+                        str(question.get('placeholder') or '').strip() or None,
+                        json.dumps(question.get('options') or [], ensure_ascii=False),
+                        json.dumps(question.get('validation') or {}, ensure_ascii=False),
+                        int(question.get('sort_order') or q_idx),
+                    ),
+                )
+
+    conn.commit()
+    if should_close:
+        conn.close()
+
+
+def get_weekly_feedback_versions():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, COALESCE(description, ''), COALESCE(status, 'draft'), COALESCE(is_active, 0),
+               COALESCE(created_at, ''), COALESCE(published_at, '')
+        FROM weekly_feedback_versions
+        ORDER BY id DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        out.append({
+            'id': int(row[0]),
+            'title': row[1],
+            'description': row[2],
+            'status': row[3],
+            'is_active': int(row[4] or 0),
+            'created_at': row[5],
+            'published_at': row[6],
+        })
+    return out
+
+
+def get_active_weekly_feedback_version_id():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM weekly_feedback_versions WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return int(row[0])
+    versions = get_weekly_feedback_versions()
+    return int(versions[0]['id']) if versions else 0
+
+
+def get_weekly_feedback_structure(version_id, include_inactive=False):
+    version_id_i = int(version_id or 0)
+    if version_id_i <= 0:
+        return {'version': None, 'sections': []}
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, COALESCE(description, ''), COALESCE(status, 'draft'), COALESCE(is_active, 0),
+               COALESCE(created_at, ''), COALESCE(published_at, '')
+        FROM weekly_feedback_versions WHERE id = ? LIMIT 1
+        """,
+        (version_id_i,),
+    )
+    version = cur.fetchone()
+    if not version:
+        conn.close()
+        return {'version': None, 'sections': []}
+
+    section_where = '' if include_inactive else 'AND COALESCE(is_active, 1) = 1'
+    cur.execute(
+        f"""
+        SELECT id, COALESCE(section_key, ''), title, COALESCE(help_text, ''), COALESCE(sort_order, 0), COALESCE(is_active, 1)
+        FROM weekly_feedback_sections
+        WHERE version_id = ? {section_where}
+        ORDER BY COALESCE(sort_order, 0), id
+        """,
+        (version_id_i,),
+    )
+    section_rows = cur.fetchall()
+    sections = []
+    for sid, section_key, title, help_text, sort_order, is_active in section_rows:
+        q_where = '' if include_inactive else 'AND COALESCE(is_active, 1) = 1'
+        cur.execute(
+            f"""
+            SELECT id, COALESCE(question_key, ''), label, question_type, COALESCE(is_required, 0), COALESCE(is_active, 1),
+                   COALESCE(help_text, ''), COALESCE(placeholder, ''), COALESCE(options_json, ''),
+                   COALESCE(validation_json, ''), COALESCE(sort_order, 0)
+            FROM weekly_feedback_questions
+            WHERE section_id = ? {q_where}
+            ORDER BY COALESCE(sort_order, 0), id
+            """,
+            (int(sid),),
+        )
+        questions = []
+        for qrow in cur.fetchall():
+            qid, question_key, label, question_type, is_required, q_active, q_help_text, placeholder, options_json, validation_json, q_sort_order = qrow
+            try:
+                options = json.loads(options_json) if options_json else []
+            except Exception:
+                options = []
+            if not isinstance(options, list):
+                options = []
+            try:
+                validation = json.loads(validation_json) if validation_json else {}
+            except Exception:
+                validation = {}
+            if not isinstance(validation, dict):
+                validation = {}
+            questions.append({
+                'id': int(qid),
+                'question_key': question_key,
+                'label': label,
+                'question_type': question_type,
+                'is_required': int(is_required or 0),
+                'is_active': int(q_active or 0),
+                'help_text': q_help_text,
+                'placeholder': placeholder,
+                'options': options,
+                'validation': validation,
+                'sort_order': int(q_sort_order or 0),
+            })
+        sections.append({
+            'id': int(sid),
+            'section_key': section_key,
+            'title': title,
+            'help_text': help_text,
+            'sort_order': int(sort_order or 0),
+            'is_active': int(is_active or 0),
+            'questions': questions,
+        })
+    conn.close()
+    return {
+        'version': {
+            'id': int(version[0]),
+            'title': version[1],
+            'description': version[2],
+            'status': version[3],
+            'is_active': int(version[4] or 0),
+            'created_at': version[5],
+            'published_at': version[6],
+        },
+        'sections': sections,
+    }
+
+
+def create_weekly_feedback_version_copy(title='', description='', source_version_id=None):
+    source_version_id_i = int(source_version_id or 0)
+    if source_version_id_i <= 0:
+        source_version_id_i = get_active_weekly_feedback_version_id()
+    source = get_weekly_feedback_structure(source_version_id_i, include_inactive=True)
+    if not source.get('version'):
+        return None
+
+    version_title = str(title or '').strip() or f"{source['version']['title']} (copia)"
+    version_description = str(description or '').strip() or str(source['version'].get('description') or '').strip()
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO weekly_feedback_versions(title, description, status, is_active, created_at, published_at) VALUES(?,?, 'draft', 0, datetime('now'), NULL)",
+        (version_title, version_description),
+    )
+    new_version_id = int(cur.lastrowid)
+
+    for s_idx, section in enumerate(source.get('sections') or [], start=1):
+        cur.execute(
+            "INSERT INTO weekly_feedback_sections(version_id, section_key, title, help_text, sort_order, is_active) VALUES(?,?,?,?,?,?)",
+            (
+                new_version_id,
+                str(section.get('section_key') or '').strip() or None,
+                str(section.get('title') or f'Sección {s_idx}').strip(),
+                str(section.get('help_text') or '').strip() or None,
+                int(section.get('sort_order') or s_idx),
+                1 if int(section.get('is_active') or 0) == 1 else 0,
+            ),
+        )
+        new_section_id = int(cur.lastrowid)
+        for q_idx, question in enumerate(section.get('questions') or [], start=1):
+            cur.execute(
+                """
+                INSERT INTO weekly_feedback_questions(
+                    section_id, question_key, label, question_type, is_required, is_active,
+                    help_text, placeholder, options_json, validation_json, sort_order
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                    new_section_id,
+                    str(question.get('question_key') or '').strip() or None,
+                    str(question.get('label') or f'Pregunta {q_idx}').strip(),
+                    str(question.get('question_type') or 'text_long').strip(),
+                    1 if int(question.get('is_required') or 0) == 1 else 0,
+                    1 if int(question.get('is_active') or 0) == 1 else 0,
+                    str(question.get('help_text') or '').strip() or None,
+                    str(question.get('placeholder') or '').strip() or None,
+                    json.dumps(question.get('options') or [], ensure_ascii=False),
+                    json.dumps(question.get('validation') or {}, ensure_ascii=False),
+                    int(question.get('sort_order') or q_idx),
+                ),
+            )
+    conn.commit()
+    conn.close()
+    return new_version_id
+
+
+def publish_weekly_feedback_version(version_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE weekly_feedback_versions SET is_active = 0")
+    cur.execute(
+        "UPDATE weekly_feedback_versions SET status = 'published', is_active = 1, published_at = datetime('now') WHERE id = ?",
+        (int(version_id),),
+    )
+    conn.commit()
+    conn.close()
+
+
+def add_weekly_feedback_question(section_id, label='Nueva pregunta', question_type='text_long'):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COALESCE(MAX(sort_order), 0) + 1 FROM weekly_feedback_questions WHERE section_id = ?", (int(section_id),))
+    next_order = int(cur.fetchone()[0] or 1)
+    cur.execute(
+        """
+        INSERT INTO weekly_feedback_questions(
+            section_id, question_key, label, question_type, is_required, is_active,
+            help_text, placeholder, options_json, validation_json, sort_order
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+        """,
+        (
+            int(section_id),
+            None,
+            str(label or 'Nueva pregunta').strip() or 'Nueva pregunta',
+            str(question_type or 'text_long').strip() or 'text_long',
+            0,
+            1,
+            None,
+            None,
+            json.dumps([], ensure_ascii=False),
+            json.dumps({}, ensure_ascii=False),
+            next_order,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_weekly_feedback_question(question_id, payload):
+    label = str(payload.get('label') or '').strip() or 'Pregunta'
+    question_type = str(payload.get('question_type') or 'text_long').strip() or 'text_long'
+    is_required = 1 if int(payload.get('is_required') or 0) == 1 else 0
+    is_active = 1 if int(payload.get('is_active') or 0) == 1 else 0
+    help_text = str(payload.get('help_text') or '').strip() or None
+    placeholder = str(payload.get('placeholder') or '').strip() or None
+    question_key = str(payload.get('question_key') or '').strip() or None
+    options = payload.get('options') if isinstance(payload.get('options'), list) else []
+    validation = payload.get('validation') if isinstance(payload.get('validation'), dict) else {}
+    try:
+        sort_order = int(payload.get('sort_order') or 0)
+    except Exception:
+        sort_order = 0
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE weekly_feedback_questions
+        SET question_key = ?, label = ?, question_type = ?, is_required = ?, is_active = ?,
+            help_text = ?, placeholder = ?, options_json = ?, validation_json = ?, sort_order = ?
+        WHERE id = ?
+        """,
+        (
+            question_key,
+            label,
+            question_type,
+            is_required,
+            is_active,
+            help_text,
+            placeholder,
+            json.dumps(options or [], ensure_ascii=False),
+            json.dumps(validation or {}, ensure_ascii=False),
+            sort_order,
+            int(question_id),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_weekly_feedback_question(question_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM weekly_feedback_questions WHERE id = ?", (int(question_id),))
+    conn.commit()
+    conn.close()
+
+
+def reorder_weekly_feedback_questions(section_id, question_ids):
+    ordered_ids = []
+    for qid in (question_ids or []):
+        try:
+            qid_i = int(qid)
+        except Exception:
+            continue
+        if qid_i not in ordered_ids:
+            ordered_ids.append(qid_i)
+    if not ordered_ids:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM weekly_feedback_questions WHERE section_id = ? ORDER BY sort_order, id", (int(section_id),))
+    current_ids = [int(r[0]) for r in cur.fetchall()]
+    if set(current_ids) != set(ordered_ids):
+        conn.close()
+        return
+    for idx, qid_i in enumerate(ordered_ids, start=1):
+        cur.execute("UPDATE weekly_feedback_questions SET sort_order = ? WHERE id = ?", (idx, qid_i))
+    conn.commit()
+    conn.close()
+
+
+def get_client_weekly_feedback_schedule(client_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT COALESCE(weekday, 1), COALESCE(repeat_enabled, 1), COALESCE(is_active, 1)
+        FROM client_weekly_feedback_schedule
+        WHERE client_id = ?
+        LIMIT 1
+        """,
+        (int(client_id),),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {'weekday': 1, 'repeat_enabled': 1, 'is_active': 1}
+    weekday = int(row[0] or 1)
+    if weekday < 1 or weekday > 7:
+        weekday = 1
+    return {
+        'weekday': weekday,
+        'repeat_enabled': 1 if int(row[1] or 1) else 0,
+        'is_active': 1 if int(row[2] or 1) else 0,
+    }
+
+
+def upsert_client_weekly_feedback_schedule(client_id, weekday, repeat_enabled, is_active=1):
+    weekday_i = int(weekday or 1)
+    if weekday_i < 1 or weekday_i > 7:
+        weekday_i = 1
+    repeat_enabled_i = 1 if int(repeat_enabled or 0) == 1 else 0
+    is_active_i = 1 if int(is_active or 0) == 1 else 0
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_weekly_feedback_schedule(client_id, weekday, repeat_enabled, is_active, created_at, updated_at)
+        VALUES(?,?,?,?,datetime('now'),datetime('now'))
+        ON CONFLICT(client_id) DO UPDATE SET
+            weekday = excluded.weekday,
+            repeat_enabled = excluded.repeat_enabled,
+            is_active = excluded.is_active,
+            updated_at = datetime('now')
+        """,
+        (int(client_id), weekday_i, repeat_enabled_i, is_active_i),
+    )
+    conn.commit()
+    conn.close()
+
+
+def describe_weekly_feedback_schedule(schedule):
+    weekday = int(schedule.get('weekday') or 1)
+    repeat_text = 'Repite automaticamente' if int(schedule.get('repeat_enabled', 1) or 1) else 'Sin repeticion automatica'
+    active_text = 'Activo' if int(schedule.get('is_active', 1) or 1) else 'Pausado'
+    return f"{get_weekday_label_es(weekday)} · {repeat_text} · {active_text}"
+
+
+def get_weekly_feedback_schedule_dates(schedule, slots=None):
+    from datetime import date, timedelta
+
+    slots = slots or get_fasting_weight_slots()
+    if not slots:
+        return []
+    weekday = int(schedule.get('weekday') or 1)
+    if weekday < 1 or weekday > 7:
+        weekday = 1
+    repeat_enabled = bool(int(schedule.get('repeat_enabled', 1) or 1))
+    out = set()
+
+    if repeat_enabled:
+        for year, month in slots:
+            max_day = calendar.monthrange(year, month)[1]
+            for day in range(1, max_day + 1):
+                current = date(year, month, day)
+                if current.weekday() + 1 == weekday:
+                    out.add(current.isoformat())
+        return sorted(out)
+
+    today = date.today()
+    delta = weekday - (today.weekday() + 1)
+    if delta < 0:
+        delta += 7
+    scheduled = today + timedelta(days=delta)
+    out.add(scheduled.isoformat())
+    return sorted(out)
+
+
+def _nearest_weekday_date(reference_date_text, weekday):
+    from datetime import date, timedelta
+
+    reference = date.fromisoformat(normalize_iso_date_text(reference_date_text) or date.today().isoformat())
+    weekday_i = int(weekday or 1)
+    if weekday_i < 1 or weekday_i > 7:
+        weekday_i = 1
+    current = reference.weekday() + 1
+    delta = weekday_i - current
+    if delta > 3:
+        delta -= 7
+    elif delta < -3:
+        delta += 7
+    return (reference + timedelta(days=delta)).isoformat()
+
+
+def get_client_weekly_feedback_submissions(client_id, limit=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    sql = """
+        SELECT s.id, s.client_id, s.version_id, COALESCE(s.scheduled_date, ''), s.submitted_at, s.created_at,
+               COALESCE(v.title, ''), COALESCE(v.status, 'draft')
+        FROM client_weekly_feedback_submissions s
+        LEFT JOIN weekly_feedback_versions v ON v.id = s.version_id
+        WHERE s.client_id = ?
+        ORDER BY s.submitted_at DESC, s.id DESC
+    """
+    params = [int(client_id)]
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    cur.execute(sql, tuple(params))
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        out.append({
+            'id': int(row[0]),
+            'client_id': int(row[1]),
+            'version_id': int(row[2]),
+            'scheduled_date': row[3],
+            'submitted_at': row[4],
+            'created_at': row[5],
+            'version_title': row[6] or 'Feedback Semanal',
+            'version_status': row[7] or 'draft',
+        })
+    return out
+
+
+def list_weekly_feedback_submissions(client_id=None, limit=None):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    sql = """
+        SELECT s.id, s.client_id, COALESCE(c.name, ''), s.version_id, COALESCE(s.scheduled_date, ''), s.submitted_at, s.created_at,
+               COALESCE(v.title, ''), COALESCE(v.status, 'draft')
+        FROM client_weekly_feedback_submissions s
+        LEFT JOIN clients c ON c.id = s.client_id
+        LEFT JOIN weekly_feedback_versions v ON v.id = s.version_id
+    """
+    params = []
+    if client_id:
+        sql += " WHERE s.client_id = ?"
+        params.append(int(client_id))
+    sql += " ORDER BY s.submitted_at DESC, s.id DESC"
+    if limit:
+        sql += " LIMIT ?"
+        params.append(int(limit))
+    cur.execute(sql, tuple(params))
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        out.append({
+            'id': int(row[0]),
+            'client_id': int(row[1]),
+            'client_name': row[2] or 'Cliente',
+            'version_id': int(row[3]),
+            'scheduled_date': row[4],
+            'submitted_at': row[5],
+            'created_at': row[6],
+            'version_title': row[7] or 'Feedback Semanal',
+            'version_status': row[8] or 'draft',
+        })
+    return out
+
+
+def get_weekly_feedback_submission_by_id(client_id, submission_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if int(client_id or 0) > 0:
+        cur.execute(
+            """
+            SELECT s.id, s.client_id, s.version_id, COALESCE(s.scheduled_date, ''), s.submitted_at, s.created_at,
+                   COALESCE(v.title, ''), COALESCE(v.description, ''), COALESCE(v.status, 'draft'), COALESCE(v.is_active, 0)
+            FROM client_weekly_feedback_submissions s
+            LEFT JOIN weekly_feedback_versions v ON v.id = s.version_id
+            WHERE s.client_id = ? AND s.id = ?
+            LIMIT 1
+            """,
+            (int(client_id), int(submission_id)),
+        )
+    else:
+        cur.execute(
+            """
+            SELECT s.id, s.client_id, s.version_id, COALESCE(s.scheduled_date, ''), s.submitted_at, s.created_at,
+                   COALESCE(v.title, ''), COALESCE(v.description, ''), COALESCE(v.status, 'draft'), COALESCE(v.is_active, 0)
+            FROM client_weekly_feedback_submissions s
+            LEFT JOIN weekly_feedback_versions v ON v.id = s.version_id
+            WHERE s.id = ?
+            LIMIT 1
+            """,
+            (int(submission_id),),
+        )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'id': int(row[0]),
+        'client_id': int(row[1]),
+        'version_id': int(row[2]),
+        'scheduled_date': row[3],
+        'submitted_at': row[4],
+        'created_at': row[5],
+        'version_title': row[6] or 'Feedback Semanal',
+        'version_description': row[7] or '',
+        'version_status': row[8] or 'draft',
+        'version_is_active': int(row[9] or 0),
+    }
+
+
+def get_weekly_feedback_answers_map(submission_id):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT question_id, COALESCE(value_text, ''), COALESCE(value_json, '')
+        FROM client_weekly_feedback_answers
+        WHERE submission_id = ?
+        """,
+        (int(submission_id),),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = {}
+    for question_id, value_text, value_json in rows:
+        parsed_json = None
+        if value_json:
+            try:
+                parsed_json = json.loads(value_json)
+            except Exception:
+                parsed_json = None
+        out[int(question_id)] = {'value_text': value_text, 'value_json': parsed_json}
+    return out
+
+
+def create_weekly_feedback_submission(client_id, version_id, scheduled_date, answers_map):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_weekly_feedback_submissions(client_id, version_id, scheduled_date, submitted_at, created_at)
+        VALUES(?,?,?,datetime('now'),datetime('now'))
+        """,
+        (int(client_id), int(version_id), str(scheduled_date or '')),
+    )
+    submission_id = int(cur.lastrowid)
+    for question_id, answer in (answers_map or {}).items():
+        value_text = answer.get('value_text')
+        value_json = answer.get('value_json')
+        value_json_db = None
+        if value_json is not None:
+            try:
+                value_json_db = json.dumps(value_json, ensure_ascii=False)
+            except Exception:
+                value_json_db = None
+        cur.execute(
+            """
+            INSERT INTO client_weekly_feedback_answers(submission_id, question_id, value_text, value_json, updated_at)
+            VALUES(?,?,?,?,datetime('now'))
+            ON CONFLICT(submission_id, question_id)
+            DO UPDATE SET value_text = excluded.value_text, value_json = excluded.value_json, updated_at = datetime('now')
+            """,
+            (submission_id, int(question_id), None if value_text is None else str(value_text), value_json_db),
+        )
+    conn.commit()
+    conn.close()
+    return submission_id
+
+
+def get_weekly_feedback_latest_submission_status(client_id):
+    submissions = get_client_weekly_feedback_submissions(client_id, limit=1)
+    return 'Realizado' if submissions else 'Pendiente'
+
+
+def render_weekly_feedback_schedule_form(client_id, schedule, return_to):
+    weekday = int(schedule.get('weekday') or 1)
+    repeat_enabled = 1 if int(schedule.get('repeat_enabled', 1) or 1) else 0
+    is_active = 1 if int(schedule.get('is_active', 1) or 1) else 0
+    weekday_options = ''.join([
+        f'<option value="{day}" {"selected" if day == weekday else ""}>{html.escape(get_weekday_label_es(day))}</option>'
+        for day in range(1, 8)
+    ])
+    return (
+        '<form method="post" action="/set_client_weekly_feedback_schedule" class="weekly-feedback-schedule-form">'
+        f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+        f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+        '<h3>Configuracion del feedback semanal</h3>'
+        '<label>Dia del recordatorio'
+        f'<select name="weekday">{weekday_options}</select>'
+        '</label>'
+        '<label style="display:flex;align-items:center;gap:10px;flex-direction:row;justify-content:space-between;">'
+        '<span>Repetir automaticamente</span>'
+        f'<input name="repeat_enabled" type="checkbox" value="1" {"checked" if repeat_enabled else ""} />'
+        '</label>'
+        '<label style="display:flex;align-items:center;gap:10px;flex-direction:row;justify-content:space-between;">'
+        '<span>Activar recordatorio</span>'
+        f'<input name="is_active" type="checkbox" value="1" {"checked" if is_active else ""} />'
+        '</label>'
+        '<button type="submit">Guardar configuracion</button>'
+        f'<p class="review-note">Programacion actual: {html.escape(describe_weekly_feedback_schedule(schedule))}</p>'
+        '</form>'
+    )
+
+
+def _render_weekly_feedback_question_input(question, value_text='', value_json=None, readonly=False):
+    qid = int(question.get('id') or 0)
+    qtype = str(question.get('question_type') or 'text_long').strip() or 'text_long'
+    label = html.escape(str(question.get('label') or 'Pregunta'))
+    required_badge = ' <span class="iq-required">*</span>' if int(question.get('is_required') or 0) == 1 else ''
+    help_text = str(question.get('help_text') or '').strip()
+    placeholder = html.escape(str(question.get('placeholder') or '').strip())
+    options = question.get('options') if isinstance(question.get('options'), list) else []
+    current_text = str(value_text or '')
+    current_json = value_json if isinstance(value_json, list) else []
+    disabled_attr = ' disabled' if readonly else ''
+    common_attrs = f'name="q_{qid}"{disabled_attr}'
+    validation = question.get('validation') if isinstance(question.get('validation'), dict) else {}
+
+    # Compact variant for 1-10 visual rating without changing submitted payload.
+    if qtype == 'number' and validation.get('min') == 1 and validation.get('max') == 10:
+        current_int = 0
+        try:
+            current_int = int(float(current_text.strip()))
+        except Exception:
+            current_int = 0
+        rating_buttons = []
+        for n in range(1, 11):
+            active_class = ' is-active' if n == current_int else ''
+            rating_buttons.append(
+                f'<button type="button" class="wf-rating-btn{active_class}" data-rating-for="{qid}" data-value="{n}"{disabled_attr}>{n}</button>'
+            )
+        input_html = (
+            f'<input type="hidden" class="wf-rating-hidden" {common_attrs} value="{html.escape(current_text)}" data-question-input="1" data-wf-kind="number" />'
+            f'<div class="wf-rating-grid" role="radiogroup" aria-label="Valoración del 1 al 10">{"".join(rating_buttons)}</div>'
+        )
+    elif qtype == 'text_long':
+        input_html = f'<textarea class="wf-input wf-textarea" {common_attrs} placeholder="{placeholder}" data-question-input="1" data-wf-kind="text">{html.escape(current_text)}</textarea>'
+    elif qtype == 'number':
+        min_attr = f' min="{html.escape(str(validation.get("min")))}"' if validation.get('min') is not None else ''
+        max_attr = f' max="{html.escape(str(validation.get("max")))}"' if validation.get('max') is not None else ''
+        input_html = f'<input class="wf-input" type="number" step="any" {common_attrs}{min_attr}{max_attr} value="{html.escape(current_text)}" placeholder="{placeholder}" data-question-input="1" data-wf-kind="number" />'
+    elif qtype in ('single_choice', 'dropdown', 'yes_no'):
+        if qtype == 'yes_no':
+            choice_options = [('yes', 'Sí'), ('no', 'No')]
+        else:
+            choice_options = [(str(x), str(x)) for x in options]
+        choice_buttons = []
+        for idx, (opt_value, opt_label) in enumerate(choice_options):
+            active_class = ' is-active' if str(opt_value) == current_text else ''
+            choice_buttons.append(
+                '<button type="button" '
+                f'class="wf-choice-chip{active_class}" '
+                f'data-choice-for="{qid}" '
+                f'data-choice-value="{html.escape(str(opt_value), quote=True)}" '
+                f'aria-pressed="{"true" if active_class else "false"}" '
+                f'{disabled_attr}>'
+                f'<span class="wf-choice-chip-label">{html.escape(str(opt_label))}</span>'
+                '</button>'
+            )
+        input_html = (
+            f'<input type="hidden" class="wf-choice-hidden" {common_attrs} value="{html.escape(current_text)}" data-question-input="1" data-wf-kind="single" />'
+            f'<div class="wf-choice-grid" data-choice-group="{qid}">{"".join(choice_buttons)}</div>'
+        )
+    elif qtype == 'multi_choice':
+        selected_values = [str(v) for v in current_json]
+        choice_html = []
+        for idx, opt in enumerate(options):
+            opt_text = str(opt)
+            checked = ' checked' if opt_text in selected_values else ''
+            input_id = f'wf-q{qid}-opt{idx}'
+            choice_html.append(
+                '<label class="wf-multi-chip" for="' + input_id + '">'
+                f'<input id="{input_id}" type="checkbox" class="wf-multi-input" name="q_{qid}" value="{html.escape(opt_text, quote=True)}" data-question-input="1" data-wf-kind="multi"{disabled_attr}{checked} />'
+                f'<span>{html.escape(opt_text)}</span>'
+                '</label>'
+            )
+        input_html = '<div class="wf-choice-grid wf-choice-grid-multi">' + ''.join(choice_html) + '</div>'
+    elif qtype == 'date':
+        input_html = f'<input class="wf-input" type="date" {common_attrs} value="{html.escape(current_text)}" data-question-input="1" data-wf-kind="date" />'
+    else:
+        input_html = f'<input class="wf-input" type="text" {common_attrs} value="{html.escape(current_text)}" placeholder="{placeholder}" data-question-input="1" data-wf-kind="text" />'
+    help_html = f'<p class="wf-question-help">{html.escape(help_text)}</p>' if help_text else ''
+    return (
+        '<article class="wf-question-card" data-wf-question="1" data-question-id="' + str(qid) + '">'
+        '<div class="wf-question-top">'
+        f'<span class="wf-question-number" data-question-number></span>'
+        '<div class="wf-question-copy">'
+        f'<label class="wf-question-title">{label}{required_badge}</label>'
+        f'{help_html}'
+        '</div>'
+        '</div>'
+        '<div class="wf-answer-wrap">'
+        f'{input_html}'
+        '</div>'
+        '</article>'
+    )
+
+
+def render_weekly_feedback_submission_detail(submission, structure):
+    if not submission or not structure.get('version'):
+        return '<p class="empty">No se pudo cargar el feedback.</p>'
+    answers = get_weekly_feedback_answers_map(submission['id'])
+    pieces = []
+    for section in structure.get('sections') or []:
+        section_questions = []
+        for question in section.get('questions') or []:
+            qid = int(question.get('id') or 0)
+            answer = answers.get(qid) or {}
+            value_text = str(answer.get('value_text') or '')
+            value_json = answer.get('value_json')
+            if isinstance(value_json, list):
+                rendered_value = ', '.join([str(v) for v in value_json]) or '-'
+            else:
+                rendered_value = value_text.strip() or '-'
+            section_questions.append(
+                '<article class="iq-question">'
+                f'<label class="iq-question-title">{html.escape(str(question.get("label") or "Pregunta"))}</label>'
+                f'<div class="review-note" style="margin:0;white-space:pre-wrap;">{html.escape(rendered_value)}</div>'
+                '</article>'
+            )
+        pieces.append(
+            '<section class="iq-section">'
+            f'<h3>{html.escape(str(section.get("title") or "Sección"))}</h3>'
+            + ''.join(section_questions) +
+            '</section>'
+        )
+    sent_date, sent_time = format_feedback_datetime_es(submission.get('submitted_at') or '')
+    sent_label = sent_date if not sent_time else f'{sent_date} · {sent_time}'
+    scheduled_label = format_dmy(submission.get('scheduled_date') or '')
+    return (
+        '<div class="iq-wrap">'
+        '<div class="iq-head">'
+        f'<h2>{html.escape(str(structure["version"].get("title") or "Feedback Semanal"))}</h2>'
+        f'<p class="iq-meta">Enviado: {html.escape(sent_label)} · Programado: {html.escape(scheduled_label)}</p>'
+        '</div>'
+        + ''.join(pieces) +
+        '</div>'
+    )
+
+
+def render_weekly_feedback_form(client_id, return_to, admin_mode=False):
+    version_id = get_active_weekly_feedback_version_id()
+    structure = get_weekly_feedback_structure(version_id, include_inactive=bool(admin_mode)) if version_id > 0 else {'version': None, 'sections': []}
+    if not structure.get('version'):
+        return '<p class="empty">No hay una versión activa del feedback semanal.</p>'
+
+    submission_status = get_weekly_feedback_latest_submission_status(client_id)
+    schedule = get_client_weekly_feedback_schedule(client_id)
+    sections_html = []
+    for section in structure.get('sections') or []:
+        q_html = []
+        for question in section.get('questions') or []:
+            q_html.append(_render_weekly_feedback_question_input(question))
+        help_html = f'<p class="iq-section-help">{html.escape(str(section.get("help_text") or ""))}</p>' if str(section.get('help_text') or '').strip() else ''
+        sections_html.append(
+            '<section class="iq-section">'
+            f'<h3>{html.escape(str(section.get("title") or "Sección"))}</h3>'
+            f'{help_html}'
+            + ''.join(q_html) +
+            '</section>'
+        )
+
+    recent_submissions = list_weekly_feedback_submissions(client_id=client_id, limit=3)
+    recent_cards = render_weekly_feedback_submissions_cards(recent_submissions, f'/client_app?section=feedback&client_id={int(client_id)}')
+    total_questions = sum(len(section.get('questions') or []) for section in (structure.get('sections') or []))
+    scheduled_day = get_weekday_label_es(int(schedule.get('weekday') or 1))
+
+    ui_assets = (
+        '<style>'
+        '.wf-shell{--wf-bg:#f4f7fd;--wf-panel:#ffffff;--wf-line:#dfe6f3;--wf-text:#101828;--wf-muted:#667085;--wf-primary:#2563eb;--wf-primary-soft:#e8f0ff;--wf-accent:#0ea5e9;display:grid;gap:18px;color:var(--wf-text);}'
+        '.wf-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;padding:20px;border:1px solid var(--wf-line);background:linear-gradient(145deg,#ffffff 0%,#f7f9ff 58%,#f4f8ff 100%);border-radius:22px;box-shadow:0 10px 30px rgba(37,99,235,.08);}'
+        '.wf-head-main{display:flex;align-items:flex-start;gap:14px;min-width:0;}'
+        '.wf-icon{width:54px;height:54px;border-radius:16px;background:radial-gradient(circle at 30% 25%,#dbeafe 0%,#c7d9ff 45%,#bfd3ff 100%);display:flex;align-items:center;justify-content:center;color:#1d4ed8;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(37,99,235,.14);font-size:1.35rem;}'
+        '.wf-title-wrap h2{margin:0;font-size:1.9rem;line-height:1.1;letter-spacing:-.02em;}'
+        '.wf-title-wrap p{margin:6px 0 0;color:var(--wf-muted);font-size:.98rem;line-height:1.5;}'
+        '.wf-schedule{padding:14px 16px;border:1px solid #d6e4ff;border-radius:16px;background:#edf4ff;display:grid;gap:4px;align-content:start;min-width:230px;}'
+        '.wf-schedule strong{font-size:.95rem;color:#1e3a8a;}'
+        '.wf-schedule span{font-size:.86rem;color:#334155;line-height:1.4;}'
+        '.wf-progress{padding:14px 16px;border:1px solid var(--wf-line);border-radius:16px;background:var(--wf-panel);display:grid;gap:8px;}'
+        '.wf-progress-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;}'
+        '.wf-progress-head strong{font-size:.95rem;}'
+        '.wf-progress-head span{font-size:.85rem;color:var(--wf-muted);}'
+        '.wf-progress-bar{height:10px;border-radius:999px;background:#e8eefb;overflow:hidden;}'
+        '.wf-progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#2563eb,#38bdf8);transition:width .35s ease;}'
+        '.wf-form{display:grid;gap:16px;}'
+        '.wf-question-card{border:1px solid var(--wf-line);border-radius:18px;background:var(--wf-panel);box-shadow:0 8px 24px rgba(15,23,42,.05);padding:16px 18px;display:grid;gap:12px;transition:transform .2s ease, box-shadow .25s ease, border-color .2s ease;}'
+        '.wf-question-card:hover{transform:translateY(-1px);box-shadow:0 14px 28px rgba(15,23,42,.08);border-color:#cad8f8;}'
+        '.wf-question-card.is-complete{border-color:#bfdbfe;box-shadow:0 12px 26px rgba(37,99,235,.09);}'
+        '.wf-question-top{display:flex;gap:12px;align-items:flex-start;}'
+        '.wf-question-number{width:34px;height:34px;border-radius:999px;background:#e8efff;color:#1d4ed8;font-weight:800;font-size:.95rem;display:flex;align-items:center;justify-content:center;flex:0 0 auto;}'
+        '.wf-question-copy{min-width:0;display:grid;gap:4px;}'
+        '.wf-question-title{font-size:1.08rem;font-weight:800;line-height:1.35;color:#101828;}'
+        '.wf-question-help{margin:0;color:var(--wf-muted);font-size:.9rem;line-height:1.45;}'
+        '.wf-answer-wrap{display:grid;gap:10px;}'
+        '.wf-input{width:100%;box-sizing:border-box;border:1px solid #d7deed;border-radius:12px;background:#fff;color:#0f172a;padding:12px 14px;font-size:.95rem;outline:none;transition:border-color .2s ease, box-shadow .2s ease, background .2s ease;}'
+        '.wf-input:focus,.wf-textarea:focus{border-color:#3b82f6;box-shadow:0 0 0 4px rgba(37,99,235,.12);background:#fff;}'
+        '.wf-textarea{min-height:96px;resize:vertical;line-height:1.45;}'
+        '.wf-choice-grid{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr));gap:10px;}'
+        '.wf-choice-grid-multi{grid-template-columns:repeat(3,minmax(140px,1fr));}'
+        '.wf-choice-chip,.wf-multi-chip{border:1px solid #d7deed;background:#fff;border-radius:12px;min-height:48px;padding:10px 12px;display:flex;align-items:center;justify-content:center;gap:8px;color:#0f172a;font-weight:700;font-size:.92rem;cursor:pointer;transition:all .2s ease;}'
+        '.wf-choice-chip:hover,.wf-multi-chip:hover{border-color:#99b7ff;background:#f7faff;transform:translateY(-1px);}'
+        '.wf-choice-chip.is-active,.wf-multi-chip.is-active{border-color:#3b82f6;background:var(--wf-primary-soft);color:#1e40af;box-shadow:0 0 0 3px rgba(37,99,235,.13);}'
+        '.wf-multi-input{position:absolute;opacity:0;pointer-events:none;}'
+        '.wf-rating-grid{display:grid;grid-template-columns:repeat(10,minmax(42px,1fr));gap:8px;}'
+        '.wf-rating-btn{border:1px solid #d7deed;background:#fff;border-radius:10px;min-height:42px;font-weight:800;color:#334155;cursor:pointer;transition:all .2s ease;}'
+        '.wf-rating-btn:hover{border-color:#93c5fd;background:#f4f8ff;transform:translateY(-1px);}'
+        '.wf-rating-btn.is-active{border-color:#2563eb;background:#2563eb;color:#fff;box-shadow:0 8px 18px rgba(37,99,235,.35);}'
+        '.wf-send-wrap{display:flex;justify-content:center;padding-top:6px;}'
+        '.wf-submit{width:min(520px,100%);border:none;border-radius:14px;padding:14px 20px;font-weight:800;font-size:1rem;color:#fff;cursor:pointer;background:linear-gradient(90deg,#1d4ed8 0%,#2563eb 55%,#0ea5e9 100%);box-shadow:0 14px 28px rgba(37,99,235,.28);transition:transform .2s ease, box-shadow .25s ease, filter .2s ease;}'
+        '.wf-submit:hover{transform:translateY(-1px);filter:saturate(1.06);box-shadow:0 18px 34px rgba(37,99,235,.33);}'
+        '.wf-submit:active{transform:translateY(0);}'
+        '.wf-history{margin-top:6px;padding:14px;border:1px solid var(--wf-line);border-radius:16px;background:#fff;}'
+        '.wf-history h4{margin:0 0 10px;font-size:.95rem;color:#0f172a;}'
+        '.wf-history .review-card{border:1px solid #e5ecf7;border-radius:12px;padding:10px 12px;background:#fbfdff;}'
+        '@media (max-width:1100px){.wf-choice-grid{grid-template-columns:repeat(2,minmax(120px,1fr));}.wf-choice-grid-multi{grid-template-columns:repeat(2,minmax(120px,1fr));}.wf-rating-grid{grid-template-columns:repeat(5,minmax(44px,1fr));}}'
+        '@media (max-width:760px){.wf-head{grid-template-columns:1fr;}.wf-title-wrap h2{font-size:1.5rem;}.wf-schedule{min-width:0;}.wf-question-card{padding:14px;}.wf-choice-grid,.wf-choice-grid-multi{grid-template-columns:1fr;}.wf-rating-grid{grid-template-columns:repeat(5,minmax(38px,1fr));}.wf-submit{width:100%;}}'
+        '</style>'
+        '<script>'
+        '(function(){'
+        'const root=document.currentScript&&document.currentScript.parentElement;'
+        'if(!root||!root.classList.contains("wf-shell")){return;}'
+        'const form=root.querySelector("form.wf-form");'
+        'if(!form){return;}'
+        'const cards=Array.from(root.querySelectorAll("[data-wf-question]"));'
+        'cards.forEach((card,idx)=>{const num=card.querySelector("[data-question-number]");if(num){num.textContent=String(idx+1);}});'
+        'const pFill=root.querySelector(".wf-progress-fill");'
+        'const pText=root.querySelector("[data-wf-progress-text]");'
+        'const pPct=root.querySelector("[data-wf-progress-pct]");'
+        'const hiddenFor=(qid)=>form.querySelector(`input.wf-choice-hidden[name="q_${qid}"]`);'
+        'const hiddenRateFor=(qid)=>form.querySelector(`input.wf-rating-hidden[name="q_${qid}"]`);'
+        'root.querySelectorAll(".wf-choice-chip").forEach((btn)=>{btn.addEventListener("click",()=>{if(btn.disabled){return;}const qid=btn.getAttribute("data-choice-for");const val=btn.getAttribute("data-choice-value")||"";const hidden=hiddenFor(qid);if(!hidden){return;}hidden.value=val;const group=root.querySelectorAll(`.wf-choice-chip[data-choice-for="${qid}"]`);group.forEach((b)=>{const on=b===btn;b.classList.toggle("is-active",on);b.setAttribute("aria-pressed",on?"true":"false");});hidden.dispatchEvent(new Event("change",{bubbles:true}));});});'
+        'root.querySelectorAll(".wf-rating-btn").forEach((btn)=>{btn.addEventListener("click",()=>{if(btn.disabled){return;}const qid=btn.getAttribute("data-rating-for");const val=btn.getAttribute("data-value")||"";const hidden=hiddenRateFor(qid);if(!hidden){return;}hidden.value=val;const group=root.querySelectorAll(`.wf-rating-btn[data-rating-for="${qid}"]`);group.forEach((b)=>b.classList.toggle("is-active",b===btn));hidden.dispatchEvent(new Event("change",{bubbles:true}));});});'
+        'root.querySelectorAll(".wf-multi-input").forEach((input)=>{const paint=()=>{const chip=input.closest(".wf-multi-chip");if(chip){chip.classList.toggle("is-active",!!input.checked);}};paint();input.addEventListener("change",()=>{paint();refreshProgress();});});'
+        'function isAnswered(card){'
+        'const fields=Array.from(card.querySelectorAll("[data-question-input]"));'
+        'if(!fields.length){return false;}'
+        'for(const f of fields){'
+        'const kind=f.getAttribute("data-wf-kind")||"";'
+        'if(kind==="multi"){if(f.checked){return true;}continue;}'
+        'if((f.value||"").toString().trim()){return true;}'
+        '}'
+        'return false;'
+        '}'
+        'function refreshProgress(){'
+        'const total=cards.length||1;'
+        'let done=0;'
+        'cards.forEach((card)=>{const ok=isAnswered(card);card.classList.toggle("is-complete",ok);if(ok){done+=1;}});'
+        'const pct=Math.max(0,Math.min(100,Math.round((done/total)*100)));'
+        'if(pFill){pFill.style.width=`${pct}%`;}'
+        'if(pText){pText.textContent=`Pregunta ${Math.min(done+1,total)} de ${total}`;}'
+        'if(pPct){pPct.textContent=`${pct}% completado`;}'
+        '}'
+        'form.addEventListener("input",refreshProgress,true);'
+        'form.addEventListener("change",refreshProgress,true);'
+        'refreshProgress();'
+        '})();'
+        '</script>'
+    )
+
+    return (
+        '<div class="wf-shell" '
+        f'data-client-id="{int(client_id)}" '
+        f'data-status="{html.escape(submission_status, quote=True)}">'
+        '<div class="wf-head">'
+        '<div class="wf-head-main">'
+        '<div class="wf-icon">💬</div>'
+        '<div class="wf-title-wrap">'
+        f'<h2>{html.escape(str(structure["version"].get("title") or "Feedback Semanal"))}</h2>'
+        '<p>Respuestas pensadas para revisar tu semana de forma simple y rápida.</p>'
+        '</div>'
+        '</div>'
+        '<div class="wf-schedule">'
+        f'<strong>Día programado: {html.escape(scheduled_day)}</strong>'
+        '<span>Puedes completarlo cuando quieras, incluso antes o después de ese día.</span>'
+        '</div>'
+        '</div>'
+        '<div class="wf-progress">'
+        '<div class="wf-progress-head">'
+        '<strong data-wf-progress-text>Pregunta 1 de ' + str(total_questions if total_questions > 0 else 1) + '</strong>'
+        '<span data-wf-progress-pct>0% completado</span>'
+        '</div>'
+        '<div class="wf-progress-bar"><div class="wf-progress-fill"></div></div>'
+        '</div>'
+        f'<form method="post" action="/submit_client_weekly_feedback" class="wf-form">'
+        f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+        f'<input type="hidden" name="version_id" value="{int(structure["version"]["id"])}" />'
+        f'<input type="hidden" name="return_to" value="{html.escape(return_to)}" />'
+        + ''.join(sections_html) +
+        '<div class="wf-send-wrap">'
+        '<button type="submit" class="wf-submit">Enviar feedback</button>'
+        '</div>'
+        '</form>'
+        + (f'<div class="wf-history"><h4>Últimos envíos</h4>{recent_cards}</div>' if recent_cards else '') +
+        ui_assets +
+        '</div>'
+    )
+
+
+def render_weekly_feedback_submissions_cards(submissions, detail_base_url):
+    if not submissions:
+        return '<p class="empty">Todavia no hay feedbacks enviados.</p>'
+    cards = []
+    for item in submissions:
+        submission_id = int(item.get('id') or 0)
+        detail_url = detail_base_url + ('&' if '?' in detail_base_url else '?') + f'feedback_submission_id={submission_id}'
+        submitted_raw = item.get('submitted_at') or item.get('created_at') or ''
+        heading_text, heading_time = format_feedback_submission_heading(submitted_raw)
+        time_html = f'<div class="review-card-time" style="font-size:1.05rem;font-weight:700;line-height:1.2;color:#111827;">{html.escape(heading_time)}</div>' if heading_time else ''
+        cards.append(
+            '<article class="review-card" style="display:grid;gap:8px;">'
+            '<a class="review-card-link" style="display:block;text-decoration:none;color:#101318;" href="' + html.escape(detail_url) + '">'
+            f'<div class="review-card-date">{html.escape(heading_text)}</div>'
+            f'{time_html}'
+            f'<div class="review-card-meta">{html.escape(str(item.get("client_name") or "Cliente"))} · Programado: {html.escape(format_dmy(item.get("scheduled_date") or ""))}</div>'
+            '</a>'
+            '</article>'
+        )
+    return '<div class="review-cards">' + ''.join(cards) + '</div>'
+
+
+def render_weekly_feedback_editor_page(version_id=None, msg='', client_id=None, submission_id=None):
+    versions = get_weekly_feedback_versions()
+    active_id = get_active_weekly_feedback_version_id()
+    selected_version_id = int(version_id or 0)
+    if selected_version_id <= 0:
+        selected_version_id = active_id
+    if selected_version_id <= 0 and versions:
+        selected_version_id = int(versions[0]['id'])
+
+    structure = get_weekly_feedback_structure(selected_version_id, include_inactive=True) if selected_version_id > 0 else {'version': None, 'sections': []}
+    section = (structure.get('sections') or [{}])[0] if structure.get('sections') else {'questions': []}
+
+    version_options = ''.join([
+        f'<option value="{int(v["id"])}" {"selected" if int(v["id"]) == int(selected_version_id) else ""}>V{int(v["id"])} · {html.escape(str(v["title"] or "Feedback"))} · {html.escape(str(v["status"] or "draft"))}</option>'
+        for v in versions
+    ]) if versions else '<option value="">No hay versiones</option>'
+
+    question_blocks = []
+    for question in section.get('questions') or []:
+        options_text = '\n'.join([str(opt) for opt in (question.get('options') or [])])
+        validation = question.get('validation') if isinstance(question.get('validation'), dict) else {}
+        question_blocks.append(
+            '<div class="iqe-question-card">'
+            '<form method="post" action="/weekly_feedback_editor" class="iqe-form">'
+            f'<input type="hidden" name="action" value="update_question" />'
+            f'<input type="hidden" name="version_id" value="{selected_version_id}" />'
+            f'<input type="hidden" name="question_id" value="{int(question["id"])}" />'
+            f'<input name="label" value="{html.escape(str(question.get("label") or ""))}" placeholder="Pregunta" />'
+            f'<input name="question_key" value="{html.escape(str(question.get("question_key") or ""))}" placeholder="Clave interna" />'
+            '<select name="question_type">'
+            + ''.join([
+                f'<option value="{qtype}" {"selected" if qtype == str(question.get("question_type") or "") else ""}>{label}</option>'
+                for qtype, label in [
+                    ('text_long', 'Texto largo'),
+                    ('text_short', 'Texto corto'),
+                    ('number', 'Número'),
+                    ('date', 'Fecha'),
+                    ('single_choice', 'Opción única'),
+                    ('dropdown', 'Desplegable'),
+                    ('multi_choice', 'Opción múltiple'),
+                    ('yes_no', 'Sí/No'),
+                ]
+            ]) +
+            '</select>'
+            f'<textarea name="help_text" placeholder="Ayuda">{html.escape(str(question.get("help_text") or ""))}</textarea>'
+            f'<textarea name="placeholder" placeholder="Placeholder">{html.escape(str(question.get("placeholder") or ""))}</textarea>'
+            f'<textarea name="options_text" placeholder="Una opción por línea">{html.escape(options_text)}</textarea>'
+            f'<input name="sort_order" type="number" value="{int(question.get("sort_order") or 0)}" />'
+            f'<label><input type="checkbox" name="is_required" value="1" {"checked" if int(question.get("is_required") or 0) == 1 else ""} /> Obligatoria</label>'
+            f'<label><input type="checkbox" name="is_active" value="1" {"checked" if int(question.get("is_active") or 0) == 1 else ""} /> Activa</label>'
+            f'<input name="validation_min" type="number" value="{html.escape(str(validation.get("min") or ""))}" placeholder="Min" />'
+            f'<input name="validation_max" type="number" value="{html.escape(str(validation.get("max") or ""))}" placeholder="Max" />'
+            '<div class="row">'
+            '<button type="submit">Guardar</button>'
+            '</form>'
+            '<form method="post" action="/weekly_feedback_editor" class="iqe-inline">'
+            '<input type="hidden" name="action" value="delete_question" />'
+            f'<input type="hidden" name="version_id" value="{selected_version_id}" />'
+            f'<input type="hidden" name="question_id" value="{int(question["id"])}" />'
+            '<button type="submit">Borrar</button>'
+            '</form>'
+            '</div>'
+            '</div>'
+        )
+
+    client_filter_options = ''.join([
+        f'<option value="{int(c[0])}" {"selected" if str(client_id or "") == str(int(c[0])) else ""}>{html.escape(str(c[1] or "Cliente"))}</option>'
+        for c in get_clients()
+    ]) if get_clients() else '<option value="">Sin clientes</option>'
+    submissions = list_weekly_feedback_submissions(client_id=client_id)
+    submission_cards = render_weekly_feedback_submissions_cards(submissions, '/weekly_feedback_editor')
+
+    detail_html = ''
+    if submission_id:
+        try:
+            submission_id_i = int(submission_id)
+        except Exception:
+            submission_id_i = 0
+        if submission_id_i > 0:
+            detail_row = get_weekly_feedback_submission_by_id(client_id or 0, submission_id_i)
+            if detail_row:
+                detail_structure = get_weekly_feedback_structure(detail_row['version_id'], include_inactive=True)
+                detail_html = render_weekly_feedback_submission_detail(detail_row, detail_structure)
+
+    return f'''
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Editor feedback semanal</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:1200px;margin:0 auto;padding:24px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:22px;box-shadow:0 12px 30px rgba(16,19,24,.06);margin-bottom:16px;}}
+        h1{{margin:0 0 6px;font-size:2rem;}}
+        h2{{margin:0 0 12px;font-size:1.2rem;}}
+        .row{{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start;}}
+        form{{display:grid;gap:10px;}}
+        input, textarea, select, button{{font:inherit;}}
+        input, textarea, select{{padding:10px 12px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;}}
+        textarea{{min-height:84px;resize:vertical;}}
+        button{{padding:10px 12px;border:none;border-radius:10px;background:#101318;color:#fff;cursor:pointer;font-weight:700;}}
+        .iqe-question-card{{border:1px solid #e8ebef;border-radius:16px;padding:16px;background:#fbfdff;display:grid;gap:10px;}}
+        .iqe-question-card + .iqe-question-card{{margin-top:12px;}}
+        .iqe-form{{grid-template-columns:repeat(auto-fit,minmax(180px,1fr));}}
+        .iqe-form .row{{grid-column:1 / -1;}}
+        .iqe-inline{{display:inline-block;}}
+        .empty{{color:#6d7480;}}
+        .grid{{display:grid;grid-template-columns:minmax(0,1fr) 420px;gap:16px;align-items:start;}}
+        @media (max-width:980px){{.grid{{grid-template-columns:1fr;}}}}
+    </style>
+</head>
+<body>
+    <div class="page">
+        <div class="card">
+            <h1>Feedback Semanal</h1>
+            <p class="empty">Gestiona la plantilla del formulario y revisa aquí todos los envíos de los clientes.</p>
+            {f'<p class="empty" style="color:#0f766e;font-weight:700;">{html.escape(msg)}</p>' if msg else ''}
+            <div class="row">
+                <form method="post" action="/weekly_feedback_editor">
+                    <input type="hidden" name="action" value="publish_version" />
+                    <input type="hidden" name="version_id" value="{selected_version_id}" />
+                    <button type="submit">Publicar versión actual</button>
+                </form>
+                <form method="post" action="/weekly_feedback_editor" class="row">
+                    <input type="hidden" name="action" value="create_version_copy" />
+                    <input type="hidden" name="source_version_id" value="{selected_version_id}" />
+                    <input name="title" placeholder="Título de nueva versión" />
+                    <button type="submit">Clonar versión</button>
+                </form>
+            </div>
+            <p style="margin:8px 0 0;color:#64748b;">Versión activa: <strong>{int(active_id or 0)}</strong> · Editando: <strong>{int(selected_version_id or 0)}</strong></p>
+        </div>
+        <div class="grid">
+            <div class="card">
+                <h2>Preguntas</h2>
+                <form method="post" action="/weekly_feedback_editor" class="row">
+                    <input type="hidden" name="action" value="add_question" />
+                    <input type="hidden" name="version_id" value="{selected_version_id}" />
+                    <input name="label" placeholder="Nueva pregunta" />
+                    <select name="question_type">
+                        <option value="text_long">Texto largo</option>
+                        <option value="text_short">Texto corto</option>
+                        <option value="number">Número</option>
+                        <option value="date">Fecha</option>
+                        <option value="single_choice">Opción única</option>
+                        <option value="dropdown">Desplegable</option>
+                        <option value="multi_choice">Opción múltiple</option>
+                        <option value="yes_no">Sí/No</option>
+                    </select>
+                    <button type="submit">Añadir pregunta</button>
+                </form>
+                <div style="display:grid;gap:10px;margin-top:12px;">{''.join(question_blocks) if question_blocks else '<p class="empty">No hay preguntas.</p>'}</div>
+            </div>
+            <div class="card">
+                <h2>Envíos</h2>
+                <form method="get" action="/weekly_feedback_editor" class="row" style="margin-bottom:12px;">
+                    <input type="hidden" name="version_id" value="{selected_version_id}" />
+                    <select name="client_id">
+                        <option value="">Todos los clientes</option>
+                        {client_filter_options}
+                    </select>
+                    <button type="submit">Filtrar</button>
+                </form>
+                {submission_cards}
+                <div style="margin-top:14px;">{detail_html}</div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+'''
 
 
 def get_fasting_weight_slots(excluded_months=None):
@@ -1715,6 +4651,40 @@ def format_dmy(value):
     return f"{m.group(3)}/{m.group(2)}/{m.group(1)}"
 
 
+def format_feedback_datetime_es(value):
+    text = str(value or '').strip()
+    if not text:
+        return ('-', '')
+
+    # Common DB/ISO shape: YYYY-MM-DD HH:MM(:SS(.ffffff))(+TZ)
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})', text)
+    if m:
+        return (f"{m.group(3)}/{m.group(2)}/{m.group(1)}", f"{m.group(4)}:{m.group(5)}")
+
+    # Date-only fallback.
+    m = re.match(r'^(\d{4})-(\d{2})-(\d{2})$', text)
+    if m:
+        return (f"{m.group(3)}/{m.group(2)}/{m.group(1)}", '')
+
+    # Last-resort parser for odd but valid ISO-like values.
+    try:
+        from datetime import datetime
+
+        fixed = text.replace('Z', '+00:00')
+        fixed = re.sub(r'([+-]\d{2})$', r'\1:00', fixed)
+        dt = datetime.fromisoformat(fixed)
+        return (dt.strftime('%d/%m/%Y'), dt.strftime('%H:%M'))
+    except Exception:
+        return (text, '')
+
+
+def format_feedback_submission_heading(value):
+    date_text, time_text = format_feedback_datetime_es(value)
+    if date_text in ('', '-'):
+        return ('Feedback', time_text)
+    return (f'Feedback ({date_text})', time_text)
+
+
 def parse_month_days(value):
     tokens = re.split(r'[^0-9]+', str(value or '').strip())
     out = []
@@ -1809,7 +4779,22 @@ def build_client_notice_calendar_events(client_row, manual_events, recurring_rul
                 'kind': 'review',
             })
 
-    kind_order = {'auto': 0, 'review': 1, 'recurring': 2, 'manual': 3}
+        weekly_schedule = get_client_weekly_feedback_schedule(client_id)
+        weekly_dates = get_weekly_feedback_schedule_dates(weekly_schedule)
+        completed_dates = {str(item.get('scheduled_date') or '').strip(): item for item in get_client_weekly_feedback_submissions(client_id)}
+        for date_text in weekly_dates:
+            submission = completed_dates.get(date_text)
+            is_completed = bool(submission)
+            events.append({
+                'id': None,
+                'date': date_text,
+                'title': 'Feedback semanal',
+                'notes': 'Completado' if is_completed else f'Recordatorio: {describe_weekly_feedback_schedule(weekly_schedule)}',
+                'kind': 'feedback',
+                'completed': 1 if is_completed else 0,
+            })
+
+    kind_order = {'auto': 0, 'review': 1, 'feedback': 2, 'recurring': 3, 'manual': 4}
     events.sort(key=lambda e: (e['date'], kind_order.get(e['kind'], 9), e.get('rule_id') or 0, e.get('id') or 0))
     return events
 
@@ -1838,6 +4823,8 @@ def render_client_notice_calendar_panel(client_row, manual_events, recurring_rul
                 kind_chip = '<span class="cal-chip cal-chip-auto">Plan</span>'
             elif item['kind'] == 'review':
                 kind_chip = '<span class="cal-chip cal-chip-review">Revision</span>'
+            elif item['kind'] == 'feedback':
+                kind_chip = '<span class="cal-chip cal-chip-feedback">Feedback</span>' if not int(item.get('completed') or 0) else '<span class="cal-chip cal-chip-feedback" style="background:#dcfce7;color:#166534;">Feedback realizado</span>'
             elif item['kind'] == 'recurring':
                 kind_chip = '<span class="cal-chip cal-chip-recurring">Recurrente</span>'
             else:
@@ -5714,7 +8701,7 @@ class Handler(BaseHTTPRequestHandler):
             '/client_register', '/client_onboarding', '/client_login', '/client_app', '/client_logout',
             '/api/client_fasting_weight', '/api/client_daily_steps',
         }
-        public_get_prefixes = ('/static/', '/export_diet_pdf', '/export_routine_pdf')
+        public_get_prefixes = ('/static/', '/export_diet_pdf', '/export_routine_pdf', '/export_initial_questionnaire_pdf')
         is_public_get = path in public_get_exact or any(path.startswith(pref) for pref in public_get_prefixes)
         if not is_public_get and not self.is_admin_authenticated():
             next_path = path + (('?' + parsed.query) if parsed.query else '')
@@ -6256,11 +9243,18 @@ class Handler(BaseHTTPRequestHandler):
                 include_client_id=admin_preview,
                 daily_goal=daily_steps_goal,
             )
+            weekly_feedback_schedule = get_client_weekly_feedback_schedule(client_id)
+            weekly_feedback_html = render_weekly_feedback_form(
+                client_id,
+                f'/client_app?section=feedback{preview_qs}',
+                admin_mode=admin_preview,
+            )
             client_notice_events = get_client_notice_events(client_id)
             client_notice_rules = get_client_notice_rules(client_id)
             calendar_html = render_client_notice_calendar_panel(c, client_notice_events, client_notice_rules, admin_mode=False)
             calendar_events = build_client_notice_calendar_events(c, client_notice_events, client_notice_rules)
             selected_section = (q.get('section', [''])[0] if 'section' in q else '').strip().lower()
+            questionnaire_assignment_id_raw = (q.get('questionnaire_assignment_id', [''])[0] if 'questionnaire_assignment_id' in q else '').strip()
             review_schedule = get_client_review_schedule(client_id)
             review_count = get_client_reviews_count(client_id)
             selected_review_id = (q.get('review_id', [''])[0] if 'review_id' in q else '').strip()
@@ -6283,7 +9277,25 @@ class Handler(BaseHTTPRequestHandler):
                         previous_review = get_previous_client_review(client_id, selected_review.get('review_date'), selected_review.get('id'))
                         review_detail_html = render_client_review_detail(selected_review, previous_review, admin_mode=False)
 
-            if selected_section not in ('diet', 'routine', 'weight', 'steps', 'calendar', 'reviews'):
+            questionnaire_assignment_id = None
+            if questionnaire_assignment_id_raw:
+                try:
+                    questionnaire_assignment_id = int(questionnaire_assignment_id_raw)
+                except Exception:
+                    questionnaire_assignment_id = None
+            questionnaire_return_to = f'/client_app?section=questionnaire{preview_qs}'
+            questionnaire_html = render_initial_questionnaire_panel(
+                client_id,
+                questionnaire_return_to,
+                admin_mode=admin_preview,
+                assignment_id=questionnaire_assignment_id,
+            )
+            questionnaire_assignments = list_client_questionnaire_assignments(client_id)
+            questionnaire_submitted = len([a for a in questionnaire_assignments if str(a.get('status') or '') == 'submitted'])
+            feedback_submissions = get_client_weekly_feedback_submissions(client_id)
+            feedback_submitted = len(feedback_submissions)
+
+            if selected_section not in ('diet', 'routine', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire'):
                 selected_section = ''
 
             section_titles = {
@@ -6291,24 +9303,30 @@ class Handler(BaseHTTPRequestHandler):
                 'routine': 'Mi rutina',
                 'weight': 'Mi peso corporal en ayunas',
                 'steps': 'Mis pasos diarios',
+                'feedback': 'Feedback semanal',
                 'calendar': 'Calendario de avisos',
                 'reviews': 'Mis revisiones',
+                'questionnaire': 'Cuestionario inicial',
             }
             section_descriptions = {
                 'diet': 'Consulta tu plan actual y descarga tu PDF.',
                 'routine': 'Revisa tus días de entrenamiento y ejercicios.',
                 'weight': 'Registra tu peso diario y revisa la media semanal.',
                 'steps': 'Anota tus pasos diarios y compáralos con tu objetivo.',
+                'feedback': 'Completa tu feedback semanal para comentar cómo va la semana.',
                 'calendar': 'Fechas de inicio/fin del plan y avisos importantes.',
                 'reviews': 'Sube fotos y medidas corporales para tu seguimiento.',
+                'questionnaire': '',
             }
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
                 'routine': 'Activa' if active_routine else 'Sin rutina activa',
                 'weight': f'Objetivo: {weight_goal_status_text}',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
+                'feedback': 'Realizado' if feedback_submitted > 0 else 'Pendiente',
                 'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
                 'reviews': f'{review_count} revisiones' if review_count > 0 else 'Sin revisiones',
+                'questionnaire': 'Realizado' if questionnaire_submitted > 0 else 'Pendiente',
             }
 
             section_content = {
@@ -6316,17 +9334,19 @@ class Handler(BaseHTTPRequestHandler):
                 'routine': routine_html,
                 'weight': weight_trend_html + weight_goal_form_html + fasting_weights_html,
                 'steps': daily_steps_html,
+                'feedback': weekly_feedback_html,
                 'calendar': calendar_html,
                 'reviews': review_submit_form_html + review_upcoming_html + review_cards_html + review_detail_html,
+                'questionnaire': questionnaire_html,
             }
 
             cards_html = ''.join([
                 f'<a class="client-home-card" href="/client_app?section={key}{preview_qs}">'
                 f'<div class="chip">{html.escape(section_status[key])}</div>'
                 f'<h3>{html.escape(section_titles[key])}</h3>'
-                f'<p>{html.escape(section_descriptions[key])}</p>'
+                + (f'<p>{html.escape(section_descriptions[key])}</p>' if section_descriptions[key] else '') +
                 '</a>'
-                for key in ('diet', 'routine', 'weight', 'steps', 'calendar', 'reviews')
+                for key in ('diet', 'routine', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire')
             ])
 
             detail_html = ''
@@ -6494,6 +9514,7 @@ class Handler(BaseHTTPRequestHandler):
         .cal-chip{{display:inline-flex;padding:3px 8px;border-radius:999px;background:#eef2f7;color:#475569;font-size:.72rem;font-weight:800;}}
         .cal-chip-auto{{background:#dcfce7;color:#166534;}}
         .cal-chip-review{{background:#dbeafe;color:#1d4ed8;}}
+        .cal-chip-feedback{{background:#e0f2fe;color:#075985;}}
         .cal-chip-recurring{{background:#ede9fe;color:#5b21b6;}}
         .cal-item h4{{margin:7px 0 4px;font-size:.95rem;}}
         .cal-item p{{margin:0;color:#6d7480;font-size:.86rem;}}
@@ -6661,6 +9682,14 @@ class Handler(BaseHTTPRequestHandler):
             <a class="card" href="/admin_security">
                 <h2>🔐 Seguridad administrador</h2>
                 <p>Cambia usuario y contraseña del panel maestro.</p>
+            </a>
+            <a class="card" href="/initial_questionnaire_editor">
+                <h2>🧾 Editor cuestionario inicial</h2>
+                <p>Versiona y edita el cuestionario dinámico que responde el cliente.</p>
+            </a>
+            <a class="card" href="/weekly_feedback_editor">
+                <h2>💬 Editor feedback semanal</h2>
+                <p>Configura las preguntas y revisa todos los feedbacks enviados.</p>
             </a>
     </section>
 
@@ -7487,6 +10516,8 @@ class Handler(BaseHTTPRequestHandler):
             )
             review_schedule_status_text = describe_review_schedule(review_schedule)
             selected_review_id = (q.get('review_id', [''])[0] if 'review_id' in q else '').strip()
+            questionnaire_assignment_id_raw = (q.get('questionnaire_assignment_id', [''])[0] if 'questionnaire_assignment_id' in q else '').strip()
+            feedback_submission_id_raw = (q.get('feedback_submission_id', [''])[0] if 'feedback_submission_id' in q else '').strip()
             reviews_base_url = f'/client_profile?id={cid_i}&section=reviews'
             diets = []
             routines_all = []
@@ -7653,6 +10684,50 @@ class Handler(BaseHTTPRequestHandler):
                     client_id=cid_i,
                     return_to=f'/client_profile?id={cid_i}&section=calendar',
                 )
+            feedback_panel_html = ''
+            if selected_section == 'feedback':
+                feedback_schedule = get_client_weekly_feedback_schedule(cid_i)
+                feedback_return_to = f'/client_profile?id={cid_i}&section=feedback'
+                feedback_submission_detail_html = ''
+                if feedback_submission_id_raw:
+                    try:
+                        feedback_submission_id_i = int(feedback_submission_id_raw)
+                    except Exception:
+                        feedback_submission_id_i = 0
+                    if feedback_submission_id_i > 0:
+                        feedback_submission = get_weekly_feedback_submission_by_id(cid_i, feedback_submission_id_i)
+                        if feedback_submission:
+                            feedback_detail_structure = get_weekly_feedback_structure(feedback_submission['version_id'], include_inactive=True)
+                            feedback_submission_detail_html = render_weekly_feedback_submission_detail(feedback_submission, feedback_detail_structure)
+                feedback_history_html = render_weekly_feedback_submissions_cards(
+                    get_client_weekly_feedback_submissions(cid_i),
+                    feedback_return_to,
+                )
+                feedback_panel_html = f'''
+                <section class="panel panel-full">
+                    <h2>💬 Feedback Semanal</h2>
+                    {render_weekly_feedback_schedule_form(cid_i, feedback_schedule, feedback_return_to)}
+                    <div style="margin-top:12px;">{feedback_history_html}</div>
+                    <div style="margin-top:12px;">{feedback_submission_detail_html}</div>
+                </section>
+                '''
+            questionnaire_panel_html = ''
+            questionnaire_versions = []
+            if selected_section == 'questionnaire':
+                questionnaire_assignment_id = None
+                if questionnaire_assignment_id_raw:
+                    try:
+                        questionnaire_assignment_id = int(questionnaire_assignment_id_raw)
+                    except Exception:
+                        questionnaire_assignment_id = None
+                questionnaire_panel_html = render_initial_questionnaire_panel(
+                    cid_i,
+                    f'/client_profile?id={cid_i}&section=questionnaire',
+                    admin_mode=True,
+                    assignment_id=questionnaire_assignment_id,
+                    show_admin_controls=True,
+                )
+                questionnaire_versions = get_initial_questionnaire_versions()
             if selected_section == 'reviews' or selected_review_id:
                 review_submit_form_html = render_new_review_toggle_panel(
                     render_client_review_submit_form(cid_i, reviews_base_url, review_schedule)
@@ -7773,37 +10848,65 @@ class Handler(BaseHTTPRequestHandler):
             </section>
             '''
 
+            questionnaire_request_options = ''.join([
+                f'<option value="{int(v[0])}">V{int(v[0])} · {html.escape(str(v[1] or "Cuestionario"))} · {html.escape(str(v[3] or "draft"))}</option>'
+                for v in questionnaire_versions
+            ]) if questionnaire_versions else '<option value="">No hay versiones</option>'
+
+            questionnaire_panel = f'''
+            <section class="panel panel-full">
+                <h2>🧾 Cuestionario inicial</h2>
+                <form method="post" action="/request_client_initial_questionnaire" class="assign">
+                    <input type="hidden" name="client_id" value="{cid_i}" />
+                    <input type="hidden" name="return_to" value="/client_profile?id={cid_i}&section=questionnaire" />
+                    <select name="version_id" class="full" required>
+                        {questionnaire_request_options}
+                    </select>
+                    <button type="submit" class="full">Asignar versión</button>
+                </form>
+                {questionnaire_panel_html}
+            </section>
+            '''
+
             section_titles = {
                 'diet': 'Dietas',
                 'training': 'Entrenamientos',
                 'weight': 'Peso corporal en ayunas',
                 'steps': 'Pasos diarios',
+                'feedback': 'Feedback semanal',
                 'calendar': 'Calendario de avisos',
                 'reviews': 'Revisiones',
+                'questionnaire': 'Cuestionario inicial',
             }
             section_descriptions = {
                 'diet': 'Asigna dietas y revisa el historial del cliente.',
                 'training': 'Asigna rutinas y consulta histórico de entrenamientos.',
                 'weight': 'Control diario del peso corporal en ayunas.',
                 'steps': 'Objetivo y seguimiento de pasos diarios.',
+                'feedback': 'Configura el recordatorio y revisa el historial del feedback semanal.',
                 'calendar': 'Inicio/fin de plan y avisos personalizados del cliente.',
                 'reviews': 'Configura y analiza revisiones con fotos y medidas.',
+                'questionnaire': '',
             }
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
                 'training': 'Activa' if active_routine else 'Sin entrenamiento activo',
                 'weight': f'Objetivo: {weight_goal_status_text}',
                 'steps': f'Objetivo: {daily_steps_goal} pasos' if daily_steps_goal > 0 else 'Objetivo sin definir',
+                'feedback': f'{len(get_client_weekly_feedback_submissions(cid_i))} feedbacks',
                 'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
                 'reviews': f'{review_count} revisiones · {review_schedule_status_text}' if review_count > 0 else f'Sin revisiones · {review_schedule_status_text}',
+                'questionnaire': 'Realizado' if len([a for a in list_client_questionnaire_assignments(cid_i) if str(a.get('status') or '') == 'submitted']) > 0 else 'Pendiente',
             }
             section_content = {
                 'diet': diet_panel_html,
                 'training': training_panel_html,
                 'weight': weight_panel_html,
                 'steps': steps_panel_html,
+                'feedback': feedback_panel_html,
                 'calendar': calendar_panel_html,
                 'reviews': reviews_panel_html,
+                'questionnaire': questionnaire_panel,
             }
 
             if selected_section not in section_content:
@@ -7813,9 +10916,9 @@ class Handler(BaseHTTPRequestHandler):
                 f'<a class="admin-home-card" href="/client_profile?id={cid_i}&section={key}">'
                 f'<div class="chip">{html.escape(section_status[key])}</div>'
                 f'<h3>{html.escape(section_titles[key])}</h3>'
-                f'<p>{html.escape(section_descriptions[key])}</p>'
+                + (f'<p>{html.escape(section_descriptions[key])}</p>' if section_descriptions[key] else '') +
                 '</a>'
-                for key in ('diet', 'training', 'weight', 'steps', 'calendar', 'reviews')
+                for key in ('diet', 'training', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire')
             ])
 
             detail_html = ''
@@ -8432,6 +11535,106 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header('Content-Length', str(len(pdf)))
             self.end_headers()
             self.wfile.write(pdf)
+            return
+
+        if path == '/export_initial_questionnaire_pdf':
+            client_id = q.get('client_id', [''])[0]
+            assignment_id = q.get('assignment_id', [''])[0]
+            try:
+                client_id_i = int(client_id)
+                assignment_id_i = int(assignment_id)
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            if session_client_id is not None:
+                if int(session_client_id) != int(client_id_i):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+            elif not self.is_admin_authenticated():
+                self.send_response(303)
+                self.send_header('Location', '/client_login?next=' + urllib.parse.quote(self.path))
+                self.end_headers()
+                return
+
+            if not get_client_questionnaire_assignment(client_id_i, assignment_id_i):
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            pdf = build_initial_questionnaire_pdf(client_id_i, assignment_id_i)
+            if pdf is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/pdf')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Disposition', f'attachment; filename="cuestionario_{client_id_i}_{assignment_id_i}.pdf"')
+            self.send_header('Content-Length', str(len(pdf)))
+            self.end_headers()
+            self.wfile.write(pdf)
+            return
+
+        if path == '/initial_questionnaire_editor':
+            version_id = q.get('version_id', [''])[0]
+            msg = q.get('msg', [''])[0]
+            try:
+                version_id_i = int(version_id) if str(version_id).strip() else None
+            except Exception:
+                version_id_i = None
+            page = render_initial_questionnaire_editor_page(version_id=version_id_i, msg=msg)
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/weekly_feedback_editor':
+            version_id = q.get('version_id', [''])[0]
+            msg = q.get('msg', [''])[0]
+            client_id = q.get('client_id', [''])[0]
+            submission_id = q.get('feedback_submission_id', [''])[0]
+            try:
+                version_id_i = int(version_id) if str(version_id).strip() else None
+            except Exception:
+                version_id_i = None
+            try:
+                client_id_i = int(client_id) if str(client_id).strip() else None
+            except Exception:
+                client_id_i = None
+            try:
+                submission_id_i = int(submission_id) if str(submission_id).strip() else None
+            except Exception:
+                submission_id_i = None
+            page = render_weekly_feedback_editor_page(
+                version_id=version_id_i,
+                msg=msg,
+                client_id=client_id_i,
+                submission_id=submission_id_i,
+            )
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
             return
 
         # Foods page
@@ -11352,6 +14555,10 @@ class Handler(BaseHTTPRequestHandler):
             '/set_client_weight_goal',
             '/submit_client_review',
             '/delete_client_review',
+            '/save_client_initial_questionnaire_answer',
+            '/submit_client_initial_questionnaire',
+            '/upload_client_initial_questionnaire_file',
+            '/submit_client_weekly_feedback',
         }
         if path not in public_post_paths and not self.is_admin_authenticated():
             self.redirect_admin_login(path)
@@ -11663,6 +14870,66 @@ class Handler(BaseHTTPRequestHandler):
             conn.close()
             return self.send_json({'status': 'created'}, status=201)
 
+        if path == '/upload_client_initial_questionnaire_file':
+            if 'multipart/form-data' not in ctype.lower():
+                return self.send_json({'error': 'multipart required'}, status=400)
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            is_admin = self.is_admin_authenticated()
+
+            try:
+                form = cgi.FieldStorage(
+                    fp=self.rfile,
+                    headers=self.headers,
+                    environ={
+                        'REQUEST_METHOD': 'POST',
+                        'CONTENT_TYPE': ctype,
+                    },
+                )
+            except Exception:
+                return self.send_json({'error': 'invalid multipart payload'}, status=400)
+
+            client_id_raw = str(form.getfirst('client_id', '') or '').strip()
+            assignment_id_raw = str(form.getfirst('assignment_id', '') or '').strip()
+            question_id_raw = str(form.getfirst('question_id', '') or '').strip()
+            try:
+                client_id_i = int(client_id_raw)
+                assignment_id_i = int(assignment_id_raw)
+                question_id_i = int(question_id_raw)
+            except Exception:
+                return self.send_json({'error': 'invalid ids'}, status=400)
+
+            if session_client_id is not None:
+                if int(session_client_id) != int(client_id_i):
+                    return self.send_json({'error': 'unauthorized'}, status=403)
+            elif not is_admin:
+                return self.send_json({'error': 'unauthorized'}, status=403)
+
+            assignment = get_client_questionnaire_assignment(client_id_i, assignment_id_i)
+            if not assignment:
+                return self.send_json({'error': 'assignment not found'}, status=404)
+
+            if 'file' not in form:
+                return self.send_json({'error': 'file required'}, status=400)
+            file_field = form['file']
+            if not getattr(file_field, 'file', None):
+                return self.send_json({'error': 'invalid file'}, status=400)
+
+            file_bytes = file_field.file.read()
+            if not isinstance(file_bytes, (bytes, bytearray)):
+                return self.send_json({'error': 'invalid file bytes'}, status=400)
+
+            saved = save_client_questionnaire_file(
+                assignment_id_i,
+                question_id_i,
+                getattr(file_field, 'filename', '') or 'archivo',
+                getattr(file_field, 'type', '') or 'application/octet-stream',
+                bytes(file_bytes),
+            )
+            return self.send_json({'ok': True, 'file': saved})
+
         # form handlers
         length = int(self.headers.get('Content-Length', 0))
         data = self.rfile.read(length).decode('utf-8')
@@ -11670,6 +14937,211 @@ class Handler(BaseHTTPRequestHandler):
 
         def get(field, default=''):
             return params.get(field, [default])[0]
+
+        if path == '/save_client_initial_questionnaire_answer':
+            client_id_raw = get('client_id').strip()
+            assignment_id_raw = get('assignment_id').strip()
+            question_id_raw = get('question_id').strip()
+            value_text = get('value_text')
+            value_json_raw = get('value_json').strip()
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            is_admin = self.is_admin_authenticated()
+
+            try:
+                client_id_i = int(client_id_raw)
+                assignment_id_i = int(assignment_id_raw)
+                question_id_i = int(question_id_raw)
+            except Exception:
+                return self.send_json({'error': 'invalid ids'}, status=400)
+
+            if session_client_id is not None:
+                if int(session_client_id) != int(client_id_i):
+                    return self.send_json({'error': 'unauthorized'}, status=403)
+            elif not is_admin:
+                return self.send_json({'error': 'unauthorized'}, status=403)
+
+            assignment = get_client_questionnaire_assignment(client_id_i, assignment_id_i)
+            if not assignment:
+                return self.send_json({'error': 'assignment not found'}, status=404)
+
+            value_json = None
+            if value_json_raw:
+                try:
+                    value_json = json.loads(value_json_raw)
+                except Exception:
+                    value_json = None
+            save_client_questionnaire_answer(assignment_id_i, question_id_i, value_text=value_text, value_json=value_json)
+            return self.send_json({'ok': True})
+
+        if path == '/submit_client_initial_questionnaire':
+            client_id_raw = get('client_id').strip()
+            assignment_id_raw = get('assignment_id').strip()
+            return_to = get('return_to').strip()
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            is_admin = self.is_admin_authenticated()
+
+            try:
+                client_id_i = int(client_id_raw)
+                assignment_id_i = int(assignment_id_raw)
+            except Exception:
+                if self.headers.get('X-Requested-With', '').lower() == 'fetch':
+                    return self.send_json({'error': 'invalid ids'}, status=400)
+                self.send_response(303)
+                self.send_header('Location', '/client_app?msg=' + urllib.parse.quote('Solicitud inválida'))
+                self.end_headers()
+                return
+
+            if session_client_id is not None:
+                if int(session_client_id) != int(client_id_i):
+                    return self.send_json({'error': 'unauthorized'}, status=403)
+            elif not is_admin:
+                return self.send_json({'error': 'unauthorized'}, status=403)
+
+            assignment = get_client_questionnaire_assignment(client_id_i, assignment_id_i)
+            if not assignment:
+                return self.send_json({'error': 'assignment not found'}, status=404)
+
+            mark_client_questionnaire_submitted(assignment_id_i)
+            if self.headers.get('X-Requested-With', '').lower() == 'fetch':
+                return self.send_json({'ok': True})
+            redirect_to = return_to or '/client_app?section=questionnaire'
+            self.send_response(303)
+            self.send_header('Location', redirect_to + ('&' if '?' in redirect_to else '?') + 'msg=' + urllib.parse.quote('Cuestionario enviado'))
+            self.end_headers()
+            return
+
+        if path == '/request_client_initial_questionnaire':
+            client_id_raw = get('client_id').strip()
+            version_id_raw = get('version_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            try:
+                client_id_i = int(client_id_raw)
+                version_id_i = int(version_id_raw)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Parámetros inválidos'))
+                self.end_headers()
+                return
+            assignment = request_initial_questionnaire_version_for_client(client_id_i, version_id_i)
+            if not assignment:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('No se pudo asignar la versión'))
+                self.end_headers()
+                return
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Versión de cuestionario asignada'))
+            self.end_headers()
+            return
+
+        if path == '/initial_questionnaire_editor':
+            action = get('action').strip()
+            version_id_raw = get('version_id').strip()
+            source_version_id_raw = get('source_version_id').strip()
+            msg = 'Cambios guardados'
+            try:
+                version_id_i = int(version_id_raw) if version_id_raw else 0
+            except Exception:
+                version_id_i = 0
+
+            if action == 'create_version_copy':
+                new_id = create_initial_questionnaire_version_copy(
+                    title=get('title').strip(),
+                    description=get('description').strip(),
+                    source_version_id=int(source_version_id_raw or 0) if source_version_id_raw else None,
+                )
+                if new_id:
+                    version_id_i = int(new_id)
+                    msg = 'Versión clonada'
+                else:
+                    msg = 'No se pudo clonar la versión'
+            elif action == 'publish_version':
+                if version_id_i > 0:
+                    publish_initial_questionnaire_version(version_id_i)
+                    msg = 'Versión publicada'
+            elif action == 'add_section':
+                if version_id_i > 0:
+                    add_initial_questionnaire_section(version_id_i, title=get('title').strip() or 'Nueva sección')
+                    msg = 'Sección añadida'
+            elif action == 'update_section':
+                section_id = int(get('section_id') or 0)
+                if section_id > 0:
+                    update_initial_questionnaire_section(
+                        section_id,
+                        title=get('title').strip(),
+                        help_text=get('help_text').strip(),
+                        is_active=1 if get('is_active').strip() == '1' else 0,
+                    )
+                    msg = 'Sección actualizada'
+            elif action == 'delete_section':
+                section_id = int(get('section_id') or 0)
+                if section_id > 0:
+                    delete_initial_questionnaire_section(section_id)
+                    msg = 'Sección eliminada'
+            elif action == 'add_question':
+                section_id = int(get('section_id') or 0)
+                if section_id > 0:
+                    add_initial_questionnaire_question(section_id, label=get('label').strip() or 'Nueva pregunta', question_type=get('question_type').strip() or 'text_short')
+                    msg = 'Pregunta añadida'
+            elif action == 'update_question':
+                question_id = int(get('question_id') or 0)
+                if question_id > 0:
+                    options = []
+                    validation = {}
+                    condition = None
+                    try:
+                        options_candidate = json.loads(get('options_json').strip() or '[]')
+                        if isinstance(options_candidate, list):
+                            options = options_candidate
+                    except Exception:
+                        options = []
+                    try:
+                        validation_candidate = json.loads(get('validation_json').strip() or '{}')
+                        if isinstance(validation_candidate, dict):
+                            validation = validation_candidate
+                    except Exception:
+                        validation = {}
+                    try:
+                        condition_candidate = json.loads(get('condition_json').strip() or '{}')
+                        if isinstance(condition_candidate, dict) and condition_candidate:
+                            condition = condition_candidate
+                    except Exception:
+                        condition = None
+                    update_initial_questionnaire_question(
+                        question_id,
+                        {
+                            'label': get('label').strip(),
+                            'question_type': get('question_type').strip(),
+                            'is_required': 1 if get('is_required').strip() == '1' else 0,
+                            'is_active': 1 if get('is_active').strip() == '1' else 0,
+                            'help_text': get('help_text').strip(),
+                            'placeholder': get('placeholder').strip(),
+                            'options': options,
+                            'validation': validation,
+                            'condition': condition,
+                        },
+                    )
+                    msg = 'Pregunta actualizada'
+            elif action == 'delete_question':
+                question_id = int(get('question_id') or 0)
+                if question_id > 0:
+                    delete_initial_questionnaire_question(question_id)
+                    msg = 'Pregunta eliminada'
+
+            redirect_to = '/initial_questionnaire_editor'
+            if version_id_i > 0:
+                redirect_to += '?version_id=' + str(version_id_i) + '&msg=' + urllib.parse.quote(msg)
+            else:
+                redirect_to += '?msg=' + urllib.parse.quote(msg)
+            self.send_response(303)
+            self.send_header('Location', redirect_to)
+            self.end_headers()
+            return
 
         if path == '/admin_login':
             username = get('username').strip()
@@ -13343,6 +16815,93 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == '/set_client_weekly_feedback_schedule':
+            if not self.is_admin_authenticated():
+                self.send_response(303)
+                self.send_header('Location', '/client_login?msg=' + urllib.parse.quote('No autorizado'))
+                self.end_headers()
+                return
+
+            client_id_raw = get('client_id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            try:
+                client_id_i = int(client_id_raw)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Cliente inválido'))
+                self.end_headers()
+                return
+
+            try:
+                weekday = int(get('weekday') or 1)
+            except Exception:
+                weekday = 1
+            repeat_enabled = 1 if get('repeat_enabled').strip() else 0
+            is_active = 1 if get('is_active').strip() else 0
+            upsert_client_weekly_feedback_schedule(client_id_i, weekday, repeat_enabled, is_active)
+
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Configuración de feedback guardada'))
+            self.end_headers()
+            return
+
+        if path == '/submit_client_weekly_feedback':
+            client_id_raw = get('client_id').strip()
+            version_id_raw = get('version_id').strip()
+            return_to = get('return_to').strip()
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            is_admin = self.is_admin_authenticated()
+
+            try:
+                client_id_i = int(client_id_raw)
+                version_id_i = int(version_id_raw)
+            except Exception:
+                if self.headers.get('X-Requested-With', '').lower() == 'fetch':
+                    return self.send_json({'error': 'invalid ids'}, status=400)
+                self.send_response(303)
+                self.send_header('Location', '/client_app?msg=' + urllib.parse.quote('Solicitud inválida'))
+                self.end_headers()
+                return
+
+            if session_client_id is not None:
+                if int(session_client_id) != int(client_id_i):
+                    return self.send_json({'error': 'unauthorized'}, status=403)
+            elif not is_admin:
+                return self.send_json({'error': 'unauthorized'}, status=403)
+
+            structure = get_weekly_feedback_structure(version_id_i, include_inactive=True)
+            if not structure.get('version'):
+                return self.send_json({'error': 'version not found'}, status=404)
+
+            schedule = get_client_weekly_feedback_schedule(client_id_i)
+            scheduled_date = _nearest_weekday_date(time.strftime('%Y-%m-%d'), schedule.get('weekday', 1))
+            answers_map = {}
+            for section in structure.get('sections') or []:
+                for question in section.get('questions') or []:
+                    qid = int(question.get('id') or 0)
+                    if qid <= 0:
+                        continue
+                    field_name = f'q_{qid}'
+                    qtype = str(question.get('question_type') or 'text_long')
+                    if qtype == 'multi_choice':
+                        values = params.get(field_name, [])
+                        answers_map[qid] = {'value_json': [str(v) for v in values if str(v).strip()]}
+                    else:
+                        answers_map[qid] = {'value_text': get(field_name)}
+
+            create_weekly_feedback_submission(client_id_i, version_id_i, scheduled_date, answers_map)
+
+            if self.headers.get('X-Requested-With', '').lower() == 'fetch':
+                return self.send_json({'ok': True})
+            redirect_to = return_to or '/client_app?section=feedback'
+            self.send_response(303)
+            self.send_header('Location', redirect_to + ('&' if '?' in redirect_to else '?') + 'msg=' + urllib.parse.quote('Feedback guardado'))
+            self.end_headers()
+            return
+
         if path == '/submit_client_review':
             client_id_raw = get('client_id').strip()
             review_id_raw = get('review_id').strip()
@@ -13672,6 +17231,9 @@ class Handler(BaseHTTPRequestHandler):
             cur.execute("DELETE FROM client_daily_steps WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM client_notice_events WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM client_notice_rules WHERE client_id = ?", (cid_i,))
+            cur.execute("DELETE FROM client_weekly_feedback_answers WHERE submission_id IN (SELECT id FROM client_weekly_feedback_submissions WHERE client_id = ?)", (cid_i,))
+            cur.execute("DELETE FROM client_weekly_feedback_submissions WHERE client_id = ?", (cid_i,))
+            cur.execute("DELETE FROM client_weekly_feedback_schedule WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM payment_plans WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM clients WHERE id = ?", (cid_i,))
             for did in client_diet_ids:
@@ -14082,7 +17644,9 @@ def run():
         ensure_client_daily_steps_table()
         ensure_client_notice_events_table()
         ensure_client_notice_rules_table()
+        ensure_weekly_feedback_tables()
         ensure_client_reviews_table()
+        ensure_initial_questionnaire_tables()
         ensure_diet_builder_tables()
         ensure_app_settings_table()
     finally:
