@@ -2259,67 +2259,72 @@ def render_initial_questionnaire_panel(client_id, return_to, admin_mode=False, a
 
     styles_html = (
         '<style>'
-        '.iq-wrap{--iq-panel:#ffffff;--iq-line:#dbe4f0;--iq-line-strong:#c8d4e5;--iq-text:#101828;--iq-muted:#667085;--iq-primary:#2563eb;--iq-primary-soft:#e8f0ff;--iq-shadow:0 12px 30px rgba(16,24,40,.07);--iq-shadow-hover:0 18px 40px rgba(16,24,40,.10);display:grid;gap:16px;color:var(--iq-text);}'
+        '.iq-wrap{--iq-panel:#ffffff;--iq-line:#dbe4f0;--iq-line-strong:#c8d4e5;--iq-text:#101828;--iq-muted:#667085;--iq-primary:#2563eb;--iq-primary-soft:#e8f0ff;--iq-shadow:0 12px 30px rgba(16,24,40,.07);--iq-shadow-hover:0 18px 40px rgba(16,24,40,.10);display:grid;gap:16px;color:var(--iq-text);width:100%;max-width:100%;min-width:0;overflow-x:hidden;}'
+        '.iq-wrap,.iq-wrap *,.iq-wrap *::before,.iq-wrap *::after{box-sizing:border-box;min-width:0;max-width:100%;}'
         '.iq-top{display:grid;gap:14px;position:sticky;top:0;z-index:10;padding:10px 0 4px;background:linear-gradient(180deg,rgba(244,247,253,.97) 0%,rgba(244,247,253,.86) 64%,rgba(244,247,253,0) 100%);backdrop-filter:saturate(1.2) blur(10px);}'
-        '.iq-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;padding:20px;border:1px solid var(--iq-line);border-radius:24px;background:linear-gradient(145deg,#ffffff 0%,#f7faff 58%,#f4f8ff 100%);box-shadow:var(--iq-shadow);align-items:start;}'
-        '.iq-head-main{display:flex;align-items:flex-start;gap:14px;min-width:0;}'
+        '.iq-head{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:14px;padding:20px;border:1px solid var(--iq-line);border-radius:24px;background:linear-gradient(145deg,#ffffff 0%,#f7faff 58%,#f4f8ff 100%);box-shadow:var(--iq-shadow);align-items:start;min-width:0;}'
+        '.iq-head-main{display:flex;align-items:flex-start;gap:14px;min-width:0;flex:1 1 auto;}'
         '.iq-icon{width:56px;height:56px;border-radius:18px;background:radial-gradient(circle at 30% 25%,#dbeafe 0%,#c7d9ff 45%,#bfd3ff 100%);display:flex;align-items:center;justify-content:center;color:#1d4ed8;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(37,99,235,.14);font-size:1.35rem;}'
-        '.iq-title-wrap{min-width:0;display:grid;gap:6px;}'
+        '.iq-title-wrap{min-width:0;display:grid;gap:6px;flex:1 1 auto;}'
         '.iq-eyebrow{margin:0;font-size:.78rem;letter-spacing:.18em;text-transform:uppercase;font-weight:800;color:#64748b;}'
-        '.iq-title-wrap h2{margin:0;font-size:clamp(1.5rem,3vw,2.1rem);line-height:1.08;letter-spacing:-.03em;}'
-        '.iq-title-wrap p{margin:0;color:var(--iq-muted);font-size:.98rem;line-height:1.5;max-width:62ch;}'
-        '.iq-status{padding:14px 16px;border:1px solid #d6e4ff;border-radius:18px;background:#edf4ff;display:grid;gap:4px;min-width:240px;align-content:start;}'
+        '.iq-title-wrap h2{margin:0;font-size:clamp(1.5rem,3vw,2.1rem);line-height:1.08;letter-spacing:-.03em;overflow-wrap:anywhere;word-break:break-word;hyphens:auto;}'
+        '.iq-title-wrap p{margin:0;color:var(--iq-muted);font-size:.98rem;line-height:1.5;max-width:100%;overflow-wrap:anywhere;}'
+        '.iq-status{padding:14px 16px;border:1px solid #d6e4ff;border-radius:18px;background:#edf4ff;display:grid;gap:4px;min-width:0;max-width:100%;align-content:start;}'
         '.iq-status strong{font-size:.95rem;color:#1e3a8a;}'
-        '.iq-status span{font-size:.86rem;color:#334155;line-height:1.4;}'
-        '.iq-progress{padding:16px;border:1px solid var(--iq-line);border-radius:20px;background:var(--iq-panel);box-shadow:var(--iq-shadow);display:grid;gap:10px;}'
+        '.iq-status span{font-size:.86rem;color:#334155;line-height:1.4;overflow-wrap:anywhere;}'
+        '.iq-progress{padding:16px;border:1px solid var(--iq-line);border-radius:20px;background:var(--iq-panel);box-shadow:var(--iq-shadow);display:grid;gap:10px;min-width:0;max-width:100%;}'
         '.iq-progress-head{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;}'
         '.iq-progress-head strong{font-size:.95rem;}'
         '.iq-progress-head span{font-size:.85rem;color:var(--iq-muted);}'
         '.iq-progress-bar{height:10px;border-radius:999px;background:#e8eefb;overflow:hidden;}'
         '.iq-progress-fill{height:100%;width:0%;background:linear-gradient(90deg,#2563eb,#38bdf8);transition:width .35s ease;}'
-        '.iq-admin-assignment-form{display:flex;gap:8px;flex-wrap:wrap;align-items:end;border:1px solid var(--iq-line);padding:14px;border-radius:18px;background:var(--iq-panel);box-shadow:var(--iq-shadow);}'
-        '.iq-admin-assignment-form label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;color:var(--iq-muted);font-weight:700;}'
-        '.iq-admin-assignment-form select{padding:11px 12px;border:1px solid var(--iq-line-strong);border-radius:12px;min-width:260px;background:#fff;}'
+        '.iq-admin-assignment-form{display:flex;gap:8px;flex-wrap:wrap;align-items:end;border:1px solid var(--iq-line);padding:14px;border-radius:18px;background:var(--iq-panel);box-shadow:var(--iq-shadow);min-width:0;max-width:100%;}'
+        '.iq-admin-assignment-form label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;color:var(--iq-muted);font-weight:700;min-width:0;}'
+        '.iq-admin-assignment-form select{padding:11px 12px;border:1px solid var(--iq-line-strong);border-radius:12px;min-width:0;max-width:100%;background:#fff;}'
         '.iq-actions-top{display:flex;gap:10px;flex-wrap:wrap;}'
-        '.iq-sections{display:grid;gap:18px;}'
-        '.iq-section{border:1px solid var(--iq-line);border-radius:24px;background:var(--iq-panel);padding:16px;display:grid;gap:12px;box-shadow:var(--iq-shadow);transition:transform .2s ease, box-shadow .25s ease, border-color .2s ease;}'
+        '.iq-sections{display:grid;gap:18px;min-width:0;max-width:100%;}'
+        '.iq-section{border:1px solid var(--iq-line);border-radius:24px;background:var(--iq-panel);padding:16px;display:grid;gap:12px;box-shadow:var(--iq-shadow);transition:transform .2s ease, box-shadow .25s ease, border-color .2s ease;min-width:0;max-width:100%;}'
         '.iq-section:hover{transform:translateY(-1px);box-shadow:var(--iq-shadow-hover);border-color:#cdd8ea;}'
-        '.iq-section-head{display:flex;align-items:flex-end;justify-content:space-between;gap:10px;flex-wrap:wrap;}'
+        '.iq-section-head{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:center;gap:10px;min-width:0;}'
         '.iq-section-tag{display:inline-flex;align-items:center;padding:5px 10px;border-radius:999px;background:#eef2ff;color:#3447a4;font-size:.72rem;font-weight:800;letter-spacing:.08em;text-transform:uppercase;}'
-        '.iq-section h3{margin:0;font-size:1.18rem;line-height:1.2;letter-spacing:-.02em;color:var(--iq-text);}'
-        '.iq-section-help{margin:0;color:var(--iq-muted);font-size:.9rem;line-height:1.45;}'
-        '.iq-section-body{display:grid;gap:12px;}'
-        '.iq-question{display:grid;gap:12px;padding:16px;border:1px solid #e7edf6;border-radius:20px;background:linear-gradient(180deg,#fcfdff 0%,#f9fbff 100%);transition:border-color .2s ease, box-shadow .25s ease, transform .2s ease;}'
+        '.iq-section h3{margin:0;font-size:1.18rem;line-height:1.2;letter-spacing:-.02em;color:var(--iq-text);overflow-wrap:anywhere;word-break:break-word;hyphens:auto;}'
+        '.iq-section-help{margin:0;color:var(--iq-muted);font-size:.9rem;line-height:1.45;overflow-wrap:anywhere;}'
+        '.iq-section-body{display:grid;gap:12px;min-width:0;}'
+        '.iq-question{display:grid;gap:12px;padding:16px;border:1px solid #e7edf6;border-radius:20px;background:linear-gradient(180deg,#fcfdff 0%,#f9fbff 100%);transition:border-color .2s ease, box-shadow .25s ease, transform .2s ease;min-width:0;max-width:100%;}'
         '.iq-question:hover{border-color:#cddaf4;box-shadow:0 10px 24px rgba(16,24,40,.05);transform:translateY(-1px);}'
-        '.iq-question-head{display:flex;gap:12px;align-items:flex-start;}'
+        '.iq-question-head{display:flex;gap:12px;align-items:flex-start;min-width:0;}'
         '.iq-q-index{width:30px;height:30px;border-radius:999px;background:#e8efff;color:#1d4ed8;font-weight:800;font-size:.78rem;display:flex;align-items:center;justify-content:center;flex:0 0 auto;box-shadow:inset 0 0 0 1px rgba(37,99,235,.10);}'
-        '.iq-question-copy{min-width:0;display:grid;gap:4px;}'
-        '.iq-question-title{font-weight:800;color:var(--iq-text);font-size:.98rem;line-height:1.4;}'
+        '.iq-question-copy{min-width:0;display:grid;gap:4px;flex:1 1 auto;}'
+        '.iq-question-title{font-weight:800;color:var(--iq-text);font-size:.98rem;line-height:1.4;overflow-wrap:anywhere;word-break:break-word;hyphens:auto;}'
         '.iq-required{color:#b91c1c;}'
         '.iq-help{margin:0;color:var(--iq-muted);font-size:.84rem;line-height:1.45;}'
-        '.iq-answer-shell{display:grid;gap:8px;}'
-        '.iq-input{width:100%;padding:12px 14px;border:1px solid #d7deed;border-radius:14px;background:#fff;color:var(--iq-text);box-sizing:border-box;font:inherit;font-size:16px;outline:none;transition:border-color .2s ease, box-shadow .2s ease, background .2s ease;}'
+        '.iq-answer-shell{display:grid;gap:8px;min-width:0;max-width:100%;}'
+        '.iq-input{width:100%;max-width:100%;min-width:0;padding:12px 14px;border:1px solid #d7deed;border-radius:14px;background:#fff;color:var(--iq-text);box-sizing:border-box;font:inherit;font-size:16px;outline:none;transition:border-color .2s ease, box-shadow .2s ease, background .2s ease;}'
         '.iq-input:focus{border-color:var(--iq-primary);box-shadow:0 0 0 4px rgba(37,99,235,.12);background:#fff;}'
         'textarea.iq-input{min-height:120px;resize:vertical;line-height:1.45;}'
-        '.iq-choice-list{display:grid;gap:8px;}'
-        '.iq-choice-item{display:flex;gap:10px;align-items:center;padding:12px 14px;border:1px solid #d7deed;border-radius:14px;background:#fff;font-size:.92rem;color:#1f2937;transition:all .2s ease;}'
+        '.iq-choice-list{display:grid;gap:8px;min-width:0;max-width:100%;}'
+        '.iq-choice-item{display:flex;gap:10px;align-items:center;padding:12px 14px;border:1px solid #d7deed;border-radius:14px;background:#fff;font-size:.92rem;color:#1f2937;transition:all .2s ease;min-width:0;max-width:100%;overflow-wrap:anywhere;}'
         '.iq-choice-item:hover{border-color:#99b7ff;background:#f7faff;transform:translateY(-1px);}'
         '.iq-choice-item input{accent-color:var(--iq-primary);width:18px;height:18px;flex:0 0 auto;}'
-        '.iq-file-list{margin:0;padding-left:18px;display:grid;gap:4px;}'
+        '.iq-file-input{display:block;width:100%;max-width:100%;min-width:0;border:1px dashed #c7d7f3;border-radius:12px;background:#fff;color:#1f2937;padding:9px 10px;font:inherit;font-size:16px;line-height:1.3;overflow:hidden;}'
+        '.iq-file-input::file-selector-button{border:1px solid #c7d7f3;border-radius:10px;background:#eef4ff;color:#1d4ed8;padding:8px 10px;margin-right:10px;font:inherit;font-weight:700;cursor:pointer;}'
+        '.iq-file-input::-webkit-file-upload-button{border:1px solid #c7d7f3;border-radius:10px;background:#eef4ff;color:#1d4ed8;padding:8px 10px;margin-right:10px;font:inherit;font-weight:700;cursor:pointer;}'
+        '.iq-file-list{margin:0;padding-left:18px;display:grid;gap:4px;min-width:0;max-width:100%;overflow-wrap:anywhere;}'
         '.iq-file-list li{word-break:break-word;}'
         '.iq-file-list li a{color:#0f172a;text-decoration:none;font-weight:700;font-size:.84rem;}'
         '.iq-file-list li a:hover{text-decoration:underline;}'
         '.iq-save-status{font-size:.76rem;font-weight:700;min-height:1em;color:var(--iq-muted);}'
-        '.iq-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;}'
+        '.iq-actions{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;min-width:0;max-width:100%;}'
         '.iq-actions-sticky{position:sticky;bottom:0;z-index:9;padding:14px 0 0;background:linear-gradient(180deg,rgba(244,247,253,0) 0%,rgba(244,247,253,.96) 38%,rgba(244,247,253,.98) 100%);}'
-        '.iq-btn{display:inline-flex;align-items:center;justify-content:center;padding:11px 14px;border:1px solid var(--iq-line-strong);border-radius:14px;background:#fff;color:var(--iq-text);text-decoration:none;font-weight:800;cursor:pointer;transition:transform .2s ease, box-shadow .25s ease, background .2s ease, border-color .2s ease;box-shadow:0 8px 18px rgba(16,24,40,.06);}'
+        '.iq-btn{display:inline-flex;align-items:center;justify-content:center;padding:11px 14px;border:1px solid var(--iq-line-strong);border-radius:14px;background:#fff;color:var(--iq-text);text-decoration:none;font-weight:800;cursor:pointer;transition:transform .2s ease, box-shadow .25s ease, background .2s ease, border-color .2s ease;box-shadow:0 8px 18px rgba(16,24,40,.06);min-width:0;max-width:100%;overflow-wrap:anywhere;}'
         '.iq-btn:hover{background:#f8fafc;transform:translateY(-1px);border-color:#cfd8e6;}'
         '.iq-btn-primary{background:linear-gradient(90deg,#1d4ed8 0%,#2563eb 55%,#0ea5e9 100%);color:#fff;border:none;box-shadow:0 14px 28px rgba(37,99,235,.24);}'
         '.iq-btn-primary:hover{background:linear-gradient(90deg,#1e40af 0%,#1d4ed8 55%,#0284c7 100%);box-shadow:0 16px 32px rgba(37,99,235,.28);}'
         '.iq-btn-secondary{background:#fff;}'
         '.iq-empty{color:var(--iq-muted);font-style:italic;}'
         '@media (max-width:1100px){.iq-head{grid-template-columns:1fr;}.iq-status{min-width:0;}.iq-choice-list{grid-template-columns:repeat(2,minmax(0,1fr));}.iq-admin-assignment-form{width:100%;}.iq-admin-assignment-form select{min-width:0;flex:1 1 260px;}}'
-        '@media (max-width:760px){.iq-wrap{gap:14px;}.iq-top{top:0;padding-top:0;}.iq-head{padding:16px;border-radius:20px;}.iq-head-main{gap:12px;}.iq-icon{width:50px;height:50px;border-radius:16px;font-size:1.2rem;}.iq-status{padding:12px 14px;border-radius:16px;}.iq-progress{padding:14px;border-radius:18px;}.iq-section{padding:14px;border-radius:18px;}.iq-question{padding:12px;border-radius:16px;}.iq-question-head{gap:10px;}.iq-q-index{width:28px;height:28px;}.iq-actions{justify-content:stretch;}.iq-btn{width:100%;}.iq-choice-list{grid-template-columns:1fr;}.iq-admin-assignment-form{padding:12px;border-radius:16px;}.iq-admin-assignment-form label,.iq-admin-assignment-form button{width:100%;}.iq-admin-assignment-form select{width:100%;}.iq-admin-assignment-form button{justify-content:center;}.iq-actions-sticky{padding-top:10px;}}'
+        '@media (max-width:760px){.iq-wrap{gap:14px;}.iq-top{top:0;padding-top:0;}.iq-head{padding:16px;border-radius:20px;}.iq-head-main{gap:12px;}.iq-icon{width:50px;height:50px;border-radius:16px;font-size:1.2rem;}.iq-status{padding:12px 14px;border-radius:16px;}.iq-progress{padding:14px;border-radius:18px;}.iq-section{padding:14px;border-radius:18px;}.iq-question{padding:12px;border-radius:16px;}.iq-question-head{gap:10px;}.iq-q-index{width:28px;height:28px;}.iq-actions{justify-content:stretch;}.iq-btn{width:100%;}.iq-choice-list{grid-template-columns:1fr;}.iq-admin-assignment-form{padding:12px;border-radius:16px;}.iq-admin-assignment-form label,.iq-admin-assignment-form button{width:100%;}.iq-admin-assignment-form select{width:100%;}.iq-admin-assignment-form button{justify-content:center;}.iq-actions-sticky{padding-top:10px;}.iq-file-input{padding:8px 9px;}}'
+        '@media (max-width:520px){.iq-head{padding:14px;}.iq-head-main{align-items:center;}.iq-icon{width:44px;height:44px;border-radius:14px;font-size:1rem;}.iq-title-wrap h2{font-size:1.35rem;line-height:1.16;}.iq-title-wrap p{font-size:.92rem;line-height:1.4;}.iq-section{padding:12px;border-radius:16px;}.iq-section-head{grid-template-columns:1fr;align-items:flex-start;}.iq-section h3{font-size:1.02rem;line-height:1.25;}.iq-question{padding:10px;border-radius:14px;}.iq-question-title{font-size:.92rem;line-height:1.35;}.iq-answer-shell{gap:7px;}.iq-input{padding:11px 12px;}.iq-file-input{font-size:15px;line-height:1.25;}.iq-file-input::file-selector-button,.iq-file-input::-webkit-file-upload-button{padding:7px 8px;margin-right:8px;font-size:.9rem;}}'
         '@media (prefers-reduced-motion:reduce){.iq-section,.iq-question,.iq-btn,.iq-input,.iq-choice-item,.iq-progress-fill{transition:none !important;}}'
         '</style>'
     )
@@ -9513,8 +9518,8 @@ class Handler(BaseHTTPRequestHandler):
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Mi app</title>
     <style>
-        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
-        .page{{max-width:1040px;margin:0 auto;padding:22px;}}
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;overflow-x:hidden;}}
+        .page{{max-width:1040px;width:100%;margin:0 auto;padding:22px;box-sizing:border-box;overflow-x:hidden;}}
         .top{{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:18px;}}
         .top h1{{margin:0;font-size:2rem;}}
         .mail{{color:#6d7480;font-size:.95rem;}}
@@ -9528,12 +9533,12 @@ class Handler(BaseHTTPRequestHandler):
         .client-home-card .chip{{display:inline-flex;padding:4px 10px;border-radius:999px;background:#eef2f7;color:#475569;font-size:.72rem;font-weight:800;}}
         .client-home-card h3{{margin:10px 0 6px;font-size:1.05rem;}}
         .client-home-card p{{margin:0;color:#6d7480;font-size:.92rem;line-height:1.35;}}
-        .detail-wrap{{margin-top:14px;}}
+        .detail-wrap{{margin-top:14px;max-width:100%;min-width:0;overflow-x:hidden;}}
         .back-btn{{display:inline-flex;align-items:center;gap:6px;text-decoration:none;border:1px solid #d8dde6;border-radius:10px;padding:8px 11px;background:#fff;color:#101318;font-weight:700;font-size:.88rem;margin-bottom:10px;}}
-        .accordion{{border:1px solid #e8ebef;border-radius:16px;background:#fff;box-shadow:0 12px 30px rgba(16,19,24,.06);overflow:hidden;}}
+        .accordion{{border:1px solid #e8ebef;border-radius:16px;background:#fff;box-shadow:0 12px 30px rgba(16,19,24,.06);overflow:hidden;max-width:100%;min-width:0;}}
         .accordion summary{{list-style:none;cursor:pointer;padding:14px 16px;font-weight:800;font-size:1.03rem;border-bottom:1px solid #eef2f7;}}
         .accordion summary::-webkit-details-marker{{display:none;}}
-        .accordion-body{{padding:14px;}}
+        .accordion-body{{padding:14px;max-width:100%;min-width:0;overflow-x:hidden;box-sizing:border-box;}}
         .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:18px;box-shadow:0 12px 30px rgba(16,19,24,.06);}}
         .card.full{{grid-column:1 / -1;}}
         .card h2{{margin:0 0 10px;}}
@@ -10156,11 +10161,18 @@ class Handler(BaseHTTPRequestHandler):
             active_diet_by_client = get_active_client_diets_map([c[0] for c in clients]) if clients else {}
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
             client_cards = []
+            total_clients = len(clients)
+            active_clients = 0
+            inactive_clients = 0
             from datetime import date, datetime
             for c in clients:
                 client_id, name, phone, email, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, created_at = c
                 service_status = payment_plan_status(plan_start_date, plan_end_date)
                 is_active = service_status == 'Activo'
+                if is_active:
+                    active_clients += 1
+                else:
+                    inactive_clients += 1
 
                 days_remaining = '-'
                 try:
@@ -10210,17 +10222,20 @@ class Handler(BaseHTTPRequestHandler):
                 status_class = 'status-active' if is_active else 'status-inactive'
                 search_blob = ' '.join([
                     str(name or ''), str(phone_value), str(email_value), str(service_status), str(plan_label),
-                    str(monthly_fee), str(objective), str(plan_start_date or ''), str(plan_end_date or '')
+                    str(monthly_fee), str(objective), str(plan_start_date or ''), str(plan_end_date or ''), str(created_at or ''), str(client_id)
                 ]).lower().strip()
 
                 client_cards.append(
                     f'<article class="client-card" data-active="{"1" if is_active else "0"}" '
                     f'data-has-plan="{"1" if (plan_start_date or plan_end_date) else "0"}" '
+                    f'data-has-fee="{"1" if (plan_amount and plan_amount > 0) else "0"}" '
                     f'data-search="{html.escape(search_blob)}">'
                     f'<div class="card-head"><h3>{html.escape(name)}</h3><span class="service-status {status_class}">{html.escape(service_status)}</span></div>'
                     f'<div class="card-grid">'
+                    f'<div class="kv"><span>ID</span><strong>#{client_id}</strong></div>'
                     f'<div class="kv kv-email"><span>Email</span><strong>{html.escape(email_value or "-")}</strong></div>'
                     f'<div class="kv kv-phone"><span>Teléfono</span><strong>{html.escape(phone_value or "-")}</strong></div>'
+                    f'<div class="kv"><span>Alta</span><strong>{html.escape(format_feedback_datetime_es(created_at)[0])}</strong></div>'
                     f'<div class="kv"><span>Inicio</span><strong>{html.escape(plan_start_date or "-")}</strong></div>'
                     f'<div class="kv"><span>Fin</span><strong>{html.escape(plan_end_date or "-")}</strong></div>'
                     f'<div class="kv"><span>Días restantes</span><strong>{html.escape(days_remaining)}</strong></div>'
@@ -10271,7 +10286,7 @@ class Handler(BaseHTTPRequestHandler):
         .primary-btn{{display:inline-flex;align-items:center;justify-content:center;padding:11px 16px;border-radius:12px;border:1px solid var(--line-strong);background:linear-gradient(180deg,var(--brand-2),var(--brand));color:#fff;text-decoration:none;font-weight:700;box-shadow:0 10px 22px rgba(16,19,24,.16);}}
         .primary-btn:hover{{filter:brightness(.96);}}
         .message{{padding:12px 14px;border-radius:12px;background:#fef4ea;border:1px solid #f5dcc0;color:#4d3217;margin-bottom:14px;}}
-        .tabs{{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:14px;margin-bottom:14px;}}
+        .tabs{{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:14px;margin-bottom:14px;}}
         .tab-btn{{padding:20px 18px;border-radius:14px;border:1px solid var(--line);background:#fff;cursor:pointer;text-align:left;transition:all .18s ease;color:var(--ink);box-shadow:var(--shadow);}}
         .tab-btn strong{{display:block;font-size:1.06rem;margin-bottom:4px;}}
         .tab-btn span{{color:var(--muted);font-size:.92rem;}}
@@ -10314,6 +10329,7 @@ class Handler(BaseHTTPRequestHandler):
         .empty-state.show{{display:block;}}
         .is-hidden{{display:none !important;}}
         @media (max-width: 980px){{
+            .tabs{{grid-template-columns:repeat(2,minmax(220px,1fr));}}
             .clients-grid{{grid-template-columns:repeat(3,minmax(0,1fr));}}
         }}
         @media (max-width: 760px){{
@@ -10336,12 +10352,16 @@ class Handler(BaseHTTPRequestHandler):
         </div>
         {f'<div class="message">{html.escape(msg)}</div>' if msg else ''}
         <div class="tabs">
-            <button class="tab-btn is-active" type="button" data-tab="active">
-                <strong>🟢 Clientes activos</strong>
+            <button class="tab-btn is-active" type="button" data-tab="all">
+                <strong>👥 Todos ({total_clients})</strong>
+                <span>Listado completo sin ocultar clientes</span>
+            </button>
+            <button class="tab-btn" type="button" data-tab="active">
+                <strong>🟢 Clientes activos ({active_clients})</strong>
                 <span>Servicio activo actualmente</span>
             </button>
             <button class="tab-btn" type="button" data-tab="inactive">
-                <strong>⚪ Clientes no activos</strong>
+                <strong>⚪ Clientes no activos ({inactive_clients})</strong>
                 <span>Finalizados, próximos o sin plan</span>
             </button>
         </div>
@@ -10388,7 +10408,7 @@ class Handler(BaseHTTPRequestHandler):
             const filterFee = document.getElementById('filter-fee');
             const emptyState = document.getElementById('empty-state');
 
-            let currentTab = 'active';
+            let currentTab = 'all';
 
             const clientAction = (action, clientName) => {{
                 alert(action + ' para ' + clientName + ' estará disponible en la siguiente versión.');
@@ -10409,9 +10429,9 @@ class Handler(BaseHTTPRequestHandler):
                     const cardTab = card.dataset.active === '1' ? 'active' : 'inactive';
                     const searchBlob = card.dataset.search || '';
                     const planFlag = card.dataset.hasPlan || '0';
-                    const feeText = card.querySelector('.kv:nth-child(7) strong')?.textContent || '';
+                    const feeFlag = card.dataset.hasFee || '0';
 
-                    const matchesTab = cardTab === currentTab;
+                    const matchesTab = currentTab === 'all' || cardTab === currentTab;
                     const matchesQuery = !query || searchBlob.includes(query);
                     const matchesPlan = (
                         planMode === 'all' ||
@@ -10420,8 +10440,8 @@ class Handler(BaseHTTPRequestHandler):
                     );
                     const matchesFee = (
                         feeMode === 'all' ||
-                        (feeMode === 'paid' && hasFee(feeText)) ||
-                        (feeMode === 'free' && !hasFee(feeText))
+                        (feeMode === 'paid' && feeFlag === '1') ||
+                        (feeMode === 'free' && feeFlag === '0')
                     );
 
                     const show = matchesTab && matchesQuery && matchesPlan && matchesFee;
