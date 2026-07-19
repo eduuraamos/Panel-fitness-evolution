@@ -30,11 +30,16 @@ import hashlib
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
 from difflib import SequenceMatcher
+from html.parser import HTMLParser
 
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT, TA_JUSTIFY
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Image, PageBreak
 
 BASE_DIR = os.path.dirname(os.path.dirname(__file__))
 STATIC_DIR = "static"
@@ -45,6 +50,7 @@ UPLOADS_DIR = os.environ.get("UPLOADS_DIR", os.path.join(DATA_DIR, "uploads"))
 UPLOADS_FOODS_DIR = os.path.join(UPLOADS_DIR, "foods")
 UPLOADS_REVIEWS_DIR = os.path.join(UPLOADS_DIR, "reviews")
 UPLOADS_QUESTIONNAIRE_DIR = os.path.join(STATIC_BASE_DIR, "uploads", "questionnaire")
+UPLOADS_CONTRACTS_DIR = os.path.join(STATIC_BASE_DIR, "uploads", "contracts")
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "8005"))
 CLIENT_PORTAL_SECRET = os.environ.get("CLIENT_PORTAL_SECRET", "nutrition-app-client-portal")
@@ -72,6 +78,73 @@ DEFAULT_DIET_INSTRUCTIONS_TEMPLATE = (
     "Adherencia: si un alimento no te encaja, usa una opcion similar y manten cantidades.\n"
     "Constancia: revisa sensaciones, energia y digestion para ajustar con tu entrenador."
 )
+
+DEFAULT_LEGAL_CONTRACT_CONTENT_HTML = """
+<h2>1. Objeto del servicio</h2>
+<p>
+    El presente contrato regula la prestacion de servicios de entrenamiento personal y asesoramiento
+    nutricional, incluyendo seguimiento, programacion y recomendaciones profesionales adaptadas al cliente.
+</p>
+<h2>2. Naturaleza del asesoramiento</h2>
+<p>
+    El servicio no sustituye la atencion medica. El cliente confirma que ha informado sobre su estado de salud
+    y que consultara con profesionales sanitarios cuando corresponda.
+</p>
+<h2>3. Obligaciones del cliente</h2>
+<ul>
+    <li>Facilitar informacion veraz y actualizada.</li>
+    <li>Seguir las pautas de forma responsable y comunicar incidencias.</li>
+    <li>Respetar los plazos, canales y condiciones del servicio.</li>
+</ul>
+<h2>4. Proteccion de datos</h2>
+<p>
+    Los datos personales y de salud se trataran con la finalidad de prestar el servicio contratado,
+    bajo medidas tecnicas y organizativas adecuadas conforme a la normativa aplicable.
+</p>
+<h2>5. Uso de imagen y fotografias</h2>
+<p>
+    Las fotografias de seguimiento se utilizaran exclusivamente para la evaluacion tecnica del progreso,
+    salvo consentimiento expreso adicional para otros usos.
+</p>
+<h2>6. Firma electronica</h2>
+<p>
+    La firma manuscrita digital del cliente tiene validez como manifestacion expresa de consentimiento y
+    aceptacion del contenido completo de este contrato.
+</p>
+""".strip()
+
+LEGAL_CONTRACT_PROFILE_DEFAULTS = {
+    'legal_contract_company_name': 'NOMBRE_EMPRESA',
+    'legal_contract_professional_name': 'NOMBRE_PROFESIONAL',
+    'legal_contract_nif': '',
+    'legal_contract_address': '',
+    'legal_contract_phone': '',
+    'legal_contract_email': '',
+    'legal_contract_web': '',
+    'legal_contract_logo_url': '/static/logo.png',
+    'legal_contract_professional_signature_data_url': '',
+    'legal_contract_pdf_header': 'DOCUMENTO LEGAL',
+    'legal_contract_pdf_footer': 'Documento generado por Fitness Evolution',
+}
+
+LEGAL_CONTRACT_VARIABLE_LABELS = [
+    ('NOMBRE_EMPRESA', 'Nombre de la empresa'),
+    ('NOMBRE_PROFESIONAL', 'Nombre del profesional responsable'),
+    ('NIF', 'NIF/CIF de la empresa o profesional'),
+    ('DIRECCION', 'Direccion fiscal o comercial'),
+    ('TELEFONO', 'Telefono de contacto'),
+    ('EMAIL', 'Email de contacto'),
+    ('WEB', 'Sitio web'),
+    ('LOGO_EMPRESA', 'Logo corporativo'),
+    ('FIRMA_PROFESIONAL', 'Firma automatica del profesional'),
+    ('NOMBRE_CLIENTE', 'Nombre del cliente'),
+    ('DNI_CLIENTE', 'DNI/NIF del cliente'),
+    ('FECHA_FIRMA', 'Fecha de firma (dd/mm/aaaa)'),
+    ('FECHA_GENERACION', 'Fecha de generacion del PDF (dd/mm/aaaa)'),
+    ('HORA_FIRMA', 'Hora de firma (hh:mm)'),
+    ('VERSION_CONTRATO', 'Version del contrato activa o firmada'),
+    ('FIRMA_CLIENTE', 'Imagen de firma manuscrita del cliente'),
+]
 
 SPANISH_MONTHS = [
     'ENERO', 'FEBRERO', 'MARZO', 'ABRIL', 'MAYO', 'JUNIO',
@@ -568,6 +641,11 @@ def ensure_app_settings_table(conn_or_path=None):
         "INSERT OR IGNORE INTO app_settings(key, value) VALUES(?, ?)",
         ('admin_portal_password_hash', hash_admin_password(str(ADMIN_PORTAL_PASSWORD or 'change-me-now'))),
     )
+    for key, value in LEGAL_CONTRACT_PROFILE_DEFAULTS.items():
+        cur.execute(
+            "INSERT OR IGNORE INTO app_settings(key, value) VALUES(?, ?)",
+            (str(key), str(value)),
+        )
     conn.commit()
     if should_close:
         conn.close()
@@ -635,6 +713,8 @@ def ensure_clients_table(conn_or_path=None):
         cur.execute("ALTER TABLE clients ADD COLUMN plan_notes TEXT")
     if 'email' not in cols:
         cur.execute("ALTER TABLE clients ADD COLUMN email TEXT")
+    if 'dni' not in cols:
+        cur.execute("ALTER TABLE clients ADD COLUMN dni TEXT")
     if 'client_access_code' not in cols:
         cur.execute("ALTER TABLE clients ADD COLUMN client_access_code TEXT")
     if 'client_password_hash' not in cols:
@@ -3915,6 +3995,2560 @@ def render_weekly_feedback_editor_page(version_id=None, msg='', client_id=None, 
 </body>
 </html>
 '''
+
+
+def get_legal_contract_default_definition():
+    return {
+        'title': 'Contrato legal de prestacion de servicios',
+        'subtitle': 'Entrenamiento personal y asesoramiento nutricional',
+        'content_html': DEFAULT_LEGAL_CONTRACT_CONTENT_HTML,
+        'required_checks': [
+            'He leido y acepto el contrato completo.',
+            'Confirmo que la informacion facilitada es veraz y actualizada.',
+            'Consiento el tratamiento de datos para la prestacion del servicio.',
+        ],
+        'optional_checks': [
+            'Autorizo contacto informativo por correo y mensajeria.',
+        ],
+    }
+
+
+def get_legal_contract_profile_settings():
+    settings = {}
+    for key, default_value in LEGAL_CONTRACT_PROFILE_DEFAULTS.items():
+        settings[key] = str(get_app_setting(key, default_value) or '').strip()
+    return settings
+
+
+def set_legal_contract_profile_settings(payload):
+    payload = payload or {}
+    for key in LEGAL_CONTRACT_PROFILE_DEFAULTS.keys():
+        set_app_setting(key, str(payload.get(key, '') or '').strip())
+
+
+def get_client_legal_identity(client_id):
+    client_id_i = int(client_id or 0)
+    if client_id_i <= 0:
+        return {'name': '', 'dni': '', 'email': '', 'phone': ''}
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COALESCE(name, ''), COALESCE(dni, ''), COALESCE(email, ''), COALESCE(phone, '') FROM clients WHERE id = ? LIMIT 1",
+        (client_id_i,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return {'name': '', 'dni': '', 'email': '', 'phone': ''}
+    return {
+        'name': str(row[0] or '').strip(),
+        'dni': str(row[1] or '').strip(),
+        'email': str(row[2] or '').strip(),
+        'phone': str(row[3] or '').strip(),
+    }
+
+
+def _extract_signed_date_time_text(signature):
+    signed_at = str((signature or {}).get('signed_at') or '').strip()
+    if not signed_at:
+        now_text = time.strftime('%Y-%m-%d %H:%M:%S')
+        return format_feedback_datetime_es(now_text)
+    return format_feedback_datetime_es(signed_at)
+
+
+def _build_legal_contract_variable_context(version=None, client_id=None, signature=None):
+    profile = get_legal_contract_profile_settings()
+    version_id = int((version or {}).get('id') or 0)
+    client_meta = get_client_legal_identity(client_id) if int(client_id or 0) > 0 else {'name': '', 'dni': '', 'email': '', 'phone': ''}
+    date_text, time_text = _extract_signed_date_time_text(signature)
+    generated_date_text = time.strftime('%d/%m/%Y')
+
+    client_name_value = str((signature or {}).get('full_name') or client_meta.get('name') or '').strip()
+    client_dni_value = str((signature or {}).get('signer_dni') or client_meta.get('dni') or '').strip()
+
+    return {
+        'NOMBRE_EMPRESA': str(profile.get('legal_contract_company_name') or '').strip(),
+        'NOMBRE_PROFESIONAL': str(profile.get('legal_contract_professional_name') or '').strip(),
+        'NIF': str(profile.get('legal_contract_nif') or '').strip(),
+        'DIRECCION': str(profile.get('legal_contract_address') or '').strip(),
+        'TELEFONO': str(profile.get('legal_contract_phone') or '').strip(),
+        'EMAIL': str(profile.get('legal_contract_email') or '').strip(),
+        'WEB': str(profile.get('legal_contract_web') or '').strip(),
+        'LOGO_EMPRESA': str(profile.get('legal_contract_logo_url') or '').strip(),
+        'FIRMA_PROFESIONAL': str(profile.get('legal_contract_professional_signature_data_url') or '').strip(),
+        'NOMBRE_CLIENTE': client_name_value,
+        'DNI_CLIENTE': client_dni_value,
+        'DOCUMENTO_CLIENTE': client_dni_value,
+        'FECHA_FIRMA': str(date_text or '-').strip(),
+        'FECHA_GENERACION': str(generated_date_text or '-').strip(),
+        'FECHA_VERSION': str(generated_date_text or '-').strip(),
+        'HORA_FIRMA': str(time_text or '-').strip(),
+        'VERSION_CONTRATO': f"V{version_id}" if version_id > 0 else '-',
+        'FIRMA_CLIENTE': str((signature or {}).get('signature_data_url') or '').strip(),
+    }
+
+
+def _clean_legal_identity_text(value, max_len=220):
+    text = re.sub(r'\s+', ' ', str(value or '')).strip()
+    if len(text) > int(max_len):
+        return text[: int(max_len)].strip()
+    return text
+
+
+def _build_manual_client_legal_context(identity_payload):
+    payload = identity_payload or {}
+    return {
+        'client_full_name': _clean_legal_identity_text(payload.get('client_full_name'), 180),
+        'client_dni': _clean_legal_identity_text(payload.get('client_dni'), 64),
+        'client_address': _clean_legal_identity_text(payload.get('client_address'), 260),
+        'client_email': _clean_legal_identity_text(payload.get('client_email'), 180),
+        'client_phone': _clean_legal_identity_text(payload.get('client_phone'), 80),
+    }
+
+
+def _manual_identity_to_contract_variables(manual_identity):
+    identity = manual_identity or {}
+    full_name = str(identity.get('client_full_name') or '').strip()
+    dni = str(identity.get('client_dni') or '').strip()
+    address = str(identity.get('client_address') or '').strip()
+    email_text = str(identity.get('client_email') or '').strip()
+    phone_text = str(identity.get('client_phone') or '').strip()
+    return {
+        'NOMBRE_CLIENTE': full_name,
+        'DNI_CLIENTE': dni,
+        'DOCUMENTO_CLIENTE': dni,
+        'DIRECCION_CLIENTE': address,
+        'EMAIL_CLIENTE': email_text,
+        'TELEFONO_CLIENTE': phone_text,
+    }
+
+
+def _render_legal_contract_html_with_identity(version, client_id, manual_identity=None, signature=None, for_pdf=False):
+    version_payload = version or {}
+    variables = _build_legal_contract_variable_context(version=version_payload, client_id=client_id, signature=signature)
+    variables.update(_manual_identity_to_contract_variables(_build_manual_client_legal_context(manual_identity or {})))
+    return _replace_legal_contract_variables_html(version_payload.get('content_html') or '', variables, for_pdf=for_pdf)
+
+
+def _needs_signed_snapshot_identity_refresh(snapshot_html, signature):
+    html_text = str(snapshot_html or '')
+    signature_payload = signature or {}
+    signer_dni = str(signature_payload.get('signer_dni') or '').strip()
+    signer_name = str(signature_payload.get('full_name') or '').strip()
+    if not html_text:
+        return True
+    if signer_dni and signer_dni not in html_text:
+        return True
+    if signer_name and signer_name not in html_text:
+        return True
+    return False
+
+
+def _replace_legal_contract_variables_html(content_html, variables, for_pdf=False):
+    rendered = str(content_html or '')
+    var_map = variables or {}
+    for key, raw_value in var_map.items():
+        token = '{{' + str(key) + '}}'
+        value = str(raw_value or '').strip()
+        if key == 'LOGO_EMPRESA':
+            if for_pdf:
+                replacement = ''
+            elif value:
+                safe_src = html.escape(value, quote=True)
+                replacement = f'<img src="{safe_src}" alt="Logo" style="max-height:72px;max-width:240px;object-fit:contain;" />'
+            else:
+                replacement = ''
+        elif key == 'FIRMA_PROFESIONAL':
+            if for_pdf:
+                replacement = ''
+            elif value:
+                safe_src = html.escape(value, quote=True)
+                replacement = f'<img src="{safe_src}" alt="Firma profesional" style="max-height:120px;max-width:320px;object-fit:contain;border:1px solid #d8dde6;border-radius:8px;background:#fff;" />'
+            else:
+                replacement = ''
+        elif key == 'FIRMA_CLIENTE':
+            if for_pdf:
+                replacement = ''
+            elif value:
+                safe_src = html.escape(value, quote=True)
+                replacement = f'<img src="{safe_src}" alt="Firma" style="max-height:120px;max-width:320px;object-fit:contain;border:1px solid #d8dde6;border-radius:8px;background:#fff;" />'
+            else:
+                replacement = ''
+        else:
+            replacement = html.escape(value)
+        rendered = rendered.replace(token, replacement)
+    return rendered
+
+
+def _parse_contract_checks_text(value):
+    items = []
+    for line in str(value or '').splitlines():
+        item = re.sub(r'\s+', ' ', line).strip()
+        if item:
+            items.append(item)
+    return items
+
+
+def _to_json_text(value, default):
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return default
+
+
+def ensure_legal_contract_tables(conn_or_path=None):
+    conn, should_close = _coerce_schema_connection(conn_or_path)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS legal_contract_versions (
+            id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL,
+            subtitle TEXT,
+            content_html TEXT NOT NULL,
+            required_checks_json TEXT,
+            optional_checks_json TEXT,
+            status TEXT NOT NULL DEFAULT 'draft',
+            is_active INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            published_at TEXT
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_legal_contract_signatures (
+            id INTEGER PRIMARY KEY,
+            client_id INTEGER NOT NULL,
+            version_id INTEGER NOT NULL,
+            full_name TEXT NOT NULL,
+            signature_data_url TEXT NOT NULL,
+            signed_at TEXT NOT NULL,
+            ip_address TEXT,
+            user_agent TEXT,
+            device_type TEXT,
+            browser_name TEXT,
+            signer_dni TEXT,
+            signer_address TEXT,
+            signer_email TEXT,
+            signer_phone TEXT,
+            contract_html_snapshot TEXT,
+            required_checks_json TEXT,
+            optional_checks_json TEXT,
+            signed_pdf_path TEXT,
+            created_at TEXT NOT NULL,
+            UNIQUE(client_id, version_id),
+            FOREIGN KEY(client_id) REFERENCES clients(id),
+            FOREIGN KEY(version_id) REFERENCES legal_contract_versions(id)
+        )
+        """
+    )
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS client_legal_contract_pre_signatures (
+            id INTEGER PRIMARY KEY,
+            client_id INTEGER NOT NULL,
+            version_id INTEGER NOT NULL,
+            manual_identity_json TEXT NOT NULL,
+            rendered_contract_html TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(client_id, version_id),
+            FOREIGN KEY(client_id) REFERENCES clients(id),
+            FOREIGN KEY(version_id) REFERENCES legal_contract_versions(id)
+        )
+        """
+    )
+    cur.execute("PRAGMA table_info(client_legal_contract_signatures)")
+    sig_cols = [r[1] for r in cur.fetchall()]
+    if 'signer_dni' not in sig_cols:
+        cur.execute("ALTER TABLE client_legal_contract_signatures ADD COLUMN signer_dni TEXT")
+    if 'signer_address' not in sig_cols:
+        cur.execute("ALTER TABLE client_legal_contract_signatures ADD COLUMN signer_address TEXT")
+    if 'signer_email' not in sig_cols:
+        cur.execute("ALTER TABLE client_legal_contract_signatures ADD COLUMN signer_email TEXT")
+    if 'signer_phone' not in sig_cols:
+        cur.execute("ALTER TABLE client_legal_contract_signatures ADD COLUMN signer_phone TEXT")
+    if 'contract_html_snapshot' not in sig_cols:
+        cur.execute("ALTER TABLE client_legal_contract_signatures ADD COLUMN contract_html_snapshot TEXT")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_legal_contract_versions_active ON legal_contract_versions(is_active, id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_legal_contract_signatures_client ON client_legal_contract_signatures(client_id, signed_at DESC, id DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_client_legal_pre_signatures_client ON client_legal_contract_pre_signatures(client_id, version_id)")
+    conn.commit()
+
+    cur.execute("SELECT COUNT(*) FROM legal_contract_versions")
+    total = int((cur.fetchone() or [0])[0] or 0)
+    if total == 0:
+        definition = get_legal_contract_default_definition()
+        cur.execute(
+            """
+            INSERT INTO legal_contract_versions(
+                title, subtitle, content_html, required_checks_json, optional_checks_json,
+                status, is_active, created_at, published_at
+            ) VALUES(?,?,?,?,?, 'published', 1, datetime('now'), datetime('now'))
+            """,
+            (
+                str(definition.get('title') or 'Contrato legal').strip(),
+                str(definition.get('subtitle') or '').strip(),
+                str(definition.get('content_html') or '').strip(),
+                _to_json_text(definition.get('required_checks') or [], '[]'),
+                _to_json_text(definition.get('optional_checks') or [], '[]'),
+            ),
+        )
+        conn.commit()
+
+    if should_close:
+        conn.close()
+
+
+def _parse_json_list(raw):
+    text = str(raw or '').strip()
+    if not text:
+        return []
+    try:
+        value = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def get_legal_contract_versions():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, COALESCE(subtitle, ''), COALESCE(status, 'draft'), COALESCE(is_active, 0),
+               COALESCE(created_at, ''), COALESCE(published_at, '')
+        FROM legal_contract_versions
+        ORDER BY id DESC
+        """
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        out.append(
+            {
+                'id': int(row[0]),
+                'title': row[1] or 'Contrato legal',
+                'subtitle': row[2] or '',
+                'status': row[3] or 'draft',
+                'is_active': int(row[4] or 0),
+                'created_at': row[5] or '',
+                'published_at': row[6] or '',
+            }
+        )
+    return out
+
+
+def get_active_legal_contract_version_id():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM legal_contract_versions WHERE is_active = 1 ORDER BY id DESC LIMIT 1")
+    row = cur.fetchone()
+    conn.close()
+    if row:
+        return int(row[0])
+    versions = get_legal_contract_versions()
+    return int(versions[0]['id']) if versions else 0
+
+
+def get_legal_contract_version(version_id):
+    version_id_i = int(version_id or 0)
+    if version_id_i <= 0:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, title, COALESCE(subtitle, ''), COALESCE(content_html, ''),
+               COALESCE(required_checks_json, '[]'), COALESCE(optional_checks_json, '[]'),
+               COALESCE(status, 'draft'), COALESCE(is_active, 0), COALESCE(created_at, ''), COALESCE(published_at, '')
+        FROM legal_contract_versions
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (version_id_i,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'id': int(row[0]),
+        'title': row[1] or 'Contrato legal',
+        'subtitle': row[2] or '',
+        'content_html': row[3] or '',
+        'required_checks': _parse_json_list(row[4]),
+        'optional_checks': _parse_json_list(row[5]),
+        'status': row[6] or 'draft',
+        'is_active': int(row[7] or 0),
+        'created_at': row[8] or '',
+        'published_at': row[9] or '',
+    }
+
+
+def create_legal_contract_version(title, subtitle, content_html, required_checks, optional_checks, publish_now=False):
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    if publish_now:
+        cur.execute(
+            """
+            INSERT INTO legal_contract_versions(
+                title, subtitle, content_html, required_checks_json, optional_checks_json,
+                status, is_active, created_at, published_at
+            ) VALUES(?,?,?,?,?, 'published', 1, datetime('now'), datetime('now'))
+            """,
+            (
+                str(title or 'Contrato legal').strip() or 'Contrato legal',
+                str(subtitle or '').strip(),
+                str(content_html or '').strip(),
+                _to_json_text(required_checks or [], '[]'),
+                _to_json_text(optional_checks or [], '[]'),
+            ),
+        )
+    else:
+        cur.execute(
+            """
+            INSERT INTO legal_contract_versions(
+                title, subtitle, content_html, required_checks_json, optional_checks_json,
+                status, is_active, created_at, published_at
+            ) VALUES(?,?,?,?,?, 'draft', 0, datetime('now'), NULL)
+            """,
+            (
+                str(title or 'Contrato legal').strip() or 'Contrato legal',
+                str(subtitle or '').strip(),
+                str(content_html or '').strip(),
+                _to_json_text(required_checks or [], '[]'),
+                _to_json_text(optional_checks or [], '[]'),
+            ),
+        )
+    new_id = int(cur.lastrowid)
+    if publish_now:
+        cur.execute("UPDATE legal_contract_versions SET is_active = 0 WHERE id <> ?", (new_id,))
+    conn.commit()
+    conn.close()
+    return new_id
+
+
+def publish_legal_contract_version(version_id):
+    version_id_i = int(version_id or 0)
+    if version_id_i <= 0:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE legal_contract_versions SET is_active = 0")
+    cur.execute(
+        "UPDATE legal_contract_versions SET status = 'published', is_active = 1, published_at = datetime('now') WHERE id = ?",
+        (version_id_i,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def count_legal_contract_signatures_for_version(version_id):
+    version_id_i = int(version_id or 0)
+    if version_id_i <= 0:
+        return 0
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM client_legal_contract_signatures WHERE version_id = ?", (version_id_i,))
+    row = cur.fetchone()
+    conn.close()
+    return int((row or [0])[0] or 0)
+
+
+def duplicate_legal_contract_version(version_id, title_prefix='Copia'):
+    version = get_legal_contract_version(version_id)
+    if not version:
+        return 0
+    base_title = str(version.get('title') or 'Contrato legal').strip() or 'Contrato legal'
+    new_title = f"{base_title} ({str(title_prefix or 'Copia').strip()})"
+    return create_legal_contract_version(
+        title=new_title,
+        subtitle=version.get('subtitle') or '',
+        content_html=version.get('content_html') or '',
+        required_checks=version.get('required_checks') or [],
+        optional_checks=version.get('optional_checks') or [],
+        publish_now=False,
+    )
+
+
+def update_legal_contract_draft_version(version_id, title, subtitle, content_html, required_checks, optional_checks):
+    version_id_i = int(version_id or 0)
+    if version_id_i <= 0:
+        return False
+    version = get_legal_contract_version(version_id_i)
+    if not version:
+        return False
+    if str(version.get('status') or 'draft') != 'draft':
+        return False
+    if int(version.get('is_active') or 0) == 1:
+        return False
+    if count_legal_contract_signatures_for_version(version_id_i) > 0:
+        return False
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        UPDATE legal_contract_versions
+        SET title = ?, subtitle = ?, content_html = ?, required_checks_json = ?, optional_checks_json = ?
+        WHERE id = ?
+        """,
+        (
+            str(title or 'Contrato legal').strip() or 'Contrato legal',
+            str(subtitle or '').strip(),
+            str(content_html or '').strip(),
+            _to_json_text(required_checks or [], '[]'),
+            _to_json_text(optional_checks or [], '[]'),
+            version_id_i,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_client_legal_contract_signature(client_id, version_id=None):
+    client_id_i = int(client_id or 0)
+    if client_id_i <= 0:
+        return None
+    version_id_i = int(version_id or 0)
+    if version_id_i <= 0:
+        version_id_i = get_active_legal_contract_version_id()
+    if version_id_i <= 0:
+        return None
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, client_id, version_id, COALESCE(full_name, ''), COALESCE(signature_data_url, ''),
+               COALESCE(signed_at, ''), COALESCE(ip_address, ''), COALESCE(user_agent, ''),
+               COALESCE(device_type, ''), COALESCE(browser_name, ''),
+             COALESCE(signer_dni, ''), COALESCE(signer_address, ''), COALESCE(signer_email, ''), COALESCE(signer_phone, ''),
+             COALESCE(contract_html_snapshot, ''),
+               COALESCE(required_checks_json, '[]'), COALESCE(optional_checks_json, '[]'),
+               COALESCE(signed_pdf_path, ''), COALESCE(created_at, '')
+        FROM client_legal_contract_signatures
+        WHERE client_id = ? AND version_id = ?
+        LIMIT 1
+        """,
+        (client_id_i, version_id_i),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'id': int(row[0]),
+        'client_id': int(row[1]),
+        'version_id': int(row[2]),
+        'full_name': row[3] or '',
+        'signature_data_url': row[4] or '',
+        'signed_at': row[5] or '',
+        'ip_address': row[6] or '',
+        'user_agent': row[7] or '',
+        'device_type': row[8] or '',
+        'browser_name': row[9] or '',
+        'signer_dni': row[10] or '',
+        'signer_address': row[11] or '',
+        'signer_email': row[12] or '',
+        'signer_phone': row[13] or '',
+        'contract_html_snapshot': row[14] or '',
+        'required_checks': _parse_json_list(row[15]),
+        'optional_checks': _parse_json_list(row[16]),
+        'signed_pdf_path': row[17] or '',
+        'created_at': row[18] or '',
+    }
+
+
+def get_legal_contract_signature_by_id(signature_id):
+    sig_id = int(signature_id or 0)
+    if sig_id <= 0:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, client_id, version_id, COALESCE(full_name, ''), COALESCE(signature_data_url, ''),
+               COALESCE(signed_at, ''), COALESCE(ip_address, ''), COALESCE(user_agent, ''),
+               COALESCE(device_type, ''), COALESCE(browser_name, ''),
+             COALESCE(signer_dni, ''), COALESCE(signer_address, ''), COALESCE(signer_email, ''), COALESCE(signer_phone, ''),
+             COALESCE(contract_html_snapshot, ''),
+               COALESCE(required_checks_json, '[]'), COALESCE(optional_checks_json, '[]'),
+               COALESCE(signed_pdf_path, ''), COALESCE(created_at, '')
+        FROM client_legal_contract_signatures
+        WHERE id = ?
+        LIMIT 1
+        """,
+        (sig_id,),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    return {
+        'id': int(row[0]),
+        'client_id': int(row[1]),
+        'version_id': int(row[2]),
+        'full_name': row[3] or '',
+        'signature_data_url': row[4] or '',
+        'signed_at': row[5] or '',
+        'ip_address': row[6] or '',
+        'user_agent': row[7] or '',
+        'device_type': row[8] or '',
+        'browser_name': row[9] or '',
+        'signer_dni': row[10] or '',
+        'signer_address': row[11] or '',
+        'signer_email': row[12] or '',
+        'signer_phone': row[13] or '',
+        'contract_html_snapshot': row[14] or '',
+        'required_checks': _parse_json_list(row[15]),
+        'optional_checks': _parse_json_list(row[16]),
+        'signed_pdf_path': row[17] or '',
+        'created_at': row[18] or '',
+    }
+
+
+def get_client_legal_contract_pre_signature(client_id, version_id):
+    client_id_i = int(client_id or 0)
+    version_id_i = int(version_id or 0)
+    if client_id_i <= 0 or version_id_i <= 0:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT id, client_id, version_id, COALESCE(manual_identity_json, '{}'), COALESCE(rendered_contract_html, ''),
+               COALESCE(created_at, ''), COALESCE(updated_at, '')
+        FROM client_legal_contract_pre_signatures
+        WHERE client_id = ? AND version_id = ?
+        LIMIT 1
+        """,
+        (client_id_i, version_id_i),
+    )
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return None
+    try:
+        identity_payload = json.loads(str(row[3] or '{}'))
+        if not isinstance(identity_payload, dict):
+            identity_payload = {}
+    except Exception:
+        identity_payload = {}
+    manual_identity = _build_manual_client_legal_context(identity_payload)
+    return {
+        'id': int(row[0]),
+        'client_id': int(row[1]),
+        'version_id': int(row[2]),
+        'manual_identity': manual_identity,
+        'rendered_contract_html': row[4] or '',
+        'created_at': row[5] or '',
+        'updated_at': row[6] or '',
+    }
+
+
+def upsert_client_legal_contract_pre_signature(client_id, version_id, manual_identity, rendered_contract_html):
+    client_id_i = int(client_id or 0)
+    version_id_i = int(version_id or 0)
+    if client_id_i <= 0 or version_id_i <= 0:
+        return None
+    identity = _build_manual_client_legal_context(manual_identity)
+    rendered_html = str(rendered_contract_html or '').strip()
+    if not rendered_html:
+        return None
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_legal_contract_pre_signatures(
+            client_id, version_id, manual_identity_json, rendered_contract_html, created_at, updated_at
+        ) VALUES(?,?,?,?,datetime('now'),datetime('now'))
+        ON CONFLICT(client_id, version_id)
+        DO UPDATE SET
+            manual_identity_json = excluded.manual_identity_json,
+            rendered_contract_html = excluded.rendered_contract_html,
+            updated_at = datetime('now')
+        """,
+        (
+            client_id_i,
+            version_id_i,
+            _to_json_text(identity, '{}'),
+            rendered_html,
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return get_client_legal_contract_pre_signature(client_id_i, version_id_i)
+
+
+def delete_client_legal_contract_pre_signature(client_id, version_id):
+    client_id_i = int(client_id or 0)
+    version_id_i = int(version_id or 0)
+    if client_id_i <= 0 or version_id_i <= 0:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM client_legal_contract_pre_signatures WHERE client_id = ? AND version_id = ?",
+        (client_id_i, version_id_i),
+    )
+    conn.commit()
+    conn.close()
+
+
+def list_client_legal_contract_signatures(client_id):
+    client_id_i = int(client_id or 0)
+    if client_id_i <= 0:
+        return []
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT s.id, s.client_id, s.version_id, COALESCE(s.full_name, ''), COALESCE(s.signed_at, ''),
+               COALESCE(s.ip_address, ''), COALESCE(s.device_type, ''), COALESCE(s.browser_name, ''),
+               COALESCE(s.signed_pdf_path, ''), COALESCE(v.title, '')
+        FROM client_legal_contract_signatures s
+        LEFT JOIN legal_contract_versions v ON v.id = s.version_id
+        WHERE s.client_id = ?
+        ORDER BY s.id DESC
+        """,
+        (client_id_i,),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for row in rows:
+        out.append(
+            {
+                'id': int(row[0]),
+                'client_id': int(row[1]),
+                'version_id': int(row[2]),
+                'full_name': row[3] or '',
+                'signed_at': row[4] or '',
+                'ip_address': row[5] or '',
+                'device_type': row[6] or '',
+                'browser_name': row[7] or '',
+                'signed_pdf_path': row[8] or '',
+                'version_title': row[9] or '',
+            }
+        )
+    return out
+
+
+def get_clients_legal_contract_status_map(client_ids):
+    ids = []
+    for value in client_ids or []:
+        try:
+            value_i = int(value)
+        except Exception:
+            continue
+        if value_i > 0:
+            ids.append(value_i)
+    if not ids:
+        return {}
+
+    active_version_id = get_active_legal_contract_version_id()
+    out = {cid: {'active_version_id': active_version_id, 'signed': False, 'signed_at': '', 'signature_id': 0} for cid in ids}
+    if active_version_id <= 0:
+        return out
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    placeholders = ','.join(['?'] * len(ids))
+    cur.execute(
+        f"""
+        SELECT id, client_id, COALESCE(signed_at, '')
+        FROM client_legal_contract_signatures
+        WHERE version_id = ? AND client_id IN ({placeholders})
+        """,
+        (active_version_id, *ids),
+    )
+    rows = cur.fetchall()
+    conn.close()
+    for sig_id, client_id, signed_at in rows:
+        cid_i = int(client_id)
+        out[cid_i] = {
+            'active_version_id': active_version_id,
+            'signed': True,
+            'signed_at': signed_at or '',
+            'signature_id': int(sig_id or 0),
+        }
+    return out
+
+
+def _contract_html_to_text(content_html):
+    text = str(content_html or '')
+    text = re.sub(r'(?is)<\s*br\s*/?>', '\n', text)
+    text = re.sub(r'(?is)</\s*(p|div|h1|h2|h3|h4|h5|h6|li)\s*>', '\n', text)
+    text = re.sub(r'(?is)<\s*li\b[^>]*>', '- ', text)
+    text = re.sub(r'(?is)<[^>]+>', '', text)
+    text = html.unescape(text)
+    text = re.sub(r'\r', '', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def _decode_signature_data_url(data_url):
+    raw = str(data_url or '').strip()
+    if not raw:
+        return None
+    m = re.match(r'^data:image/(png|jpeg|jpg|webp);base64,(.+)$', raw, flags=re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None
+    subtype = m.group(1).lower()
+    mime_type = 'image/jpeg' if subtype in ('jpeg', 'jpg') else f'image/{subtype}'
+    try:
+        content = base64.b64decode(m.group(2).strip(), validate=True)
+    except Exception:
+        return None
+    if not content:
+        return None
+    return {'mime_type': mime_type, 'content': content}
+
+
+def _normalize_signature_data_url_png(raw_value):
+    raw_text = str(raw_value or '').strip()
+    if not raw_text:
+        return ''
+    decoded = _decode_signature_data_url(raw_text)
+    if not decoded:
+        return ''
+    if str(decoded.get('mime_type') or '').lower() != 'image/png':
+        return ''
+    payload_b64 = base64.b64encode(decoded.get('content') or b'').decode('ascii')
+    return f'data:image/png;base64,{payload_b64}'
+
+
+def _strip_client_signature_section_html(content_html):
+    html_text = str(content_html or '').strip()
+    if not html_text:
+        return ''
+    heading_match = re.search(r'(?is)<h[1-6][^>]*>\s*FIRMAS\s*</h[1-6]>', html_text)
+    if heading_match:
+        return html_text[: heading_match.start()].strip()
+    return html_text
+
+
+def _validate_legal_contract_rendered_html(rendered_html):
+    errors = []
+    html_text = str(rendered_html or '').strip()
+    if not html_text:
+        errors.append('El contrato esta vacio.')
+        return errors
+
+    unresolved = sorted(set(re.findall(r'\{\{\s*([A-Z0-9_]+)\s*\}\}', html_text)))
+    if unresolved:
+        errors.append('Variables sin sustituir: ' + ', '.join(unresolved))
+
+    parser = _LegalContractHtmlParser()
+    parser.feed(html_text)
+    parser._flush_active_block()
+    blocks = parser.blocks
+    if not blocks:
+        errors.append('No se pudo convertir el HTML del contrato a bloques PDF.')
+
+    for block in blocks:
+        kind = str(block.get('kind') or '')
+        text = str(block.get('text') or '').strip()
+        if kind == 'list_item':
+            compact = re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]+>', '', text))).strip()
+            if not compact:
+                errors.append('Lista invalida detectada: existe una viñeta vacia.')
+                break
+            if compact in ('-', '*', '•', '●'):
+                errors.append('Lista invalida detectada: existe una viñeta sin texto.')
+                break
+
+    tag_pattern = re.compile(r'(?is)<\s*(/)?\s*([a-z0-9]+)(?:\s+[^>]*)?>')
+    void_tags = {'br', 'hr', 'img', 'meta', 'input', 'link', 'source'}
+    stack = []
+    for close, name in tag_pattern.findall(html_text):
+        tag_name = str(name or '').lower()
+        if tag_name in void_tags:
+            continue
+        if close:
+            if stack and stack[-1] == tag_name:
+                stack.pop()
+            elif tag_name in stack:
+                while stack and stack[-1] != tag_name:
+                    stack.pop()
+                if stack and stack[-1] == tag_name:
+                    stack.pop()
+            else:
+                errors.append(f'HTML potencialmente invalido: cierre inesperado de etiqueta </{tag_name}>.')
+                break
+        else:
+            stack.append(tag_name)
+    if stack:
+        errors.append('HTML potencialmente invalido: etiquetas sin cerrar detectadas.')
+
+    return errors
+
+
+def validate_legal_contract_pdf_payload(version, signature=None, client_id=None, manual_identity=None, rendered_html_override=None):
+    if not version:
+        return ['No existe version de contrato para validar.']
+    if signature:
+        client_id_i = int(signature.get('client_id') or 0)
+        current_manual_identity = {
+            'client_full_name': signature.get('full_name') or '',
+            'client_dni': signature.get('signer_dni') or '',
+            'client_address': signature.get('signer_address') or '',
+            'client_email': signature.get('signer_email') or '',
+            'client_phone': signature.get('signer_phone') or '',
+        }
+    else:
+        client_id_i = int(client_id or 0)
+        current_manual_identity = _build_manual_client_legal_context(manual_identity or {})
+        if not current_manual_identity.get('client_full_name') and client_id_i > 0:
+            pre_signature = get_client_legal_contract_pre_signature(client_id_i, int(version.get('id') or 0))
+            if pre_signature:
+                current_manual_identity = pre_signature.get('manual_identity') or {}
+
+    variables = _build_legal_contract_variable_context(version=version, client_id=client_id_i, signature=signature)
+    variables.update(_manual_identity_to_contract_variables(current_manual_identity))
+    if rendered_html_override is not None:
+        rendered_html = str(rendered_html_override or '').strip()
+    elif signature and str(signature.get('contract_html_snapshot') or '').strip():
+        rendered_html = str(signature.get('contract_html_snapshot') or '').strip()
+        if _needs_signed_snapshot_identity_refresh(rendered_html, signature):
+            rendered_html = _render_legal_contract_html_with_identity(
+                version,
+                client_id_i,
+                manual_identity=manual_identity,
+                signature=signature,
+                for_pdf=True,
+            )
+    else:
+        rendered_html = _replace_legal_contract_variables_html(version.get('content_html') or '', variables, for_pdf=True)
+    if signature:
+        rendered_html = _replace_legal_contract_variables_html(rendered_html, variables, for_pdf=True)
+
+    html_errors = _validate_legal_contract_rendered_html(rendered_html)
+
+    try:
+        pdf_binary = _build_legal_contract_pdf_from_version(
+            version,
+            signature=signature,
+            client_id=client_id_i,
+            manual_identity_override=current_manual_identity,
+            rendered_html_override=rendered_html,
+            bypass_validation=True,
+        )
+    except Exception as exc:
+        html_errors.append('No se pudo generar el PDF: ' + str(exc))
+        pdf_binary = None
+
+    if not pdf_binary:
+        html_errors.append('No se pudo generar el PDF final.')
+
+    return html_errors
+
+
+def _resolve_legal_contract_image_source(raw_source):
+    source = str(raw_source or '').strip()
+    if not source:
+        return None
+
+    decoded = _decode_signature_data_url(source)
+    if decoded:
+        try:
+            return ImageReader(io.BytesIO(decoded['content']))
+        except Exception:
+            return None
+
+    parsed = urllib.parse.urlparse(source)
+    if parsed.scheme in ('http', 'https'):
+        try:
+            req = urllib.request.Request(source, headers={'User-Agent': 'nutrition-app/1.0'})
+            with urllib.request.urlopen(req, timeout=6) as resp:
+                body = resp.read()
+            if body:
+                return ImageReader(io.BytesIO(body))
+        except Exception:
+            return None
+        return None
+
+    local_source = source
+    if source.startswith('/static/uploads/'):
+        rel_path = source[len('/static/uploads/'):]
+        candidate = _resolve_static_upload_file(rel_path)
+        if candidate and os.path.isfile(candidate):
+            local_source = candidate
+    elif source.startswith('/static/'):
+        rel_path = source[len('/static/'):]
+        local_source = os.path.join(STATIC_BASE_DIR, rel_path)
+    elif not os.path.isabs(source):
+        local_source = os.path.join(BASE_DIR, source)
+
+    if not os.path.isfile(local_source):
+        return None
+
+    try:
+        return ImageReader(local_source)
+    except Exception:
+        return None
+
+
+class _LegalContractHtmlParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.blocks = []
+        self._list_stack = []
+        self._active_block = None
+        self._table = None
+        self._table_row = None
+        self._table_cell = None
+        self._inline_tags = []
+
+    def _parse_align(self, attrs):
+        attrs_map = {str(k).lower(): str(v or '') for k, v in attrs}
+        align = str(attrs_map.get('align') or '').strip().lower()
+        if align in ('left', 'center', 'right', 'justify'):
+            return align
+        style = str(attrs_map.get('style') or '').lower()
+        m = re.search(r'text-align\s*:\s*(left|center|right|justify)', style)
+        return m.group(1) if m else 'left'
+
+    def _open_inline(self, tag):
+        if not self._active_block:
+            return
+        if tag in ('b', 'strong'):
+            self._active_block['parts'].append('<b>')
+            self._inline_tags.append('</b>')
+        elif tag in ('i', 'em'):
+            self._active_block['parts'].append('<i>')
+            self._inline_tags.append('</i>')
+        elif tag == 'u':
+            self._active_block['parts'].append('<u>')
+            self._inline_tags.append('</u>')
+
+    def _close_inline(self, tag):
+        if not self._active_block:
+            return
+        if tag in ('b', 'strong', 'i', 'em', 'u') and self._inline_tags:
+            self._active_block['parts'].append(self._inline_tags.pop())
+
+    def _start_text_block(self, kind, align='left', level=0, list_kind=''):
+        self._flush_active_block()
+        self._active_block = {
+            'kind': kind,
+            'align': align or 'left',
+            'level': int(level or 0),
+            'list_kind': str(list_kind or ''),
+            'parts': [],
+        }
+        self._inline_tags = []
+
+    def _flush_active_block(self):
+        if not self._active_block:
+            return
+        while self._inline_tags:
+            self._active_block['parts'].append(self._inline_tags.pop())
+        text = ''.join(self._active_block.get('parts') or []).strip()
+        if text:
+            block = {
+                'kind': self._active_block['kind'],
+                'align': self._active_block.get('align') or 'left',
+                'level': int(self._active_block.get('level') or 0),
+                'list_kind': str(self._active_block.get('list_kind') or ''),
+                'text': text,
+            }
+            self.blocks.append(block)
+        self._active_block = None
+
+    def handle_starttag(self, tag, attrs):
+        tag = str(tag or '').lower()
+        if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+            self._start_text_block('heading', align=self._parse_align(attrs), level=int(tag[1]))
+            return
+        if tag in ('p', 'div'):
+            self._start_text_block('paragraph', align=self._parse_align(attrs), level=0)
+            return
+        if tag == 'blockquote':
+            self._start_text_block('blockquote', align=self._parse_align(attrs), level=0)
+            return
+        if tag == 'hr':
+            self._flush_active_block()
+            self.blocks.append({'kind': 'hr'})
+            return
+        if tag == 'br' and self._active_block:
+            self._active_block['parts'].append('<br/>')
+            return
+        if tag in ('ul', 'ol'):
+            self._flush_active_block()
+            self._list_stack.append({'type': tag, 'index': 0})
+            return
+        if tag == 'li':
+            level = max(len(self._list_stack), 1)
+            list_kind = 'ul'
+            if self._list_stack:
+                top = self._list_stack[-1]
+                list_kind = str(top.get('type') or 'ul')
+                if list_kind == 'ol':
+                    top['index'] += 1
+            self._start_text_block('list_item', align='left', level=level, list_kind=list_kind)
+            return
+        if tag == 'table':
+            self._flush_active_block()
+            self._table = {'rows': []}
+            return
+        if tag == 'tr' and self._table is not None:
+            self._table_row = []
+            return
+        if tag in ('th', 'td') and self._table_row is not None:
+            self._table_cell = {'header': tag == 'th', 'parts': []}
+            return
+        if tag in ('b', 'strong', 'i', 'em', 'u'):
+            self._open_inline(tag)
+
+    def handle_endtag(self, tag):
+        tag = str(tag or '').lower()
+        if tag in ('b', 'strong', 'i', 'em', 'u'):
+            self._close_inline(tag)
+            return
+        if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'div', 'blockquote', 'li'):
+            self._flush_active_block()
+            return
+        if tag in ('ul', 'ol'):
+            self._flush_active_block()
+            if self._list_stack:
+                self._list_stack.pop()
+            return
+        if tag in ('th', 'td') and self._table_cell is not None and self._table_row is not None:
+            text = ''.join(self._table_cell.get('parts') or []).strip()
+            self._table_row.append({'header': bool(self._table_cell.get('header')), 'text': text})
+            self._table_cell = None
+            return
+        if tag == 'tr' and self._table_row is not None and self._table is not None:
+            if self._table_row:
+                self._table['rows'].append(self._table_row)
+            self._table_row = None
+            return
+        if tag == 'table' and self._table is not None:
+            if self._table.get('rows'):
+                self.blocks.append({'kind': 'table', 'rows': self._table['rows']})
+            self._table = None
+            self._table_row = None
+            self._table_cell = None
+
+    def handle_data(self, data):
+        text = str(data or '')
+        if not text:
+            return
+        safe_text = html.escape(text)
+        if self._table_cell is not None:
+            self._table_cell['parts'].append(safe_text)
+            return
+        if self._active_block is not None:
+            self._active_block['parts'].append(safe_text)
+
+
+def _parse_legal_contract_html_blocks(content_html):
+    parser = _LegalContractHtmlParser()
+    parser.feed(str(content_html or ''))
+    parser._flush_active_block()
+    return parser.blocks
+
+
+def _resolve_ta_from_text_align(align_text):
+    align = str(align_text or '').strip().lower()
+    if align == 'center':
+        return TA_CENTER
+    if align == 'right':
+        return TA_RIGHT
+    if align == 'justify':
+        return TA_JUSTIFY
+    return TA_LEFT
+
+
+def _load_legal_contract_pdf_logo(logo_source):
+    image = _resolve_legal_contract_image_source(logo_source)
+    if image is None:
+        for filename in ('logo.png', 'logo.jpg', 'logo.jpeg', 'logo.webp'):
+            candidate = os.path.join(STATIC_BASE_DIR, filename)
+            if os.path.isfile(candidate):
+                try:
+                    return ImageReader(candidate)
+                except Exception:
+                    continue
+        return None
+    return image
+
+
+def _make_legal_contract_pdf_styles():
+    return {
+        'title': ParagraphStyle(
+            'lcTitle',
+            fontName='Helvetica-Bold',
+            fontSize=18,
+            leading=22,
+            textColor=colors.HexColor('#0f172a'),
+            spaceAfter=8,
+        ),
+        'subtitle': ParagraphStyle(
+            'lcSubtitle',
+            fontName='Helvetica',
+            fontSize=10,
+            leading=13,
+            textColor=colors.HexColor('#475569'),
+            spaceAfter=10,
+        ),
+        'meta': ParagraphStyle(
+            'lcMeta',
+            fontName='Helvetica',
+            fontSize=8.5,
+            leading=11,
+            textColor=colors.HexColor('#475569'),
+            spaceAfter=8,
+        ),
+        'heading2': ParagraphStyle(
+            'lcH2',
+            fontName='Helvetica-Bold',
+            fontSize=12,
+            leading=15,
+            textColor=colors.HexColor('#0f172a'),
+            spaceBefore=8,
+            spaceAfter=5,
+        ),
+        'heading3': ParagraphStyle(
+            'lcH3',
+            fontName='Helvetica-Bold',
+            fontSize=10.5,
+            leading=13,
+            textColor=colors.HexColor('#1e293b'),
+            spaceBefore=6,
+            spaceAfter=4,
+        ),
+        'paragraph': ParagraphStyle(
+            'lcP',
+            fontName='Helvetica',
+            fontSize=9.5,
+            leading=14,
+            textColor=colors.HexColor('#0f172a'),
+            spaceAfter=6,
+        ),
+        'blockquote': ParagraphStyle(
+            'lcBQ',
+            fontName='Helvetica-Oblique',
+            fontSize=9.3,
+            leading=13,
+            leftIndent=12,
+            rightIndent=8,
+            borderColor=colors.HexColor('#cbd5e1'),
+            borderWidth=0.6,
+            borderPadding=6,
+            textColor=colors.HexColor('#334155'),
+            backColor=colors.HexColor('#f8fafc'),
+            spaceAfter=8,
+        ),
+    }
+
+
+def _build_legal_contract_pdf_from_version(
+    version,
+    signature=None,
+    client_id=None,
+    manual_identity_override=None,
+    rendered_html_override=None,
+    bypass_validation=False,
+):
+    if not version:
+        return None
+    if signature:
+        client_id_i = int(signature.get('client_id') or 0)
+    else:
+        client_id_i = int(client_id or 0)
+
+    manual_identity = _build_manual_client_legal_context(manual_identity_override or {})
+    if signature and not manual_identity.get('client_full_name'):
+        manual_identity = {
+            'client_full_name': signature.get('full_name') or '',
+            'client_dni': signature.get('signer_dni') or '',
+            'client_address': signature.get('signer_address') or '',
+            'client_email': signature.get('signer_email') or '',
+            'client_phone': signature.get('signer_phone') or '',
+        }
+    elif not signature:
+        pre_signature = get_client_legal_contract_pre_signature(client_id_i, int(version.get('id') or 0)) if client_id_i > 0 else None
+        if pre_signature and not manual_identity.get('client_full_name'):
+            manual_identity = pre_signature.get('manual_identity') or {}
+
+    variables = _build_legal_contract_variable_context(version=version, client_id=client_id_i, signature=signature)
+    variables.update(_manual_identity_to_contract_variables(manual_identity))
+    if rendered_html_override is not None:
+        rendered_html = str(rendered_html_override or '').strip()
+    elif signature and str(signature.get('contract_html_snapshot') or '').strip():
+        rendered_html = str(signature.get('contract_html_snapshot') or '').strip()
+    else:
+        rendered_html = _replace_legal_contract_variables_html(version.get('content_html') or '', variables, for_pdf=True)
+    if signature:
+        rendered_html = _replace_legal_contract_variables_html(rendered_html, variables, for_pdf=True)
+        rendered_html = _strip_client_signature_section_html(rendered_html)
+
+    if not bypass_validation:
+        validation_errors = _validate_legal_contract_rendered_html(rendered_html)
+        if validation_errors:
+            raise ValueError(' | '.join(validation_errors))
+
+    blocks = _parse_legal_contract_html_blocks(rendered_html)
+
+    profile_settings = get_legal_contract_profile_settings()
+    logo_reader = _load_legal_contract_pdf_logo(variables.get('LOGO_EMPRESA') or profile_settings.get('legal_contract_logo_url'))
+    styles = _make_legal_contract_pdf_styles()
+
+    story = []
+    client_meta = get_client_legal_identity(client_id_i)
+    generated_date = time.strftime('%d/%m/%Y')
+    cover_title = 'CONTRATO DE PRESTACION DE SERVICIOS'
+    cover_subtitle = 'Entrenamiento Personal y Asesoramiento Nutricional'
+    company_name = str(variables.get('NOMBRE_EMPRESA') or '').strip() or 'NOMBRE_EMPRESA'
+    professional_name = str(variables.get('NOMBRE_PROFESIONAL') or '').strip() or 'NOMBRE_PROFESIONAL'
+    contract_date_text = str(variables.get('FECHA_FIRMA') or generated_date).strip() or generated_date
+    professional_date_text = generated_date
+
+    if logo_reader is not None:
+        try:
+            logo_w, logo_h = logo_reader.getSize()
+            max_w = 54 * mm
+            max_h = 24 * mm
+            scale = min(max_w / float(logo_w), max_h / float(logo_h))
+            story.append(Image(logo_reader, width=float(logo_w) * scale, height=float(logo_h) * scale))
+            story.append(Spacer(1, 5))
+        except Exception:
+            pass
+
+    story.append(Paragraph(html.escape(company_name), styles['title']))
+    story.append(Paragraph(html.escape(professional_name), styles['subtitle']))
+    story.append(Spacer(1, 16))
+    story.append(Paragraph(html.escape(cover_title), ParagraphStyle('lcCoverMain', parent=styles['title'], fontSize=22, leading=27, spaceAfter=5)))
+    story.append(Paragraph(html.escape(cover_subtitle), ParagraphStyle('lcCoverSub', parent=styles['subtitle'], fontSize=12, leading=15, spaceAfter=14)))
+
+    cover_rows = [
+        ['Version del contrato', str(variables.get('VERSION_CONTRATO') or '-')],
+        ['Fecha de generacion', generated_date],
+        ['Fecha del contrato', contract_date_text],
+        ['NIF profesional/empresa', str(variables.get('NIF') or '-')],
+        ['Direccion profesional', str(variables.get('DIRECCION') or '-')],
+        ['Telefono profesional', str(variables.get('TELEFONO') or '-')],
+        ['Email profesional', str(variables.get('EMAIL') or '-')],
+        ['Web profesional', str(variables.get('WEB') or '-')],
+        ['Cliente', str(variables.get('NOMBRE_CLIENTE') or client_meta.get('name') or '-')],
+        ['DNI cliente', str(variables.get('DNI_CLIENTE') or client_meta.get('dni') or '-')],
+        ['Direccion cliente', str(variables.get('DIRECCION_CLIENTE') or '-')],
+        ['Email cliente', str(variables.get('EMAIL_CLIENTE') or client_meta.get('email') or '-')],
+        ['Telefono cliente', str(variables.get('TELEFONO_CLIENTE') or client_meta.get('phone') or '-')],
+    ]
+    cover_table = Table(cover_rows, colWidths=[54 * mm, None])
+    cover_table.setStyle(
+        TableStyle(
+            [
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 0), (-1, -1), 9),
+                ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cbd5e1')),
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f8fafc')),
+                ('LEFTPADDING', (0, 0), (-1, -1), 7),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 7),
+                ('TOPPADDING', (0, 0), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ]
+        )
+    )
+    story.append(cover_table)
+    story.append(PageBreak())
+
+    story.append(Paragraph(html.escape(version.get('title') or 'Contrato legal'), styles['title']))
+    if str(version.get('subtitle') or '').strip():
+        story.append(Paragraph(html.escape(str(version.get('subtitle') or '').strip()), styles['subtitle']))
+    story.append(
+        Paragraph(
+            html.escape(f"Version {variables.get('VERSION_CONTRATO') or '-'} · Estado: {version.get('status') or 'draft'}"),
+            styles['meta'],
+        )
+    )
+
+    ol_counters = {}
+    for block in blocks:
+        kind = block.get('kind')
+        if kind == 'heading':
+            ol_counters = {}
+            level = int(block.get('level') or 2)
+            style_base = styles['heading2'] if level <= 2 else styles['heading3']
+            style = ParagraphStyle(
+                f"lcHeadingDyn{level}",
+                parent=style_base,
+                alignment=_resolve_ta_from_text_align(block.get('align')),
+            )
+            story.append(Paragraph(block.get('text') or '&nbsp;', style))
+        elif kind == 'paragraph':
+            ol_counters = {}
+            style = ParagraphStyle(
+                'lcBodyDyn',
+                parent=styles['paragraph'],
+                alignment=_resolve_ta_from_text_align(block.get('align')),
+            )
+            story.append(Paragraph(block.get('text') or '&nbsp;', style))
+        elif kind == 'list_item':
+            level = max(1, int(block.get('level') or 1))
+            list_kind = str(block.get('list_kind') or 'ul')
+            text = str(block.get('text') or '').strip() or '&nbsp;'
+            marker = '•'
+            if list_kind == 'ol':
+                ol_counters[level] = int(ol_counters.get(level, 0) or 0) + 1
+                for depth in list(ol_counters.keys()):
+                    if int(depth) > level:
+                        del ol_counters[depth]
+                marker = f'{int(ol_counters.get(level) or 1)}.'
+            else:
+                for depth in list(ol_counters.keys()):
+                    if int(depth) >= level:
+                        del ol_counters[depth]
+            list_style = ParagraphStyle(
+                f'lcListLevel{level}',
+                parent=styles['paragraph'],
+                alignment=_resolve_ta_from_text_align(block.get('align')),
+                leftIndent=8 + (level - 1) * 12,
+                firstLineIndent=0,
+                bulletIndent=max(0, (level - 1) * 12),
+            )
+            story.append(Paragraph(text, list_style, bulletText=marker))
+        elif kind == 'blockquote':
+            ol_counters = {}
+            story.append(Paragraph(block.get('text') or '&nbsp;', styles['blockquote']))
+        elif kind == 'hr':
+            ol_counters = {}
+            story.append(HRFlowable(width='100%', thickness=0.8, color=colors.HexColor('#cbd5e1'), spaceBefore=5, spaceAfter=8))
+        elif kind == 'table':
+            ol_counters = {}
+            rows = block.get('rows') or []
+            if not rows:
+                continue
+            matrix = []
+            max_cols = 0
+            for row in rows:
+                out_row = [str((cell or {}).get('text') or '').strip() or '-' for cell in row]
+                matrix.append(out_row)
+                max_cols = max(max_cols, len(out_row))
+            if max_cols <= 0:
+                continue
+            matrix = [row + ([''] * (max_cols - len(row))) for row in matrix]
+            table = Table(matrix, repeatRows=1)
+            table.setStyle(
+                TableStyle(
+                    [
+                        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                        ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
+                        ('FONTSIZE', (0, 0), (-1, -1), 8.5),
+                        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#f1f5f9')),
+                        ('TEXTCOLOR', (0, 0), (-1, -1), colors.HexColor('#0f172a')),
+                        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cbd5e1')),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                        ('TOPPADDING', (0, 0), (-1, -1), 4),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ]
+                )
+            )
+            story.append(table)
+            story.append(Spacer(1, 6))
+
+    story.append(Spacer(1, 12))
+    story.append(HRFlowable(width='100%', thickness=0.8, color=colors.HexColor('#cbd5e1'), spaceBefore=0, spaceAfter=8))
+    story.append(Paragraph('Firma del profesional', styles['heading2']))
+    professional_rows = [
+        ['Nombre', professional_name],
+        ['DNI/NIF', str(variables.get('NIF') or '-')],
+        ['Fecha', professional_date_text],
+    ]
+    prof_table = Table(professional_rows, colWidths=[42 * mm, None])
+    prof_table.setStyle(
+        TableStyle(
+            [
+                ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+                ('FONTSIZE', (0, 0), (-1, -1), 8.6),
+                ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f8fafc')),
+                ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cbd5e1')),
+                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ]
+        )
+    )
+    story.append(prof_table)
+
+    professional_signature = _normalize_signature_data_url_png(profile_settings.get('legal_contract_professional_signature_data_url') or '')
+    decoded_prof_signature = _decode_signature_data_url(professional_signature)
+    if decoded_prof_signature:
+        try:
+            prof_reader = ImageReader(io.BytesIO(decoded_prof_signature['content']))
+            prof_w, prof_h = prof_reader.getSize()
+            max_w = 64 * mm
+            max_h = 20 * mm
+            scale = min(max_w / float(prof_w), max_h / float(prof_h))
+            draw_w = float(prof_w) * scale
+            draw_h = float(prof_h) * scale
+            prof_flow = Image(io.BytesIO(decoded_prof_signature['content']), width=draw_w, height=draw_h)
+            prof_signature_table = Table(
+                [[Paragraph('<b>Firma profesional</b>', styles['paragraph'])], [prof_flow]],
+                colWidths=[70 * mm],
+            )
+            prof_signature_table.setStyle(
+                TableStyle(
+                    [
+                        ('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#cbd5e1')),
+                        ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                        ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                        ('TOPPADDING', (0, 0), (-1, -1), 6),
+                        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                    ]
+                )
+            )
+            story.append(Spacer(1, 6))
+            story.append(prof_signature_table)
+        except Exception:
+            story.append(Paragraph('No se pudo incrustar la firma profesional configurada.', styles['meta']))
+
+    if signature:
+        story.append(Spacer(1, 8))
+        story.append(HRFlowable(width='100%', thickness=0.8, color=colors.HexColor('#94a3b8'), spaceBefore=0, spaceAfter=8))
+        story.append(Paragraph('Evidencia de firma electronica', styles['heading2']))
+        signature_rows = [
+            ['Firmado por', str(signature.get('full_name') or '-')],
+            ['DNI/NIE', str(signature.get('signer_dni') or '-')],
+            ['Direccion', str(signature.get('signer_address') or '-')],
+            ['Email', str(signature.get('signer_email') or '-')],
+            ['Telefono', str(signature.get('signer_phone') or '-')],
+            ['Fecha', str(variables.get('FECHA_FIRMA') or '-')],
+            ['Hora', str(variables.get('HORA_FIRMA') or '-')],
+            ['IP', str(signature.get('ip_address') or '-')],
+            ['Dispositivo', str(signature.get('device_type') or '-')],
+            ['Navegador', str(signature.get('browser_name') or '-')],
+        ]
+        sig_table = Table(signature_rows, colWidths=[42 * mm, None])
+        sig_table.setStyle(
+            TableStyle(
+                [
+                    ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+                    ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 8.6),
+                    ('BACKGROUND', (0, 0), (0, -1), colors.HexColor('#f8fafc')),
+                    ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#cbd5e1')),
+                    ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                    ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                    ('TOPPADDING', (0, 0), (-1, -1), 4),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ]
+            )
+        )
+        story.append(sig_table)
+        decoded_signature = _decode_signature_data_url(signature.get('signature_data_url') or '')
+        if decoded_signature:
+            try:
+                signature_reader = ImageReader(io.BytesIO(decoded_signature['content']))
+                img_w, img_h = signature_reader.getSize()
+                max_w = 74 * mm
+                max_h = 26 * mm
+                scale = min(max_w / float(img_w), max_h / float(img_h))
+                draw_w = float(img_w) * scale
+                draw_h = float(img_h) * scale
+                sig_flowable = Image(io.BytesIO(decoded_signature['content']), width=draw_w, height=draw_h)
+                sig_img = Table([[Paragraph('<b>Firma manuscrita</b>', styles['paragraph'])], [sig_flowable]], colWidths=[80 * mm])
+                sig_img.setStyle(
+                    TableStyle(
+                        [
+                            ('BOX', (0, 0), (-1, -1), 0.6, colors.HexColor('#cbd5e1')),
+                            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+                            ('TOPPADDING', (0, 0), (-1, -1), 6),
+                            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+                        ]
+                    )
+                )
+                story.append(Spacer(1, 6))
+                story.append(sig_img)
+            except Exception:
+                story.append(Paragraph('No se pudo incrustar la firma manuscrita.', styles['meta']))
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        leftMargin=22 * mm,
+        rightMargin=22 * mm,
+        topMargin=30 * mm,
+        bottomMargin=20 * mm,
+        title=str(version.get('title') or 'Contrato legal'),
+    )
+
+    company_name = str(variables.get('NOMBRE_EMPRESA') or '').strip() or 'Empresa'
+    professional_name = str(variables.get('NOMBRE_PROFESIONAL') or '').strip()
+    header_text = str(profile_settings.get('legal_contract_pdf_header') or 'DOCUMENTO LEGAL').strip()
+    footer_text = str(profile_settings.get('legal_contract_pdf_footer') or '').strip() or 'Documento legal confidencial'
+    footer_right = f"Version {variables.get('VERSION_CONTRATO') or '-'} · Fecha {contract_date_text}"
+
+    def draw_header_footer(pdf_canvas, pdf_doc):
+        width, height = A4
+        pdf_canvas.saveState()
+
+        pdf_canvas.setFillColor(colors.HexColor('#f8fafc'))
+        pdf_canvas.rect(0, height - 46, width, 46, stroke=0, fill=1)
+        pdf_canvas.setStrokeColor(colors.HexColor('#e2e8f0'))
+        pdf_canvas.setLineWidth(0.8)
+        pdf_canvas.line(22 * mm, height - 46, width - (22 * mm), height - 46)
+
+        pdf_canvas.setFillColor(colors.HexColor('#0f172a'))
+        pdf_canvas.setFont('Helvetica-Bold', 9.5)
+        pdf_canvas.drawString(22 * mm, height - 22, header_text)
+        pdf_canvas.setFont('Helvetica', 8.4)
+        sub_line = company_name if not professional_name else (company_name + ' · ' + professional_name)
+        pdf_canvas.setFillColor(colors.HexColor('#475569'))
+        pdf_canvas.drawString(22 * mm, height - 34, sub_line)
+
+        if logo_reader is not None:
+            try:
+                logo_w, logo_h = logo_reader.getSize()
+                max_w = 34 * mm
+                max_h = 13 * mm
+                scale = min(max_w / float(logo_w), max_h / float(logo_h))
+                draw_w = float(logo_w) * scale
+                draw_h = float(logo_h) * scale
+                x = width - (22 * mm) - draw_w
+                y = height - 34
+                pdf_canvas.drawImage(logo_reader, x, y, width=draw_w, height=draw_h, preserveAspectRatio=True, mask='auto')
+            except Exception:
+                pass
+
+        pdf_canvas.setStrokeColor(colors.HexColor('#e2e8f0'))
+        pdf_canvas.setLineWidth(0.8)
+        pdf_canvas.line(22 * mm, 16 * mm, width - (22 * mm), 16 * mm)
+        pdf_canvas.setFillColor(colors.HexColor('#64748b'))
+        pdf_canvas.setFont('Helvetica', 8)
+        pdf_canvas.drawString(22 * mm, 11.5 * mm, footer_text)
+        pdf_canvas.drawCentredString(width / 2.0, 11.5 * mm, footer_right)
+        pdf_canvas.drawRightString(width - (22 * mm), 11.5 * mm, f'Pagina {pdf_doc.page}')
+
+        pdf_canvas.restoreState()
+
+    doc.build(story, onFirstPage=draw_header_footer, onLaterPages=draw_header_footer)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def build_legal_contract_pdf(version_id, signature_id=None, client_id=None):
+    version = get_legal_contract_version(version_id)
+    if not version:
+        return None
+    signature = get_legal_contract_signature_by_id(signature_id) if int(signature_id or 0) > 0 else None
+    validation_errors = validate_legal_contract_pdf_payload(version, signature=signature, client_id=client_id)
+    if validation_errors:
+        return None
+    return _build_legal_contract_pdf_from_version(version, signature=signature, client_id=client_id)
+
+
+def save_signed_legal_contract_pdf(signature_id):
+    signature = get_legal_contract_signature_by_id(signature_id)
+    if not signature:
+        return ''
+    version = get_legal_contract_version(signature.get('version_id'))
+    if not version:
+        return ''
+    validation_errors = validate_legal_contract_pdf_payload(version, signature=signature, client_id=signature.get('client_id'))
+    if validation_errors:
+        return ''
+    pdf = _build_legal_contract_pdf_from_version(version, signature=signature, client_id=signature.get('client_id'))
+    if not pdf:
+        return ''
+    os.makedirs(UPLOADS_CONTRACTS_DIR, exist_ok=True)
+    filename = f"contract_signed_{int(signature_id)}_{uuid.uuid4().hex}.pdf"
+    full_path = os.path.join(UPLOADS_CONTRACTS_DIR, filename)
+    with open(full_path, 'wb') as f:
+        f.write(pdf)
+    public_path = f"/static/uploads/contracts/{filename}"
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE client_legal_contract_signatures SET signed_pdf_path = ? WHERE id = ?",
+        (public_path, int(signature_id)),
+    )
+    conn.commit()
+    conn.close()
+    delete_client_legal_contract_pre_signature(signature.get('client_id'), signature.get('version_id'))
+    return public_path
+
+
+def create_client_legal_contract_signature(client_id, version_id, full_name, signature_data_url, required_checks, optional_checks, ip_address, user_agent, device_type, browser_name, signer_dni='', signer_address='', signer_email='', signer_phone='', contract_html_snapshot=''):
+    client_id_i = int(client_id or 0)
+    version_id_i = int(version_id or 0)
+    if client_id_i <= 0 or version_id_i <= 0:
+        return None
+    existing = get_client_legal_contract_signature(client_id_i, version_id_i)
+    if existing:
+        return existing
+
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO client_legal_contract_signatures(
+            client_id, version_id, full_name, signature_data_url, signed_at,
+            ip_address, user_agent, device_type, browser_name,
+            signer_dni, signer_address, signer_email, signer_phone, contract_html_snapshot,
+            required_checks_json, optional_checks_json, signed_pdf_path, created_at
+        ) VALUES(?,?,?,?,datetime('now'),?,?,?,?,?,?,?,?,?,?,?, '', datetime('now'))
+        """,
+        (
+            client_id_i,
+            version_id_i,
+            str(full_name or '').strip(),
+            str(signature_data_url or '').strip(),
+            str(ip_address or '').strip(),
+            str(user_agent or '').strip(),
+            str(device_type or '').strip(),
+            str(browser_name or '').strip(),
+            _clean_legal_identity_text(signer_dni, 64),
+            _clean_legal_identity_text(signer_address, 260),
+            _clean_legal_identity_text(signer_email, 180),
+            _clean_legal_identity_text(signer_phone, 80),
+            str(contract_html_snapshot or '').strip(),
+            _to_json_text(required_checks or [], '[]'),
+            _to_json_text(optional_checks or [], '[]'),
+        ),
+    )
+    signature_id = int(cur.lastrowid)
+    conn.commit()
+    conn.close()
+    save_signed_legal_contract_pdf(signature_id)
+    return get_legal_contract_signature_by_id(signature_id)
+
+
+def detect_device_type(user_agent):
+    ua = str(user_agent or '').lower()
+    if any(token in ua for token in ('iphone', 'android', 'mobile', 'windows phone')):
+        return 'Movil'
+    if any(token in ua for token in ('ipad', 'tablet')):
+        return 'Tablet'
+    return 'Ordenador'
+
+
+def detect_browser_name(user_agent):
+    ua = str(user_agent or '')
+    ua_l = ua.lower()
+    if 'edg/' in ua_l:
+        return 'Edge'
+    if 'opr/' in ua_l or 'opera' in ua_l:
+        return 'Opera'
+    if 'firefox/' in ua_l:
+        return 'Firefox'
+    if 'chrome/' in ua_l and 'safari/' in ua_l and 'edg/' not in ua_l:
+        return 'Chrome'
+    if 'safari/' in ua_l and 'chrome/' not in ua_l:
+        return 'Safari'
+    return 'Desconocido'
+
+
+def get_request_ip(handler):
+    forwarded = str(handler.headers.get('X-Forwarded-For', '') or '').strip()
+    if forwarded:
+        first = forwarded.split(',')[0].strip()
+        if first:
+            return first
+    real_ip = str(handler.headers.get('X-Real-IP', '') or '').strip()
+    if real_ip:
+        return real_ip
+    try:
+        return str((handler.client_address or [''])[0] or '')
+    except Exception:
+        return ''
+
+
+def render_legal_contract_editor_page(version_id=None, msg=''):
+    versions = get_legal_contract_versions()
+    active_id = get_active_legal_contract_version_id()
+    profile_settings = get_legal_contract_profile_settings()
+    selected_id = int(version_id or 0)
+    if selected_id <= 0:
+        selected_id = active_id
+    if selected_id <= 0 and versions:
+        selected_id = int(versions[0]['id'])
+    selected = get_legal_contract_version(selected_id) if selected_id > 0 else get_legal_contract_default_definition()
+    selected = selected or get_legal_contract_default_definition()
+    selected_version_id = int(selected.get('id') or 0)
+    selected_status = str(selected.get('status') or 'draft')
+    selected_is_draft = selected_status == 'draft'
+    selected_is_active = int(selected.get('is_active') or 0) == 1
+    selected_signatures = count_legal_contract_signatures_for_version(selected_version_id)
+    can_overwrite_draft = selected_version_id > 0 and selected_is_draft and (not selected_is_active) and selected_signatures == 0
+    preview_variables = _build_legal_contract_variable_context(version=selected, client_id=None, signature=None)
+    if not str(preview_variables.get('NOMBRE_CLIENTE') or '').strip():
+        preview_variables['NOMBRE_CLIENTE'] = 'Nombre Cliente'
+    if not str(preview_variables.get('DNI_CLIENTE') or '').strip():
+        preview_variables['DNI_CLIENTE'] = '00000000X'
+    preview_html = _replace_legal_contract_variables_html(selected.get('content_html') or '', preview_variables, for_pdf=False)
+
+    required_text = '\n'.join(selected.get('required_checks') or [])
+    optional_text = '\n'.join(selected.get('optional_checks') or [])
+
+    variables_help_html = ''.join([
+        (
+            '<button class="token-btn" type="button" '
+            f'data-token="{{{{{token}}}}}">{{{{{token}}}}}</button>'
+            f'<span>{html.escape(label)}</span>'
+        )
+        for token, label in LEGAL_CONTRACT_VARIABLE_LABELS
+    ])
+
+    version_options = ''.join([
+        f'<option value="{int(v["id"])}" {"selected" if int(v["id"]) == int(selected_id) else ""}>V{int(v["id"])} · {html.escape(str(v["title"] or "Contrato legal"))} · {html.escape(str(v["status"] or "draft"))}</option>'
+        for v in versions
+    ]) if versions else '<option value="">Sin versiones</option>'
+
+    versions_rows = ''.join([
+        '<tr>'
+        f'<td>V{int(v["id"])}</td>'
+        f'<td>{html.escape(str(v["title"] or "Contrato legal"))}</td>'
+        f'<td>{"Activa" if int(v.get("is_active") or 0) == 1 else "-"}</td>'
+        f'<td>{html.escape(str(v.get("status") or "draft"))}</td>'
+        f'<td>{html.escape(format_feedback_datetime_es(v.get("created_at") or "")[0])}</td>'
+        f'<td><a href="/export_legal_contract_pdf?version_id={int(v["id"])}" target="_blank">PDF</a></td>'
+        '</tr>'
+        for v in versions
+    ])
+
+    return f'''<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Contrato legal</title>
+    <style>
+        body{{font-family:'Manrope','Avenir Next','SF Pro Display','Segoe UI',sans-serif;margin:0;background:radial-gradient(1100px 600px at 0% -5%, #ffffff 0%, #f6f7f9 60%, #f3f4f6 100%);color:#101318;}}
+        .page{{max-width:1240px;margin:0 auto;padding:24px;}}
+        .card{{background:#fff;border:1px solid #e8ebef;border-radius:18px;padding:20px;box-shadow:0 12px 30px rgba(16,19,24,.06);margin-bottom:14px;}}
+        .grid{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px;}}
+        @media (max-width:980px){{.grid{{grid-template-columns:1fr;}}}}
+        h1{{margin:0 0 8px;font-size:2rem;}}
+        h2{{margin:0 0 10px;font-size:1.2rem;}}
+        h3{{margin:0 0 8px;font-size:1rem;}}
+        .row{{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}}
+        form{{display:grid;gap:10px;}}
+        input,textarea,select,button{{font:inherit;}}
+        input,textarea,select{{padding:10px 12px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;}}
+        textarea{{min-height:90px;resize:vertical;}}
+        button{{padding:10px 12px;border:none;border-radius:10px;background:#101318;color:#fff;font-weight:700;cursor:pointer;}}
+        .muted{{color:#64748b;}}
+        .ok{{color:#0f766e;font-weight:700;}}
+        .preview{{border:1px solid #e8ebef;border-radius:12px;padding:16px;background:#f8fafc;max-height:74vh;overflow:auto;}}
+        .editor-tools{{display:flex;gap:6px;flex-wrap:wrap;position:sticky;top:0;background:#fff;padding:8px;border:1px solid #e5e7eb;border-radius:10px;z-index:3;}}
+        .tool-btn{{padding:7px 10px;border:1px solid #d8dde6;border-radius:8px;background:#fff;color:#101318;font-weight:700;cursor:pointer;}}
+        .editor-surface{{min-height:420px;border:1px solid #d8dde6;border-radius:10px;padding:14px;background:#fff;line-height:1.65;overflow:auto;}}
+        .editor-surface:focus{{outline:none;box-shadow:0 0 0 3px rgba(37,99,235,.12);border-color:#93c5fd;}}
+        .preview h2,.preview h3,.preview h4{{margin:10px 0 6px;}}
+        .preview p{{margin:0 0 9px;line-height:1.65;}}
+        .preview blockquote{{margin:10px 0;padding:8px 12px;border-left:3px solid #94a3b8;background:#f1f5f9;color:#334155;}}
+        .preview hr{{border:none;border-top:1px solid #cbd5e1;margin:14px 0;}}
+        .preview table{{width:100%;border-collapse:collapse;background:#fff;margin:10px 0;}}
+        .preview table th,.preview table td{{border:1px solid #cbd5e1;padding:7px;font-size:.88rem;}}
+        .preview table th{{background:#f8fafc;}}
+        .preview ul,.preview ol{{margin:0 0 10px 22px;}}
+        .checks{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
+        .token-grid{{display:grid;grid-template-columns:200px minmax(0,1fr);gap:6px 10px;align-items:center;}}
+        .token-btn{{padding:7px 9px;border:1px solid #cbd5e1;border-radius:8px;background:#fff;font-weight:700;cursor:pointer;text-align:left;}}
+        .pill{{display:inline-flex;padding:5px 8px;border-radius:999px;background:#e2e8f0;color:#0f172a;font-size:.78rem;font-weight:700;}}
+        .pdf-meta{{display:grid;grid-template-columns:1fr 1fr;gap:10px;}}
+        .signature-config{{margin-top:8px;border:1px solid #e8ebef;border-radius:12px;padding:12px;background:#f8fafc;display:grid;gap:8px;}}
+        .signature-canvas{{border:1px dashed #94a3b8;border-radius:10px;background:#fff;width:100%;max-width:480px;height:140px;touch-action:none;}}
+        .signature-preview{{max-width:320px;max-height:120px;border:1px solid #d8dde6;border-radius:10px;background:#fff;object-fit:contain;display:block;}}
+        .helper{{font-size:.84rem;color:#475569;}}
+        .warn{{color:#92400e;font-size:.84rem;font-weight:700;}}
+        table{{width:100%;border-collapse:collapse;}}
+        th,td{{padding:8px;border-bottom:1px solid #e8ebef;text-align:left;font-size:.9rem;}}
+        th{{background:#f8fafc;}}
+    </style>
+</head>
+<body>
+    <div class="page">
+        {home_link()}
+        <div class="card">
+            <h1>Contrato legal</h1>
+            <p class="muted">Editor profesional preparado para contratos extensos, versionado, variables dinámicas y salida PDF empresarial.</p>
+            {f'<p class="ok">{html.escape(msg)}</p>' if msg else ''}
+            <div class="row">
+                <form method="get" action="/legal_contract_editor" class="row">
+                    <select name="version_id">{version_options}</select>
+                    <button type="submit">Abrir versión</button>
+                </form>
+                <form method="post" action="/legal_contract_editor">
+                    <input type="hidden" name="action" value="publish_version" />
+                    <input type="hidden" name="version_id" value="{selected_version_id}" />
+                    <button type="submit" class="js-confirm-publish">Publicar versión seleccionada</button>
+                </form>
+                <form method="post" action="/legal_contract_editor">
+                    <input type="hidden" name="action" value="duplicate_version" />
+                    <input type="hidden" name="version_id" value="{selected_version_id}" />
+                    <button type="submit">Duplicar versión</button>
+                </form>
+                <a href="/export_legal_contract_pdf?version_id={selected_version_id}" target="_blank">Descargar PDF de esta versión</a>
+            </div>
+            <p class="muted" style="margin-top:8px;">Versión activa: <strong>{int(active_id or 0)}</strong> · <span class="pill">Variables listas para sustitución automática</span></p>
+            {f'<p class="warn">Esta versión está vinculada a {selected_signatures} firma(s). Solo se permite crear nuevas versiones.</p>' if selected_signatures > 0 else ''}
+        </div>
+
+        <div class="card">
+            <h2>Datos corporativos y maquetación PDF</h2>
+            <p class="helper">Estos datos alimentan automáticamente las variables del contrato y el encabezado/pie del PDF.</p>
+            <form method="post" action="/legal_contract_editor">
+                <input type="hidden" name="action" value="save_legal_profile" />
+                <input type="hidden" name="version_id" value="{int(selected.get('id') or 0)}" />
+                <div class="checks">
+                    <label>Nombre empresa<input name="legal_contract_company_name" value="{html.escape(profile_settings.get('legal_contract_company_name') or '')}" /></label>
+                    <label>Nombre profesional<input name="legal_contract_professional_name" value="{html.escape(profile_settings.get('legal_contract_professional_name') or '')}" /></label>
+                    <label>NIF/CIF<input name="legal_contract_nif" value="{html.escape(profile_settings.get('legal_contract_nif') or '')}" /></label>
+                    <label>Dirección<input name="legal_contract_address" value="{html.escape(profile_settings.get('legal_contract_address') or '')}" /></label>
+                    <label>Teléfono<input name="legal_contract_phone" value="{html.escape(profile_settings.get('legal_contract_phone') or '')}" /></label>
+                    <label>Email<input name="legal_contract_email" value="{html.escape(profile_settings.get('legal_contract_email') or '')}" /></label>
+                    <label>Web<input name="legal_contract_web" value="{html.escape(profile_settings.get('legal_contract_web') or '')}" /></label>
+                    <label>Logo empresa (URL o ruta /static/...)
+                        <input name="legal_contract_logo_url" value="{html.escape(profile_settings.get('legal_contract_logo_url') or '')}" />
+                    </label>
+                </div>
+                <div class="signature-config">
+                    <strong>Firma automatica del profesional (PNG)</strong>
+                    <p class="helper">Puedes dibujar la firma o subir una imagen PNG transparente. Se aplicara automaticamente en todos los PDFs de contrato.</p>
+                    <canvas id="lc-prof-sign-canvas" class="signature-canvas" width="960" height="280"></canvas>
+                    <div class="row">
+                        <button type="button" class="tool-btn" id="lc-prof-sign-clear">Limpiar dibujo</button>
+                        <button type="button" class="tool-btn" id="lc-prof-sign-apply-draw">Usar dibujo</button>
+                        <input type="file" id="lc-prof-sign-file" accept="image/png" />
+                    </div>
+                    <img id="lc-prof-sign-preview" class="signature-preview" src="{html.escape(profile_settings.get('legal_contract_professional_signature_data_url') or '')}" alt="Firma profesional" style="{('display:block;' if str(profile_settings.get('legal_contract_professional_signature_data_url') or '').strip() else 'display:none;')}" />
+                    <input type="hidden" id="lc-prof-sign-data-url" name="legal_contract_professional_signature_data_url" value="{html.escape(profile_settings.get('legal_contract_professional_signature_data_url') or '', quote=True)}" />
+                </div>
+                <div class="pdf-meta">
+                    <label>Encabezado PDF<input name="legal_contract_pdf_header" value="{html.escape(profile_settings.get('legal_contract_pdf_header') or '')}" /></label>
+                    <label>Pie de página PDF<input name="legal_contract_pdf_footer" value="{html.escape(profile_settings.get('legal_contract_pdf_footer') or '')}" /></label>
+                </div>
+                <button type="submit">Guardar configuración legal</button>
+            </form>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>Nuevo versionado</h2>
+                <form method="post" action="/legal_contract_editor" id="lc-version-form">
+                    <input type="hidden" name="version_id" value="{selected_version_id}" />
+                    <input name="title" value="{html.escape(str(selected.get('title') or ''))}" placeholder="Título" required />
+                    <input name="subtitle" value="{html.escape(str(selected.get('subtitle') or ''))}" placeholder="Subtítulo" />
+                    <div class="checks">
+                        <label>Casillas obligatorias (una por línea)
+                            <textarea name="required_checks_text">{html.escape(required_text)}</textarea>
+                        </label>
+                        <label>Casillas opcionales (una por línea)
+                            <textarea name="optional_checks_text">{html.escape(optional_text)}</textarea>
+                        </label>
+                    </div>
+                    <h3>Variables dinámicas</h3>
+                    <p class="helper">Pulsa una variable para insertarla en el cursor del editor.</p>
+                    <div class="token-grid">{variables_help_html}</div>
+                    <label>Editor de contrato</label>
+                    <div class="editor-tools">
+                        <button class="tool-btn" type="button" data-cmd="undo">↶ Deshacer</button>
+                        <button class="tool-btn" type="button" data-cmd="redo">↷ Rehacer</button>
+                        <button class="tool-btn" type="button" data-cmd="bold">Negrita</button>
+                        <button class="tool-btn" type="button" data-cmd="italic">Cursiva</button>
+                        <button class="tool-btn" type="button" data-cmd="underline">Subrayado</button>
+                        <button class="tool-btn" type="button" data-cmd="formatBlock" data-value="h1">Título H1</button>
+                        <button class="tool-btn" type="button" data-cmd="formatBlock" data-value="h2">Título H2</button>
+                        <button class="tool-btn" type="button" data-cmd="formatBlock" data-value="h3">Subtítulo H3</button>
+                        <button class="tool-btn" type="button" data-cmd="formatBlock" data-value="h4">Subtítulo H4</button>
+                        <button class="tool-btn" type="button" data-cmd="formatBlock" data-value="p">Párrafo</button>
+                        <button class="tool-btn" type="button" data-cmd="insertUnorderedList">Lista</button>
+                        <button class="tool-btn" type="button" data-cmd="insertOrderedList">Numeración</button>
+                        <button class="tool-btn" type="button" data-cmd="justifyLeft">Alinear izquierda</button>
+                        <button class="tool-btn" type="button" data-cmd="justifyCenter">Centrar</button>
+                        <button class="tool-btn" type="button" data-cmd="justifyRight">Alinear derecha</button>
+                        <button class="tool-btn" type="button" data-cmd="justifyFull">Justificar</button>
+                        <button class="tool-btn" type="button" id="lc-insert-hr">Separador</button>
+                        <button class="tool-btn" type="button" id="lc-insert-blockquote">Bloque destacado</button>
+                        <button class="tool-btn" type="button" id="lc-insert-table">Insertar tabla</button>
+                    </div>
+                    <div id="lc-editor" class="editor-surface" contenteditable="true">{selected.get('content_html') or ''}</div>
+                    <input type="hidden" id="lc-content" name="content_html" value="{html.escape(str(selected.get('content_html') or ''), quote=True)}" />
+                    <input type="hidden" id="lc-publish-now" name="publish_now" value="0" />
+                    <div class="row">
+                        <button type="submit" name="action" value="preview_pdf" formtarget="_blank">Vista previa PDF</button>
+                        <button type="submit" name="action" value="save_new_version" class="js-save-draft">Guardar como borrador (nueva versión)</button>
+                        <button type="submit" name="action" value="save_new_version" data-publish-now="1" class="js-confirm-publish-new">Guardar y publicar (nueva versión)</button>
+                        {('<button type="submit" name="action" value="overwrite_draft" class="js-confirm-overwrite">Sobrescribir borrador seleccionado</button>' if can_overwrite_draft else '')}
+                    </div>
+                </form>
+            </div>
+            <div class="card">
+                <h2>Previsualización cliente</h2>
+                <p class="helper">Aquí se ven aplicadas las variables dinámicas con datos de ejemplo/configuración.</p>
+                <div id="lc-preview" class="preview">{preview_html}</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Historial de versiones</h2>
+            <table>
+                <thead><tr><th>Versión</th><th>Título</th><th>Activa</th><th>Estado</th><th>Creada</th><th>PDF</th></tr></thead>
+                <tbody>{versions_rows if versions_rows else '<tr><td colspan="6">Sin versiones</td></tr>'}</tbody>
+            </table>
+        </div>
+    </div>
+    <script>
+        (function(){{
+            const ta = document.getElementById('lc-content');
+            const ed = document.getElementById('lc-editor');
+            const pv = document.getElementById('lc-preview');
+            const tokenButtons = Array.from(document.querySelectorAll('.token-btn'));
+            const variableValues = {json.dumps(preview_variables, ensure_ascii=False)};
+            const versionForm = document.getElementById('lc-version-form');
+            if (!ta || !pv || !ed) return;
+            const initialState = JSON.stringify({{
+                title: String((versionForm?.querySelector('input[name="title"]')?.value || '')).trim(),
+                subtitle: String((versionForm?.querySelector('input[name="subtitle"]')?.value || '')).trim(),
+                required: String((versionForm?.querySelector('textarea[name="required_checks_text"]')?.value || '')).trim(),
+                optional: String((versionForm?.querySelector('textarea[name="optional_checks_text"]')?.value || '')).trim(),
+                content: String(ed.innerHTML || ''),
+            }});
+            let dirty = false;
+            const computeState = () => JSON.stringify({{
+                title: String((versionForm?.querySelector('input[name="title"]')?.value || '')).trim(),
+                subtitle: String((versionForm?.querySelector('input[name="subtitle"]')?.value || '')).trim(),
+                required: String((versionForm?.querySelector('textarea[name="required_checks_text"]')?.value || '')).trim(),
+                optional: String((versionForm?.querySelector('textarea[name="optional_checks_text"]')?.value || '')).trim(),
+                content: String(ed.innerHTML || ''),
+            }});
+            const replaceTokens = (source) => {{
+                let out = String(source || '');
+                Object.keys(variableValues).forEach((key) => {{
+                    const token = '{{{{' + key + '}}}}';
+                    let value = String(variableValues[key] || '');
+                    if (key === 'LOGO_EMPRESA') {{
+                        value = value ? '<img src="' + value.replace(/"/g,'&quot;') + '" alt="Logo" style="max-height:72px;max-width:240px;object-fit:contain;" />' : '';
+                    }} else if (key === 'FIRMA_PROFESIONAL') {{
+                        value = value ? '<img src="' + value.replace(/"/g,'&quot;') + '" alt="Firma profesional" style="max-height:120px;max-width:320px;object-fit:contain;border:1px solid #d8dde6;border-radius:8px;background:#fff;" />' : '';
+                    }} else if (key === 'FIRMA_CLIENTE') {{
+                        value = value ? '<img src="' + value.replace(/"/g,'&quot;') + '" alt="Firma" style="max-height:120px;max-width:320px;object-fit:contain;border:1px solid #d8dde6;border-radius:8px;background:#fff;" />' : '';
+                    }} else {{
+                        value = value
+                            .replace(/&/g, '&amp;')
+                            .replace(/</g, '&lt;')
+                            .replace(/>/g, '&gt;')
+                            .replace(/"/g, '&quot;');
+                    }}
+                    out = out.split(token).join(value);
+                }});
+                return out;
+            }};
+            const sync = () => {{
+                ta.value = ed.innerHTML || '';
+                pv.innerHTML = replaceTokens(ta.value);
+                dirty = computeState() !== initialState;
+            }};
+            document.querySelectorAll('.tool-btn').forEach((btn) => {{
+                btn.addEventListener('click', () => {{
+                    const cmd = btn.dataset.cmd;
+                    const val = btn.dataset.value || null;
+                    ed.focus();
+                    document.execCommand(cmd, false, val);
+                    sync();
+                }});
+            }});
+            tokenButtons.forEach((btn) => {{
+                btn.addEventListener('click', () => {{
+                    const token = btn.dataset.token || '';
+                    if (!token) return;
+                    ed.focus();
+                    document.execCommand('insertText', false, token);
+                    sync();
+                }});
+            }});
+            const insertHrBtn = document.getElementById('lc-insert-hr');
+            if (insertHrBtn) insertHrBtn.addEventListener('click', () => {{
+                ed.focus();
+                document.execCommand('insertHorizontalRule', false, null);
+                sync();
+            }});
+            const insertBlockquoteBtn = document.getElementById('lc-insert-blockquote');
+            if (insertBlockquoteBtn) insertBlockquoteBtn.addEventListener('click', () => {{
+                ed.focus();
+                document.execCommand('formatBlock', false, 'blockquote');
+                sync();
+            }});
+            const insertTableBtn = document.getElementById('lc-insert-table');
+            if (insertTableBtn) insertTableBtn.addEventListener('click', () => {{
+                const rows = Math.max(1, parseInt(prompt('Filas de la tabla', '3') || '3', 10) || 3);
+                const cols = Math.max(1, parseInt(prompt('Columnas de la tabla', '3') || '3', 10) || 3);
+                let htmlTable = '<table><thead><tr>';
+                for (let c = 0; c < cols; c += 1) htmlTable += '<th>Encabezado ' + (c + 1) + '</th>';
+                htmlTable += '</tr></thead><tbody>';
+                for (let r = 0; r < rows; r += 1) {{
+                    htmlTable += '<tr>';
+                    for (let c = 0; c < cols; c += 1) htmlTable += '<td>Contenido</td>';
+                    htmlTable += '</tr>';
+                }}
+                htmlTable += '</tbody></table><p></p>';
+                ed.focus();
+                document.execCommand('insertHTML', false, htmlTable);
+                sync();
+            }});
+            ed.addEventListener('input', sync);
+            if (versionForm) {{
+                versionForm.addEventListener('input', sync);
+                versionForm.addEventListener('submit', () => {{ dirty = false; }});
+            }}
+            const publishNowInput = document.getElementById('lc-publish-now');
+            document.querySelectorAll('.js-save-draft').forEach((btn) => {{
+                btn.addEventListener('click', () => {{ if (publishNowInput) publishNowInput.value = '0'; }});
+            }});
+            window.addEventListener('beforeunload', (event) => {{
+                if (!dirty) return;
+                event.preventDefault();
+                event.returnValue = '';
+            }});
+            document.querySelectorAll('.js-confirm-publish').forEach((btn) => {{
+                btn.addEventListener('click', (e) => {{
+                    if (!confirm('Vas a publicar esta versión y pasará a ser la activa. ¿Continuar?')) e.preventDefault();
+                }});
+            }});
+            document.querySelectorAll('.js-confirm-publish-new').forEach((btn) => {{
+                btn.addEventListener('click', (e) => {{
+                    const should = confirm('Se creará una nueva versión y se publicará inmediatamente. ¿Confirmas?');
+                    if (!should) {{
+                        e.preventDefault();
+                        return;
+                    }}
+                    if (publishNowInput) publishNowInput.value = '1';
+                }});
+            }});
+            document.querySelectorAll('.js-confirm-overwrite').forEach((btn) => {{
+                btn.addEventListener('click', (e) => {{
+                    if (publishNowInput) publishNowInput.value = '0';
+                    if (!confirm('Se sobrescribirá el borrador seleccionado. Esta acción no afecta versiones publicadas. ¿Continuar?')) e.preventDefault();
+                }});
+            }});
+
+            const profCanvas = document.getElementById('lc-prof-sign-canvas');
+            const profPreview = document.getElementById('lc-prof-sign-preview');
+            const profDataInput = document.getElementById('lc-prof-sign-data-url');
+            const profFileInput = document.getElementById('lc-prof-sign-file');
+            const profClearBtn = document.getElementById('lc-prof-sign-clear');
+            const profApplyDrawBtn = document.getElementById('lc-prof-sign-apply-draw');
+            if (profCanvas && profDataInput) {{
+                const ctx = profCanvas.getContext('2d');
+                ctx.lineWidth = 2.2;
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+                ctx.strokeStyle = '#0f172a';
+
+                const clearCanvas = () => {{
+                    ctx.clearRect(0, 0, profCanvas.width, profCanvas.height);
+                }};
+
+                if (profDataInput.value && profPreview) {{
+                    profPreview.src = profDataInput.value;
+                    profPreview.style.display = 'block';
+                }}
+
+                let drawing = false;
+                const pos = (evt) => {{
+                    const rect = profCanvas.getBoundingClientRect();
+                    const point = evt.touches ? evt.touches[0] : evt;
+                    const x = (point.clientX - rect.left) * (profCanvas.width / rect.width);
+                    const y = (point.clientY - rect.top) * (profCanvas.height / rect.height);
+                    return {{x, y}};
+                }};
+                const startDraw = (evt) => {{
+                    drawing = true;
+                    const p = pos(evt);
+                    ctx.beginPath();
+                    ctx.moveTo(p.x, p.y);
+                    evt.preventDefault();
+                }};
+                const moveDraw = (evt) => {{
+                    if (!drawing) return;
+                    const p = pos(evt);
+                    ctx.lineTo(p.x, p.y);
+                    ctx.stroke();
+                    evt.preventDefault();
+                }};
+                const endDraw = () => {{
+                    drawing = false;
+                }};
+                profCanvas.addEventListener('mousedown', startDraw);
+                profCanvas.addEventListener('mousemove', moveDraw);
+                profCanvas.addEventListener('mouseup', endDraw);
+                profCanvas.addEventListener('mouseleave', endDraw);
+                profCanvas.addEventListener('touchstart', startDraw, {{passive:false}});
+                profCanvas.addEventListener('touchmove', moveDraw, {{passive:false}});
+                profCanvas.addEventListener('touchend', endDraw);
+
+                if (profClearBtn) profClearBtn.addEventListener('click', () => {{
+                    clearCanvas();
+                    profDataInput.value = '';
+                    if (profPreview) {{
+                        profPreview.removeAttribute('src');
+                        profPreview.style.display = 'none';
+                    }}
+                }});
+
+                if (profApplyDrawBtn) profApplyDrawBtn.addEventListener('click', () => {{
+                    const dataUrl = profCanvas.toDataURL('image/png');
+                    profDataInput.value = dataUrl;
+                    if (profPreview) {{
+                        profPreview.src = dataUrl;
+                        profPreview.style.display = 'block';
+                    }}
+                }});
+
+                if (profFileInput) profFileInput.addEventListener('change', () => {{
+                    const file = profFileInput.files && profFileInput.files[0];
+                    if (!file) return;
+                    if (file.type !== 'image/png') {{
+                        alert('La firma debe ser un archivo PNG.');
+                        profFileInput.value = '';
+                        return;
+                    }}
+                    const reader = new FileReader();
+                    reader.onload = () => {{
+                        const dataUrl = String(reader.result || '');
+                        profDataInput.value = dataUrl;
+                        if (profPreview) {{
+                            profPreview.src = dataUrl;
+                            profPreview.style.display = 'block';
+                        }}
+                    }};
+                    reader.readAsDataURL(file);
+                }});
+            }}
+            sync();
+        }})();
+    </script>
+</body>
+</html>'''
+
+
+def render_client_legal_contract_panel(client_id, return_to, admin_mode=False):
+    active_version_id = get_active_legal_contract_version_id()
+    if active_version_id <= 0:
+        return '<p class="empty">No hay una versión activa del contrato legal.</p>'
+
+    version = get_legal_contract_version(active_version_id)
+    if not version:
+        return '<p class="empty">No hay una versión activa del contrato legal.</p>'
+
+    signature = get_client_legal_contract_signature(client_id, active_version_id)
+    pre_signature = get_client_legal_contract_pre_signature(client_id, active_version_id)
+    history = list_client_legal_contract_signatures(client_id)
+    manual_identity = (pre_signature or {}).get('manual_identity') if pre_signature else {}
+    if signature:
+        manual_identity = {
+            'client_full_name': signature.get('full_name') or '',
+            'client_dni': signature.get('signer_dni') or '',
+            'client_address': signature.get('signer_address') or '',
+            'client_email': signature.get('signer_email') or '',
+            'client_phone': signature.get('signer_phone') or '',
+        }
+    if signature and str(signature.get('contract_html_snapshot') or '').strip():
+        rendered_contract_html = str(signature.get('contract_html_snapshot') or '').strip()
+        if _needs_signed_snapshot_identity_refresh(rendered_contract_html, signature):
+            rendered_contract_html = _render_legal_contract_html_with_identity(
+                version,
+                client_id,
+                manual_identity=manual_identity,
+                signature=signature,
+                for_pdf=False,
+            )
+    elif pre_signature:
+        # Re-render from current template + frozen identity to avoid stale cached snapshots.
+        rendered_contract_html = _render_legal_contract_html_with_identity(
+            version,
+            client_id,
+            manual_identity=manual_identity,
+            signature=None,
+            for_pdf=False,
+        )
+    else:
+        rendered_contract_html = _render_legal_contract_html_with_identity(
+            version,
+            client_id,
+            manual_identity=manual_identity,
+            signature=signature,
+            for_pdf=False,
+        )
+    is_signed = signature is not None
+    is_locked_pending = (not is_signed) and bool(pre_signature)
+    status_html = (
+        '<div class="lc-status lc-ok"><strong>Estado: Firmado</strong>'
+        f'<span>Versión firmada: V{int(active_version_id)} · Fecha: {html.escape(format_feedback_datetime_es(signature.get("signed_at") or "")[0] if signature else "-")}</span>'
+        '</div>'
+        if is_signed else (
+            '<div class="lc-status lc-pending"><strong>Estado: Contrato bloqueado para firma</strong><span>Ya completaste tus datos legales. Revisa el documento y firma para finalizar.</span></div>'
+            if is_locked_pending else
+            '<div class="lc-status lc-pending"><strong>Estado: Pendiente de firma</strong><span>Completa tus datos legales para bloquear el contrato y continuar con la firma.</span></div>'
+        )
+    )
+
+    required_checks = version.get('required_checks') or []
+    optional_checks = version.get('optional_checks') or []
+    required_html = ''.join([
+        f'<label class="lc-check"><input type="checkbox" name="required_{idx}" value="1" required /> <span>{html.escape(text)}</span></label>'
+        for idx, text in enumerate(required_checks, start=1)
+    ])
+    optional_html = ''.join([
+        f'<label class="lc-check"><input type="checkbox" name="optional_{idx}" value="1" /> <span>{html.escape(text)}</span></label>'
+        for idx, text in enumerate(optional_checks, start=1)
+    ])
+
+    full_name_default = str((manual_identity or {}).get('client_full_name') or '').strip()
+    if not full_name_default:
+        client_row = get_client_by_id(client_id)
+        if client_row:
+            full_name_default = str(client_row[1] or '').strip()
+
+    history_rows = ''.join([
+        '<tr>'
+        f'<td>V{int(item.get("version_id") or 0)}</td>'
+        f'<td>{html.escape(format_feedback_datetime_es(item.get("signed_at") or "")[0])}</td>'
+        f'<td>{html.escape(str(item.get("device_type") or "-"))}</td>'
+        f'<td><a href="/export_signed_legal_contract_pdf?signature_id={int(item.get("id") or 0)}" target="_blank">Descargar</a></td>'
+        '</tr>'
+        for item in history
+    ])
+
+    pre_identity_form = ''
+    if not is_signed and not is_locked_pending:
+        pre_identity_form = (
+            '<form method="post" action="/prepare_client_legal_contract_identity" class="lc-form">'
+            f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+            f'<input type="hidden" name="version_id" value="{int(active_version_id)}" />'
+            f'<input type="hidden" name="return_to" value="{html.escape(str(return_to or ""), quote=True)}" />'
+            '<strong>Datos legales obligatorios</strong>'
+            '<label>Nombre y apellidos<input name="client_full_name" placeholder="Nombre completo" value="' + html.escape(full_name_default) + '" required /></label>'
+            '<label>DNI/NIE<input name="client_dni" placeholder="Documento de identidad" value="' + html.escape(str((manual_identity or {}).get('client_dni') or '')) + '" required /></label>'
+            '<label>Direccion<input name="client_address" placeholder="Direccion completa" value="' + html.escape(str((manual_identity or {}).get('client_address') or '')) + '" required /></label>'
+            '<label>Correo electronico<input type="email" name="client_email" placeholder="email@dominio.com" value="' + html.escape(str((manual_identity or {}).get('client_email') or '')) + '" required /></label>'
+            '<label>Telefono<input name="client_phone" placeholder="Telefono" value="' + html.escape(str((manual_identity or {}).get('client_phone') or '')) + '" required /></label>'
+            '<button type="submit">Continuar</button>'
+            '</form>'
+        )
+
+    signature_form = ''
+    if not is_signed and is_locked_pending:
+        signature_form = (
+            '<form method="post" action="/submit_client_legal_contract" class="lc-form" onsubmit="return window.__lcBeforeSubmit && window.__lcBeforeSubmit();">'
+            f'<input type="hidden" name="client_id" value="{int(client_id)}" />'
+            f'<input type="hidden" name="version_id" value="{int((pre_signature or {}).get("version_id") or active_version_id)}" />'
+            f'<input type="hidden" name="return_to" value="{html.escape(str(return_to or ""), quote=True)}" />'
+            '<input type="hidden" name="signature_data_url" id="lc-signature-data" />'
+            '<div class="lc-identity-readonly">'
+            f'<div><strong>Nombre:</strong> {html.escape(str((manual_identity or {}).get("client_full_name") or "-"))}</div>'
+            f'<div><strong>DNI/NIE:</strong> {html.escape(str((manual_identity or {}).get("client_dni") or "-"))}</div>'
+            f'<div><strong>Direccion:</strong> {html.escape(str((manual_identity or {}).get("client_address") or "-"))}</div>'
+            f'<div><strong>Email:</strong> {html.escape(str((manual_identity or {}).get("client_email") or "-"))}</div>'
+            f'<div><strong>Telefono:</strong> {html.escape(str((manual_identity or {}).get("client_phone") or "-"))}</div>'
+            '</div>'
+            '<div class="lc-checks">'
+            f'{required_html}'
+            f'{optional_html}'
+            '</div>'
+            '<div class="lc-sign-wrap">'
+            '<p>Firma manuscrita</p>'
+            '<canvas id="lc-sign-canvas" width="860" height="220"></canvas>'
+            '<div class="row">'
+            '<button type="button" class="mini-btn" id="lc-clear-sign">Limpiar firma</button>'
+            '</div>'
+            '</div>'
+            '<button type="submit">Aceptar y firmar contrato</button>'
+            '</form>'
+        )
+
+    signed_actions = ''
+    if is_signed:
+        signed_actions = (
+            '<div class="row">'
+            f'<a class="btn" href="/export_signed_legal_contract_pdf?signature_id={int(signature.get("id") or 0)}" target="_blank">Descargar PDF firmado</a>'
+            '</div>'
+        )
+
+    return f'''
+    <style>
+        .lc-wrap{{display:grid;gap:12px;}}
+        .lc-status{{border:1px solid #e8ebef;border-radius:12px;padding:10px 12px;display:grid;gap:4px;}}
+        .lc-status strong{{font-size:.95rem;}}
+        .lc-status span{{font-size:.86rem;color:#475569;}}
+        .lc-ok{{background:#ecfdf5;border-color:#86efac;}}
+        .lc-pending{{background:#fff7ed;border-color:#fdba74;}}
+        .lc-content{{border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:14px;max-height:58vh;overflow:auto;line-height:1.6;}}
+        .lc-content h2,.lc-content h3{{margin:10px 0 6px;}}
+        .lc-content p{{margin:0 0 8px;}}
+        .lc-form{{display:grid;gap:10px;border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:12px;}}
+        .lc-form input{{padding:10px 12px;border:1px solid #d8dde6;border-radius:10px;background:#fff;color:#101318;}}
+        .lc-checks{{display:grid;gap:6px;}}
+        .lc-check{{display:flex;align-items:flex-start;gap:8px;font-size:.9rem;color:#0f172a;}}
+        .lc-identity-readonly{{display:grid;gap:4px;padding:10px 12px;border:1px solid #d8dde6;border-radius:10px;background:#f8fafc;font-size:.9rem;color:#0f172a;}}
+        .lc-sign-wrap{{border:1px dashed #cbd5e1;border-radius:10px;padding:10px;background:#f8fafc;}}
+        .lc-sign-wrap p{{margin:0 0 8px;font-weight:700;color:#334155;}}
+        #lc-sign-canvas{{width:100%;height:220px;border:1px solid #d8dde6;border-radius:10px;background:#fff;touch-action:none;}}
+        .lc-history{{border:1px solid #e8ebef;border-radius:12px;background:#fff;padding:10px;}}
+        .lc-history table{{width:100%;border-collapse:collapse;}}
+        .lc-history th,.lc-history td{{padding:7px;border-bottom:1px solid #eef2f7;text-align:left;font-size:.85rem;}}
+        .mini-btn{{padding:8px 10px;border:1px solid #d8dde6;border-radius:9px;background:#fff;color:#101318;font-weight:700;cursor:pointer;}}
+    </style>
+    <section class="lc-wrap">
+        {status_html}
+        <div class="row">
+            <a class="btn" href="/export_legal_contract_pdf?version_id={int(active_version_id)}&client_id={int(client_id)}" target="_blank">Descargar PDF de contrato</a>
+            {signed_actions}
+        </div>
+        <div class="lc-content">{rendered_contract_html}</div>
+        {pre_identity_form}
+        {signature_form}
+        <div class="lc-history">
+            <strong>Historial de contratos firmados</strong>
+            <table>
+                <thead><tr><th>Versión</th><th>Fecha</th><th>Dispositivo</th><th>PDF</th></tr></thead>
+                <tbody>{history_rows if history_rows else '<tr><td colspan="4">Sin contratos firmados</td></tr>'}</tbody>
+            </table>
+        </div>
+    </section>
+    <script>
+        (function(){{
+            const canvas = document.getElementById('lc-sign-canvas');
+            if (!canvas) return;
+            const clearBtn = document.getElementById('lc-clear-sign');
+            const hidden = document.getElementById('lc-signature-data');
+            const ctx = canvas.getContext('2d');
+            let drawing = false;
+            let dirty = false;
+            function resizeCanvas() {{
+                const ratio = Math.max(window.devicePixelRatio || 1, 1);
+                const w = canvas.clientWidth;
+                const h = canvas.clientHeight;
+                canvas.width = Math.floor(w * ratio);
+                canvas.height = Math.floor(h * ratio);
+                ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+                ctx.lineWidth = 2;
+                ctx.lineJoin = 'round';
+                ctx.lineCap = 'round';
+                ctx.strokeStyle = '#111827';
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                dirty = false;
+                if (hidden) hidden.value = '';
+            }}
+            function pointFrom(e) {{
+                const rect = canvas.getBoundingClientRect();
+                const touch = e.touches && e.touches[0] ? e.touches[0] : null;
+                const x = touch ? touch.clientX : e.clientX;
+                const y = touch ? touch.clientY : e.clientY;
+                return {{x: x - rect.left, y: y - rect.top}};
+            }}
+            function start(e) {{
+                e.preventDefault();
+                const p = pointFrom(e);
+                drawing = true;
+                ctx.beginPath();
+                ctx.moveTo(p.x, p.y);
+            }}
+            function move(e) {{
+                if (!drawing) return;
+                e.preventDefault();
+                const p = pointFrom(e);
+                ctx.lineTo(p.x, p.y);
+                ctx.stroke();
+                dirty = true;
+            }}
+            function end(e) {{
+                if (!drawing) return;
+                e.preventDefault();
+                drawing = false;
+                if (dirty && hidden) hidden.value = canvas.toDataURL('image/png');
+            }}
+            canvas.addEventListener('mousedown', start);
+            canvas.addEventListener('mousemove', move);
+            canvas.addEventListener('mouseup', end);
+            canvas.addEventListener('mouseleave', end);
+            canvas.addEventListener('touchstart', start, {{passive:false}});
+            canvas.addEventListener('touchmove', move, {{passive:false}});
+            canvas.addEventListener('touchend', end, {{passive:false}});
+            if (clearBtn) clearBtn.addEventListener('click', resizeCanvas);
+            window.__lcBeforeSubmit = function() {{
+                if (!dirty || !hidden || !hidden.value) {{
+                    alert('Debes realizar la firma manuscrita antes de enviar.');
+                    return false;
+                }}
+                return true;
+            }};
+            window.addEventListener('resize', resizeCanvas);
+            resizeCanvas();
+        }})();
+    </script>
+    '''
+
+
+def render_admin_client_legal_contract_panel(client_id):
+    status_map = get_clients_legal_contract_status_map([client_id]).get(int(client_id), {})
+    active_version_id = int(status_map.get('active_version_id') or 0)
+    is_signed = bool(status_map.get('signed'))
+    signature = get_client_legal_contract_signature(client_id, active_version_id) if active_version_id > 0 else None
+    history = list_client_legal_contract_signatures(client_id)
+
+    history_rows = ''.join([
+        '<tr>'
+        f'<td>V{int(item.get("version_id") or 0)}</td>'
+        f'<td>{html.escape(format_feedback_datetime_es(item.get("signed_at") or "")[0])}</td>'
+        f'<td>{html.escape(str(item.get("full_name") or "-"))}</td>'
+        f'<td>{html.escape(str(item.get("ip_address") or "-"))}</td>'
+        f'<td>{html.escape(str(item.get("device_type") or "-"))}</td>'
+        f'<td>{html.escape(str(item.get("browser_name") or "-"))}</td>'
+        f'<td><a class="mini-btn" href="/export_signed_legal_contract_pdf?signature_id={int(item.get("id") or 0)}" target="_blank">Descargar PDF</a></td>'
+        '</tr>'
+        for item in history
+    ])
+
+    status_text = 'Firmado' if is_signed else 'Pendiente de firma'
+    signed_date = format_feedback_datetime_es(signature.get('signed_at') or '')[0] if signature else '-'
+    signed_pdf_link = f'<a class="mini-btn" href="/export_signed_legal_contract_pdf?signature_id={int(signature.get("id") or 0)}" target="_blank">PDF firmado actual</a>' if signature else ''
+    history_rows_html = history_rows if history_rows else '<tr><td colspan="7">Sin contratos firmados</td></tr>'
+
+    return (
+        '<section class="panel panel-full">'
+        '<h2>Contrato legal</h2>'
+        '<div class="profile-meta">'
+        f'<span class="chip">Estado: {html.escape(status_text)}</span>'
+        f'<span class="chip">Version activa: V{int(active_version_id or 0)}</span>'
+        f'<span class="chip">Fecha firma: {html.escape(signed_date)}</span>'
+        '</div>'
+        '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px;">'
+        f'<a class="mini-btn" href="/export_legal_contract_pdf?version_id={int(active_version_id or 0)}" target="_blank">PDF versión activa</a>'
+        f'{signed_pdf_link}'
+        '</div>'
+        '<div class="history-group">'
+        '<h3>Historial de contratos firmados</h3>'
+        '<div class="history-item" style="overflow:auto;">'
+        '<table class="review-measures-table">'
+        '<thead><tr><th>Versión</th><th>Fecha</th><th>Nombre</th><th>IP</th><th>Dispositivo</th><th>Navegador</th><th>Acción</th></tr></thead>'
+        f'<tbody>{history_rows_html}</tbody>'
+        '</table>'
+        '</div>'
+        '</div>'
+        '</section>'
+    )
 
 
 def get_fasting_weight_slots(excluded_months=None):
@@ -8841,7 +11475,14 @@ class Handler(BaseHTTPRequestHandler):
             '/client_register', '/client_onboarding', '/client_login', '/client_app', '/client_logout',
             '/api/client_fasting_weight', '/api/client_daily_steps',
         }
-        public_get_prefixes = ('/static/', '/export_diet_pdf', '/export_routine_pdf', '/export_initial_questionnaire_pdf')
+        public_get_prefixes = (
+            '/static/',
+            '/export_diet_pdf',
+            '/export_routine_pdf',
+            '/export_initial_questionnaire_pdf',
+            '/export_legal_contract_pdf',
+            '/export_signed_legal_contract_pdf',
+        )
         is_public_get = path in public_get_exact or any(path.startswith(pref) for pref in public_get_prefixes)
         if not is_public_get and not self.is_admin_authenticated():
             next_path = path + (('?' + parsed.query) if parsed.query else '')
@@ -9432,10 +12073,18 @@ class Handler(BaseHTTPRequestHandler):
             )
             questionnaire_assignments = list_client_questionnaire_assignments(client_id)
             questionnaire_submitted = len([a for a in questionnaire_assignments if str(a.get('status') or '') == 'submitted'])
+            legal_contract_return_to = f'/client_app?section=legal_contract{preview_qs}'
+            legal_contract_html = render_client_legal_contract_panel(
+                client_id,
+                legal_contract_return_to,
+                admin_mode=admin_preview,
+            )
+            legal_contract_status_map = get_clients_legal_contract_status_map([client_id]).get(int(client_id), {})
+            legal_contract_signed = bool(legal_contract_status_map.get('signed'))
             feedback_submissions = get_client_weekly_feedback_submissions(client_id)
             feedback_submitted = len(feedback_submissions)
 
-            if selected_section not in ('diet', 'routine', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire'):
+            if selected_section not in ('diet', 'routine', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire', 'legal_contract'):
                 selected_section = ''
 
             section_titles = {
@@ -9447,6 +12096,7 @@ class Handler(BaseHTTPRequestHandler):
                 'calendar': 'Calendario de avisos',
                 'reviews': 'Mis revisiones',
                 'questionnaire': 'Cuestionario inicial',
+                'legal_contract': 'Contrato legal',
             }
             section_descriptions = {
                 'diet': 'Consulta tu plan actual y descarga tu PDF.',
@@ -9457,6 +12107,7 @@ class Handler(BaseHTTPRequestHandler):
                 'calendar': 'Fechas de inicio/fin del plan y avisos importantes.',
                 'reviews': 'Sube fotos y medidas corporales para tu seguimiento.',
                 'questionnaire': '',
+                'legal_contract': 'Lee, acepta y firma tu documentacion legal obligatoria.',
             }
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
@@ -9467,6 +12118,7 @@ class Handler(BaseHTTPRequestHandler):
                 'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
                 'reviews': f'{review_count} revisiones' if review_count > 0 else 'Sin revisiones',
                 'questionnaire': 'Realizado' if questionnaire_submitted > 0 else 'Pendiente',
+                'legal_contract': 'Firmado' if legal_contract_signed else 'Pendiente de firma',
             }
 
             section_content = {
@@ -9478,6 +12130,7 @@ class Handler(BaseHTTPRequestHandler):
                 'calendar': calendar_html,
                 'reviews': review_submit_form_html + review_upcoming_html + review_cards_html + review_detail_html,
                 'questionnaire': questionnaire_html,
+                'legal_contract': legal_contract_html,
             }
 
             cards_html = ''.join([
@@ -9486,7 +12139,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'<h3>{html.escape(section_titles[key])}</h3>'
                 + (f'<p>{html.escape(section_descriptions[key])}</p>' if section_descriptions[key] else '') +
                 '</a>'
-                for key in ('diet', 'routine', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire')
+                for key in ('diet', 'routine', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire', 'legal_contract')
             ])
 
             detail_html = ''
@@ -9509,6 +12162,15 @@ class Handler(BaseHTTPRequestHandler):
             welcome_subtitle = 'Selecciona un apartado para ver todo el detalle de tu progreso.'
             if admin_preview:
                 welcome_subtitle = 'Vista previa como cliente desde admin. Puedes navegar y revisar cómo lo verá el cliente en móvil.'
+
+            legal_contract_notice_html = ''
+            if not legal_contract_signed:
+                legal_contract_notice_html = (
+                    '<section class="welcome" style="border-color:#fdba74;background:#fff7ed;">'
+                    '<h2 style="margin:0;font-size:1.12rem;">Documentación obligatoria pendiente</h2>'
+                    '<p style="margin:8px 0 0;color:#7c2d12;">Tu contrato legal está pendiente de firma. Para finalizar correctamente el alta, accede a "Contrato legal" y completa la firma electrónica.</p>'
+                    '</section>'
+                )
 
             page = f'''
 <!doctype html>
@@ -9692,6 +12354,7 @@ class Handler(BaseHTTPRequestHandler):
             <h2>Bienvenido/a a tu panel</h2>
             <p>{html.escape(welcome_subtitle)}</p>
         </section>
+        {legal_contract_notice_html}
         <section class="cards">{cards_html}</section>
         {detail_html}
     </div>
@@ -9830,6 +12493,10 @@ class Handler(BaseHTTPRequestHandler):
             <a class="card" href="/weekly_feedback_editor">
                 <h2>💬 Editor feedback semanal</h2>
                 <p>Configura las preguntas y revisa todos los feedbacks enviados.</p>
+            </a>
+            <a class="card" href="/legal_contract_editor">
+                <h2>⚖️ Contrato legal</h2>
+                <p>Versiona, publica y controla la firma legal obligatoria de cada cliente.</p>
             </a>
     </section>
 
@@ -10159,11 +12826,14 @@ class Handler(BaseHTTPRequestHandler):
             clients = sorted(clients, key=lambda c: (str(c[1] or '').casefold(), c[0]))
             active_routine_by_client = get_active_client_routines_map([c[0] for c in clients]) if clients else {}
             active_diet_by_client = get_active_client_diets_map([c[0] for c in clients]) if clients else {}
+            contract_status_by_client = get_clients_legal_contract_status_map([c[0] for c in clients]) if clients else {}
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
             client_cards = []
             total_clients = len(clients)
             active_clients = 0
             inactive_clients = 0
+            contract_signed_clients = 0
+            contract_pending_clients = 0
             from datetime import date, datetime
             for c in clients:
                 client_id, name, phone, email, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, created_at = c
@@ -10219,16 +12889,26 @@ class Handler(BaseHTTPRequestHandler):
                         '</form>'
                     )
 
+                contract_status = contract_status_by_client.get(int(client_id), {})
+                contract_signed = bool(contract_status.get('signed'))
+                contract_label = f"Firmado V{int(contract_status.get('active_version_id') or 0)}" if contract_signed else 'Pendiente'
+                if contract_signed:
+                    contract_signed_clients += 1
+                else:
+                    contract_pending_clients += 1
+
                 status_class = 'status-active' if is_active else 'status-inactive'
                 search_blob = ' '.join([
                     str(name or ''), str(phone_value), str(email_value), str(service_status), str(plan_label),
-                    str(monthly_fee), str(objective), str(plan_start_date or ''), str(plan_end_date or ''), str(created_at or ''), str(client_id)
+                    str(monthly_fee), str(objective), str(plan_start_date or ''), str(plan_end_date or ''), str(created_at or ''), str(client_id),
+                    str(contract_label),
                 ]).lower().strip()
 
                 client_cards.append(
                     f'<article class="client-card" data-active="{"1" if is_active else "0"}" '
                     f'data-has-plan="{"1" if (plan_start_date or plan_end_date) else "0"}" '
                     f'data-has-fee="{"1" if (plan_amount and plan_amount > 0) else "0"}" '
+                    f'data-contract-signed="{"1" if contract_signed else "0"}" '
                     f'data-search="{html.escape(search_blob)}">'
                     f'<div class="card-head"><h3>{html.escape(name)}</h3><span class="service-status {status_class}">{html.escape(service_status)}</span></div>'
                     f'<div class="card-grid">'
@@ -10242,6 +12922,7 @@ class Handler(BaseHTTPRequestHandler):
                     f'<div class="kv"><span>Plan</span><strong>{html.escape(plan_label)}</strong></div>'
                     f'<div class="kv"><span>Mensualidad</span><strong>{html.escape(monthly_fee)}</strong></div>'
                     f'<div class="kv"><span>Objetivo</span><strong>{html.escape(objective)}</strong></div>'
+                    f'<div class="kv"><span>Contrato</span><strong>{html.escape(contract_label)}</strong></div>'
                     f'</div>'
                     f'<div class="card-actions">'
                     f'<a class="card-btn" href="/client_profile?id={client_id}">Ver perfil</a>'
@@ -10389,6 +13070,13 @@ class Handler(BaseHTTPRequestHandler):
                         <option value="free">Sin mensualidad</option>
                     </select>
                 </label>
+                <label>Contrato legal
+                    <select id="filter-contract">
+                        <option value="all">Todos</option>
+                        <option value="signed">Firmado ({contract_signed_clients})</option>
+                        <option value="pending">Pendiente ({contract_pending_clients})</option>
+                    </select>
+                </label>
             </div>
         </div>
 
@@ -10406,6 +13094,7 @@ class Handler(BaseHTTPRequestHandler):
             const filterPanel = document.getElementById('filter-panel');
             const filterPlan = document.getElementById('filter-plan');
             const filterFee = document.getElementById('filter-fee');
+            const filterContract = document.getElementById('filter-contract');
             const emptyState = document.getElementById('empty-state');
 
             let currentTab = 'all';
@@ -10423,6 +13112,7 @@ class Handler(BaseHTTPRequestHandler):
                 const query = (searchInput.value || '').toLowerCase().trim();
                 const planMode = filterPlan.value;
                 const feeMode = filterFee.value;
+                const contractMode = filterContract.value;
                 let visible = 0;
 
                 cards.forEach((card) => {{
@@ -10430,6 +13120,7 @@ class Handler(BaseHTTPRequestHandler):
                     const searchBlob = card.dataset.search || '';
                     const planFlag = card.dataset.hasPlan || '0';
                     const feeFlag = card.dataset.hasFee || '0';
+                    const contractSignedFlag = card.dataset.contractSigned || '0';
 
                     const matchesTab = currentTab === 'all' || cardTab === currentTab;
                     const matchesQuery = !query || searchBlob.includes(query);
@@ -10443,8 +13134,13 @@ class Handler(BaseHTTPRequestHandler):
                         (feeMode === 'paid' && feeFlag === '1') ||
                         (feeMode === 'free' && feeFlag === '0')
                     );
+                    const matchesContract = (
+                        contractMode === 'all' ||
+                        (contractMode === 'signed' && contractSignedFlag === '1') ||
+                        (contractMode === 'pending' && contractSignedFlag === '0')
+                    );
 
-                    const show = matchesTab && matchesQuery && matchesPlan && matchesFee;
+                    const show = matchesTab && matchesQuery && matchesPlan && matchesFee && matchesContract;
                     card.classList.toggle('is-hidden', !show);
                     if (show) visible += 1;
                 }});
@@ -10463,6 +13159,7 @@ class Handler(BaseHTTPRequestHandler):
             searchInput.addEventListener('input', applyFilters);
             filterPlan.addEventListener('change', applyFilters);
             filterFee.addEventListener('change', applyFilters);
+            filterContract.addEventListener('change', applyFilters);
             toggleFilters.addEventListener('click', () => {{
                 filterPanel.classList.toggle('is-open');
             }});
@@ -10883,6 +13580,9 @@ class Handler(BaseHTTPRequestHandler):
                     show_admin_controls=True,
                 )
                 questionnaire_versions = get_initial_questionnaire_versions()
+            legal_contract_panel_html = ''
+            if selected_section == 'legal_contract':
+                legal_contract_panel_html = render_admin_client_legal_contract_panel(cid_i)
             if selected_section == 'reviews' or selected_review_id:
                 review_submit_form_html = render_new_review_toggle_panel(
                     render_client_review_submit_form(cid_i, reviews_base_url, review_schedule)
@@ -11023,6 +13723,10 @@ class Handler(BaseHTTPRequestHandler):
             </section>
             '''
 
+            legal_contract_status_map = get_clients_legal_contract_status_map([cid_i]).get(int(cid_i), {})
+            legal_contract_signed = bool(legal_contract_status_map.get('signed'))
+            legal_contract_panel = legal_contract_panel_html or render_admin_client_legal_contract_panel(cid_i)
+
             section_titles = {
                 'diet': 'Dietas',
                 'training': 'Entrenamientos',
@@ -11032,6 +13736,7 @@ class Handler(BaseHTTPRequestHandler):
                 'calendar': 'Calendario de avisos',
                 'reviews': 'Revisiones',
                 'questionnaire': 'Cuestionario inicial',
+                'legal_contract': 'Contrato legal',
             }
             section_descriptions = {
                 'diet': 'Asigna dietas y revisa el historial del cliente.',
@@ -11042,6 +13747,7 @@ class Handler(BaseHTTPRequestHandler):
                 'calendar': 'Inicio/fin de plan y avisos personalizados del cliente.',
                 'reviews': 'Configura y analiza revisiones con fotos y medidas.',
                 'questionnaire': '',
+                'legal_contract': 'Control del estado legal firmado y su histórico PDF.',
             }
             section_status = {
                 'diet': 'Activa' if active_diet else 'Sin dieta activa',
@@ -11052,6 +13758,7 @@ class Handler(BaseHTTPRequestHandler):
                 'calendar': f'{len(calendar_events)} avisos' if calendar_events else 'Sin avisos',
                 'reviews': f'{review_count} revisiones · {review_schedule_status_text}' if review_count > 0 else f'Sin revisiones · {review_schedule_status_text}',
                 'questionnaire': 'Realizado' if len([a for a in list_client_questionnaire_assignments(cid_i) if str(a.get('status') or '') == 'submitted']) > 0 else 'Pendiente',
+                'legal_contract': 'Firmado' if legal_contract_signed else 'Pendiente de firma',
             }
             section_content = {
                 'diet': diet_panel_html,
@@ -11062,6 +13769,7 @@ class Handler(BaseHTTPRequestHandler):
                 'calendar': calendar_panel_html,
                 'reviews': reviews_panel_html,
                 'questionnaire': questionnaire_panel,
+                'legal_contract': legal_contract_panel,
             }
 
             if selected_section not in section_content:
@@ -11073,7 +13781,7 @@ class Handler(BaseHTTPRequestHandler):
                 f'<h3>{html.escape(section_titles[key])}</h3>'
                 + (f'<p>{html.escape(section_descriptions[key])}</p>' if section_descriptions[key] else '') +
                 '</a>'
-                for key in ('diet', 'training', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire')
+                for key in ('diet', 'training', 'weight', 'steps', 'feedback', 'calendar', 'reviews', 'questionnaire', 'legal_contract')
             ])
 
             detail_html = ''
@@ -11739,6 +14447,138 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(pdf)
             return
 
+        if path == '/export_legal_contract_pdf':
+            version_id_raw = q.get('version_id', [''])[0]
+            client_id_raw = q.get('client_id', [''])[0]
+            try:
+                version_id_i = int(version_id_raw) if str(version_id_raw).strip() else get_active_legal_contract_version_id()
+            except Exception:
+                version_id_i = 0
+            if version_id_i <= 0:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            if session_client_id is not None and client_id_raw:
+                try:
+                    requested_client_id = int(client_id_raw)
+                except Exception:
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                if int(session_client_id) != int(requested_client_id):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+            elif session_client_id is None and not self.is_admin_authenticated():
+                self.send_response(303)
+                self.send_header('Location', '/client_login?next=' + urllib.parse.quote(self.path))
+                self.end_headers()
+                return
+
+            try:
+                client_id_i = int(client_id_raw) if str(client_id_raw).strip() else 0
+            except Exception:
+                client_id_i = 0
+            version = get_legal_contract_version(version_id_i)
+            if not version:
+                self.send_response(404)
+                self.end_headers()
+                return
+            export_errors = validate_legal_contract_pdf_payload(version, signature=None, client_id=client_id_i)
+            if export_errors:
+                self.send_response(422)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                body = ('No se pudo generar el PDF.\n- ' + '\n- '.join(export_errors[:6])).encode('utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            pdf = build_legal_contract_pdf(version_id_i, client_id=client_id_i)
+            if not pdf:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/pdf')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Disposition', f'attachment; filename="contrato_legal_v{version_id_i}.pdf"')
+            self.send_header('Content-Length', str(len(pdf)))
+            self.end_headers()
+            self.wfile.write(pdf)
+            return
+
+        if path == '/export_signed_legal_contract_pdf':
+            signature_id_raw = q.get('signature_id', [''])[0]
+            try:
+                signature_id_i = int(signature_id_raw)
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            signature = get_legal_contract_signature_by_id(signature_id_i)
+            if not signature:
+                self.send_response(404)
+                self.end_headers()
+                return
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            if session_client_id is not None:
+                if int(session_client_id) != int(signature.get('client_id') or 0):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+            elif not self.is_admin_authenticated():
+                self.send_response(303)
+                self.send_header('Location', '/client_login?next=' + urllib.parse.quote(self.path))
+                self.end_headers()
+                return
+
+            version = get_legal_contract_version(signature.get('version_id'))
+            if not version:
+                self.send_response(404)
+                self.end_headers()
+                return
+            export_errors = validate_legal_contract_pdf_payload(
+                version,
+                signature=signature,
+                client_id=signature.get('client_id'),
+            )
+            if export_errors:
+                self.send_response(422)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                body = ('No se pudo generar el PDF firmado.\n- ' + '\n- '.join(export_errors[:6])).encode('utf-8')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+
+            pdf = build_legal_contract_pdf(signature.get('version_id'), signature_id=signature_id_i)
+            if not pdf:
+                self.send_response(404)
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/pdf')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Disposition', f'attachment; filename="contrato_firmado_{signature_id_i}.pdf"')
+            self.send_header('Content-Length', str(len(pdf)))
+            self.end_headers()
+            self.wfile.write(pdf)
+            return
+
         if path == '/initial_questionnaire_editor':
             version_id = q.get('version_id', [''])[0]
             msg = q.get('msg', [''])[0]
@@ -11781,6 +14621,25 @@ class Handler(BaseHTTPRequestHandler):
                 client_id=client_id_i,
                 submission_id=submission_id_i,
             )
+            body = page.encode('utf-8')
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        if path == '/legal_contract_editor':
+            version_id = q.get('version_id', [''])[0]
+            msg = q.get('msg', [''])[0]
+            try:
+                version_id_i = int(version_id) if str(version_id).strip() else None
+            except Exception:
+                version_id_i = None
+            page = render_legal_contract_editor_page(version_id=version_id_i, msg=msg)
             body = page.encode('utf-8')
             self.send_response(200)
             self.send_header('Content-Type', 'text/html; charset=utf-8')
@@ -14714,6 +17573,8 @@ class Handler(BaseHTTPRequestHandler):
             '/submit_client_initial_questionnaire',
             '/upload_client_initial_questionnaire_file',
             '/submit_client_weekly_feedback',
+            '/prepare_client_legal_contract_identity',
+            '/submit_client_legal_contract',
         }
         if path not in public_post_paths and not self.is_admin_authenticated():
             self.redirect_admin_login(path)
@@ -15187,6 +18048,227 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        if path == '/prepare_client_legal_contract_identity':
+            client_id_raw = get('client_id').strip()
+            version_id_raw = get('version_id').strip()
+            return_to = get('return_to').strip() or '/client_app?section=legal_contract'
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            is_admin = self.is_admin_authenticated()
+
+            try:
+                client_id_i = int(client_id_raw)
+                version_id_i = int(version_id_raw)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Solicitud inválida'))
+                self.end_headers()
+                return
+
+            if session_client_id is not None:
+                if int(session_client_id) != int(client_id_i):
+                    self.send_response(303)
+                    self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('No autorizado'))
+                    self.end_headers()
+                    return
+            elif not is_admin:
+                self.send_response(303)
+                self.send_header('Location', '/client_login?next=' + urllib.parse.quote(return_to))
+                self.end_headers()
+                return
+
+            existing_signature = get_client_legal_contract_signature(client_id_i, version_id_i)
+            if existing_signature:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('El contrato ya está firmado para esta versión'))
+                self.end_headers()
+                return
+
+            version = get_legal_contract_version(version_id_i)
+            if not version:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Versión de contrato no encontrada'))
+                self.end_headers()
+                return
+
+            identity_payload = _build_manual_client_legal_context(
+                {
+                    'client_full_name': get('client_full_name'),
+                    'client_dni': get('client_dni'),
+                    'client_address': get('client_address'),
+                    'client_email': get('client_email'),
+                    'client_phone': get('client_phone'),
+                }
+            )
+
+            if not identity_payload.get('client_full_name'):
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes indicar tu nombre y apellidos'))
+                self.end_headers()
+                return
+            if not identity_payload.get('client_dni'):
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes indicar tu DNI/NIE'))
+                self.end_headers()
+                return
+            if not identity_payload.get('client_address'):
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes indicar tu dirección'))
+                self.end_headers()
+                return
+            if not identity_payload.get('client_email') or '@' not in identity_payload.get('client_email'):
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes indicar un correo electrónico válido'))
+                self.end_headers()
+                return
+            if not identity_payload.get('client_phone'):
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes indicar tu teléfono'))
+                self.end_headers()
+                return
+
+            variables = _build_legal_contract_variable_context(version=version, client_id=client_id_i, signature=None)
+            variables.update(_manual_identity_to_contract_variables(identity_payload))
+            rendered_contract_html = _replace_legal_contract_variables_html(version.get('content_html') or '', variables, for_pdf=False)
+            upsert_client_legal_contract_pre_signature(client_id_i, version_id_i, identity_payload, rendered_contract_html)
+
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Datos legales guardados. Revisa el contrato y firma para continuar'))
+            self.end_headers()
+            return
+
+        if path == '/submit_client_legal_contract':
+            client_id_raw = get('client_id').strip()
+            version_id_raw = get('version_id').strip()
+            return_to = get('return_to').strip() or '/client_app?section=legal_contract'
+            signature_data_url = get('signature_data_url').strip()
+
+            cookies = parse_cookie_header(self.headers.get('Cookie', ''))
+            token = cookies.get(CLIENT_PORTAL_COOKIE, '')
+            session_client_id = parse_client_portal_session_token(token)
+            is_admin = self.is_admin_authenticated()
+
+            try:
+                client_id_i = int(client_id_raw)
+                version_id_i = int(version_id_raw)
+            except Exception:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Solicitud inválida'))
+                self.end_headers()
+                return
+
+            if session_client_id is not None:
+                if int(session_client_id) != int(client_id_i):
+                    self.send_response(303)
+                    self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('No autorizado'))
+                    self.end_headers()
+                    return
+            elif not is_admin:
+                self.send_response(303)
+                self.send_header('Location', '/client_login?next=' + urllib.parse.quote(return_to))
+                self.end_headers()
+                return
+
+            version = get_legal_contract_version(version_id_i)
+            if not version:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Versión de contrato no encontrada'))
+                self.end_headers()
+                return
+
+            pre_signature = get_client_legal_contract_pre_signature(client_id_i, version_id_i)
+            if not pre_signature:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes completar primero tus datos legales'))
+                self.end_headers()
+                return
+
+            required_checks = version.get('required_checks') or []
+            required_checked = []
+            for idx, text in enumerate(required_checks, start=1):
+                if get(f'required_{idx}').strip() == '1':
+                    required_checked.append(text)
+            if len(required_checked) != len(required_checks):
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes aceptar todas las casillas obligatorias'))
+                self.end_headers()
+                return
+
+            optional_checks = version.get('optional_checks') or []
+            optional_checked = []
+            for idx, text in enumerate(optional_checks, start=1):
+                if get(f'optional_{idx}').strip() == '1':
+                    optional_checked.append(text)
+
+            manual_identity = pre_signature.get('manual_identity') or {}
+            full_name = str(manual_identity.get('client_full_name') or '').strip()
+            if not full_name:
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes completar primero tus datos legales'))
+                self.end_headers()
+                return
+
+            if not _decode_signature_data_url(signature_data_url):
+                self.send_response(303)
+                self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Debes realizar una firma manuscrita válida'))
+                self.end_headers()
+                return
+
+            final_pdf_errors = validate_legal_contract_pdf_payload(
+                version,
+                signature=None,
+                client_id=client_id_i,
+                manual_identity=manual_identity,
+                rendered_html_override=_render_legal_contract_html_with_identity(
+                    version,
+                    client_id_i,
+                    manual_identity=manual_identity,
+                    signature=None,
+                    for_pdf=False,
+                ),
+            )
+            if final_pdf_errors:
+                self.send_response(303)
+                self.send_header(
+                    'Location',
+                    return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Error validando PDF: ' + ' | '.join(final_pdf_errors[:3])),
+                )
+                self.end_headers()
+                return
+
+            user_agent = str(self.headers.get('User-Agent', '') or '')
+            rendered_contract_html_current = _render_legal_contract_html_with_identity(
+                version,
+                client_id_i,
+                manual_identity=manual_identity,
+                signature=None,
+                for_pdf=False,
+            )
+            create_client_legal_contract_signature(
+                client_id_i,
+                version_id_i,
+                full_name,
+                signature_data_url,
+                required_checked,
+                optional_checked,
+                get_request_ip(self),
+                user_agent,
+                detect_device_type(user_agent),
+                detect_browser_name(user_agent),
+                signer_dni=manual_identity.get('client_dni') or '',
+                signer_address=manual_identity.get('client_address') or '',
+                signer_email=manual_identity.get('client_email') or '',
+                signer_phone=manual_identity.get('client_phone') or '',
+                contract_html_snapshot=rendered_contract_html_current,
+            )
+
+            self.send_response(303)
+            self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Contrato firmado correctamente'))
+            self.end_headers()
+            return
+
         if path == '/initial_questionnaire_editor':
             action = get('action').strip()
             version_id_raw = get('version_id').strip()
@@ -15286,6 +18368,130 @@ class Handler(BaseHTTPRequestHandler):
                 redirect_to += '?version_id=' + str(version_id_i) + '&msg=' + urllib.parse.quote(msg)
             else:
                 redirect_to += '?msg=' + urllib.parse.quote(msg)
+            self.send_response(303)
+            self.send_header('Location', redirect_to)
+            self.end_headers()
+            return
+
+        if path == '/legal_contract_editor':
+            action = get('action').strip()
+            version_id_raw = get('version_id').strip()
+            redirect_base = '/legal_contract_editor'
+            msg = 'Cambios guardados'
+            version_id_i = 0
+            try:
+                version_id_i = int(version_id_raw) if version_id_raw else 0
+            except Exception:
+                version_id_i = 0
+
+            if action == 'publish_version':
+                if version_id_i > 0:
+                    publish_legal_contract_version(version_id_i)
+                    msg = 'Version publicada'
+            elif action == 'duplicate_version':
+                if version_id_i > 0:
+                    duplicated_id = duplicate_legal_contract_version(version_id_i)
+                    if duplicated_id > 0:
+                        version_id_i = int(duplicated_id)
+                        msg = 'Version duplicada en borrador'
+                    else:
+                        msg = 'No se pudo duplicar la version'
+            elif action == 'save_legal_profile':
+                professional_signature_data_url = _normalize_signature_data_url_png(get('legal_contract_professional_signature_data_url').strip())
+                set_legal_contract_profile_settings(
+                    {
+                        'legal_contract_company_name': get('legal_contract_company_name').strip(),
+                        'legal_contract_professional_name': get('legal_contract_professional_name').strip(),
+                        'legal_contract_nif': get('legal_contract_nif').strip(),
+                        'legal_contract_address': get('legal_contract_address').strip(),
+                        'legal_contract_phone': get('legal_contract_phone').strip(),
+                        'legal_contract_email': get('legal_contract_email').strip(),
+                        'legal_contract_web': get('legal_contract_web').strip(),
+                        'legal_contract_logo_url': get('legal_contract_logo_url').strip(),
+                        'legal_contract_professional_signature_data_url': professional_signature_data_url,
+                        'legal_contract_pdf_header': get('legal_contract_pdf_header').strip(),
+                        'legal_contract_pdf_footer': get('legal_contract_pdf_footer').strip(),
+                    }
+                )
+                msg = 'Configuracion legal guardada'
+            elif action == 'overwrite_draft':
+                title = get('title').strip() or 'Contrato legal'
+                subtitle = get('subtitle').strip()
+                content_html = get('content_html')
+                required_checks = _parse_contract_checks_text(get('required_checks_text'))
+                optional_checks = _parse_contract_checks_text(get('optional_checks_text'))
+                ok = update_legal_contract_draft_version(
+                    version_id_i,
+                    title,
+                    subtitle,
+                    content_html,
+                    required_checks,
+                    optional_checks,
+                )
+                msg = 'Borrador sobrescrito' if ok else 'No se pudo sobrescribir el borrador'
+            elif action == 'preview_pdf':
+                title = get('title').strip() or 'Contrato legal'
+                subtitle = get('subtitle').strip()
+                content_html = get('content_html')
+                required_checks = _parse_contract_checks_text(get('required_checks_text'))
+                optional_checks = _parse_contract_checks_text(get('optional_checks_text'))
+                preview_version = {
+                    'id': version_id_i if version_id_i > 0 else (get_active_legal_contract_version_id() or 0),
+                    'title': title,
+                    'subtitle': subtitle,
+                    'content_html': content_html,
+                    'required_checks': required_checks,
+                    'optional_checks': optional_checks,
+                    'status': 'draft',
+                    'is_active': 0,
+                }
+                preview_errors = validate_legal_contract_pdf_payload(preview_version, signature=None, client_id=0)
+                if preview_errors:
+                    msg = 'Error validando PDF: ' + ' | '.join(preview_errors[:3])
+                    redirect_to = f'{redirect_base}?msg=' + urllib.parse.quote(msg)
+                    if version_id_i > 0:
+                        redirect_to += '&version_id=' + str(version_id_i)
+                    self.send_response(303)
+                    self.send_header('Location', redirect_to)
+                    self.end_headers()
+                    return
+                pdf = _build_legal_contract_pdf_from_version(preview_version, signature=None, client_id=0)
+                if not pdf:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/pdf')
+                self.send_header('X-Content-Type-Options', 'nosniff')
+                self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+                self.send_header('Pragma', 'no-cache')
+                self.send_header('Expires', '0')
+                self.send_header('Content-Disposition', 'inline; filename="preview_contrato_legal.pdf"')
+                self.send_header('Content-Length', str(len(pdf)))
+                self.end_headers()
+                self.wfile.write(pdf)
+                return
+            elif action == 'save_new_version':
+                title = get('title').strip() or 'Contrato legal'
+                subtitle = get('subtitle').strip()
+                content_html = get('content_html')
+                required_checks = _parse_contract_checks_text(get('required_checks_text'))
+                optional_checks = _parse_contract_checks_text(get('optional_checks_text'))
+                publish_now = 1 if get('publish_now').strip() == '1' else 0
+                new_id = create_legal_contract_version(
+                    title,
+                    subtitle,
+                    content_html,
+                    required_checks,
+                    optional_checks,
+                    publish_now=bool(publish_now),
+                )
+                version_id_i = int(new_id or 0)
+                msg = 'Nueva version creada y publicada' if publish_now else 'Nueva version creada en borrador'
+
+            redirect_to = f'{redirect_base}?msg=' + urllib.parse.quote(msg)
+            if version_id_i > 0:
+                redirect_to += '&version_id=' + str(version_id_i)
             self.send_response(303)
             self.send_header('Location', redirect_to)
             self.end_headers()
@@ -17368,6 +20574,8 @@ class Handler(BaseHTTPRequestHandler):
             cur = conn.cursor()
             cur.execute("SELECT diet_id FROM client_diet_history WHERE client_id = ?", (cid_i,))
             client_diet_ids = [int(r[0]) for r in cur.fetchall() if r[0]]
+            cur.execute("SELECT COALESCE(signed_pdf_path, '') FROM client_legal_contract_signatures WHERE client_id = ?", (cid_i,))
+            contract_pdf_paths = [str(r[0] or '').strip() for r in cur.fetchall() if str(r[0] or '').strip()]
             cur.execute(
                 "SELECT routine_id FROM client_training_history WHERE client_id = ? AND COALESCE(template_routine_id, 0) > 0",
                 (cid_i,),
@@ -17382,6 +20590,8 @@ class Handler(BaseHTTPRequestHandler):
             cur.execute("DELETE FROM client_weekly_feedback_answers WHERE submission_id IN (SELECT id FROM client_weekly_feedback_submissions WHERE client_id = ?)", (cid_i,))
             cur.execute("DELETE FROM client_weekly_feedback_submissions WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM client_weekly_feedback_schedule WHERE client_id = ?", (cid_i,))
+            cur.execute("DELETE FROM client_legal_contract_pre_signatures WHERE client_id = ?", (cid_i,))
+            cur.execute("DELETE FROM client_legal_contract_signatures WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM payment_plans WHERE client_id = ?", (cid_i,))
             cur.execute("DELETE FROM clients WHERE id = ?", (cid_i,))
             for did in client_diet_ids:
@@ -17396,6 +20606,17 @@ class Handler(BaseHTTPRequestHandler):
                 cur.execute("DELETE FROM routines WHERE id = ?", (rid,))
             conn.commit()
             conn.close()
+
+            for public_path in contract_pdf_paths:
+                if not public_path.startswith('/static/uploads/'):
+                    continue
+                upload_rel = public_path[len('/static/uploads/'):]
+                full_path = _resolve_static_upload_file(upload_rel)
+                if full_path and os.path.isfile(full_path):
+                    try:
+                        os.remove(full_path)
+                    except Exception:
+                        pass
             self.send_response(303)
             self.send_header('Location', '/clients?msg=' + urllib.parse.quote('Cliente borrado'))
             self.end_headers()
@@ -17777,6 +20998,7 @@ def run():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(STATIC_BASE_DIR, exist_ok=True)
     os.makedirs(UPLOADS_FOODS_DIR, exist_ok=True)
+    os.makedirs(UPLOADS_CONTRACTS_DIR, exist_ok=True)
     sqlite3.begin_request()
     try:
         ensure_catalog_schema(DB_PATH)
@@ -17795,6 +21017,7 @@ def run():
         ensure_weekly_feedback_tables()
         ensure_client_reviews_table()
         ensure_initial_questionnaire_tables()
+        ensure_legal_contract_tables()
         ensure_diet_builder_tables()
         ensure_app_settings_table()
     finally:
