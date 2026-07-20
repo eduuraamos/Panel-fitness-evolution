@@ -711,6 +711,12 @@ def ensure_clients_table(conn_or_path=None):
         cur.execute("ALTER TABLE clients ADD COLUMN plan_amount REAL DEFAULT 0")
     if 'plan_notes' not in cols:
         cur.execute("ALTER TABLE clients ADD COLUMN plan_notes TEXT")
+    if 'is_active' not in cols:
+        try:
+            cur.execute("ALTER TABLE clients ADD COLUMN is_active INTEGER DEFAULT 1")
+        except Exception as exc:
+            if 'already exists' not in str(exc).lower() and 'duplicatecolumn' not in str(exc).lower():
+                raise
     if 'email' not in cols:
         cur.execute("ALTER TABLE clients ADD COLUMN email TEXT")
     if 'dni' not in cols:
@@ -762,6 +768,7 @@ def ensure_clients_table(conn_or_path=None):
         "UPDATE clients SET review_repeat_enabled = 1 "
         "WHERE COALESCE(review_repeat_enabled, 1) NOT IN (0, 1)"
     )
+    cur.execute("UPDATE clients SET is_active = 1 WHERE is_active IS NULL")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_clients_email ON clients(email)")
     conn.commit()
     if should_close:
@@ -8866,7 +8873,7 @@ def get_clients():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, phone, COALESCE(email, ''), birthdate, COALESCE(height_cm, 0), COALESCE(weight_kg, 0), COALESCE(objectives, ''), COALESCE(plan_start_date, ''), COALESCE(plan_end_date, ''), COALESCE(plan_amount, 0), COALESCE(plan_notes, ''), created_at FROM clients ORDER BY id"
+        "SELECT id, name, phone, COALESCE(email, ''), birthdate, COALESCE(height_cm, 0), COALESCE(weight_kg, 0), COALESCE(objectives, ''), COALESCE(plan_start_date, ''), COALESCE(plan_end_date, ''), COALESCE(plan_amount, 0), COALESCE(plan_notes, ''), COALESCE(is_active, 1), created_at FROM clients ORDER BY id"
     )
     rows = cur.fetchall()
     conn.close()
@@ -8877,12 +8884,22 @@ def get_client_by_id(client_id):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, name, phone, COALESCE(email, ''), birthdate, COALESCE(height_cm, 0), COALESCE(weight_kg, 0), COALESCE(objectives, ''), COALESCE(plan_start_date, ''), COALESCE(plan_end_date, ''), COALESCE(plan_amount, 0), COALESCE(plan_notes, ''), created_at FROM clients WHERE id = ?",
+        "SELECT id, name, phone, COALESCE(email, ''), birthdate, COALESCE(height_cm, 0), COALESCE(weight_kg, 0), COALESCE(objectives, ''), COALESCE(plan_start_date, ''), COALESCE(plan_end_date, ''), COALESCE(plan_amount, 0), COALESCE(plan_notes, ''), COALESCE(is_active, 1), created_at FROM clients WHERE id = ?",
         (int(client_id),),
     )
     row = cur.fetchone()
     conn.close()
     return row
+
+
+def set_client_active_state(client_id, is_active):
+    client_id_i = int(client_id)
+    is_active_i = 1 if int(is_active or 0) == 1 else 0
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("UPDATE clients SET is_active = ? WHERE id = ?", (is_active_i, client_id_i))
+    conn.commit()
+    conn.close()
 
 
 def normalize_login_identifier(value):
@@ -12836,9 +12853,9 @@ class Handler(BaseHTTPRequestHandler):
             contract_pending_clients = 0
             from datetime import date, datetime
             for c in clients:
-                client_id, name, phone, email, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, created_at = c
-                service_status = payment_plan_status(plan_start_date, plan_end_date)
-                is_active = service_status == 'Activo'
+                client_id, name, phone, email, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, is_active_raw, created_at = c
+                is_active = int(is_active_raw or 0) == 1
+                service_status = 'Activo' if is_active else 'No activo'
                 if is_active:
                     active_clients += 1
                 else:
@@ -12860,7 +12877,6 @@ class Handler(BaseHTTPRequestHandler):
                     monthly_fee = f"{plan_amount:.2f} €"
                 else:
                     monthly_fee = '-'
-
                 plan_label = (plan_notes or '').strip() or ('Plan activo' if plan_start_date or plan_end_date else 'Sin plan')
                 objective = (objectives or '').strip() or 'Sin objetivo'
                 phone_value = (phone or '').strip()
@@ -12929,8 +12945,11 @@ class Handler(BaseHTTPRequestHandler):
                     f'{routine_button}'
                     f'{contact_button}'
                     f'<a class="card-btn" href="/edit_client?id={client_id}">Editar</a>'
-                    f'<button class="card-btn" type="button" onclick="clientAction(\'Bloquear\', \'{html.escape(name)}\')">Bloquear</button>'
-                    f'<button class="card-btn" type="button" onclick="clientAction(\'Desactivar\', \'{html.escape(name)}\')">Desactivar</button>'
+                    f'<form method="post" action="/toggle_client_active" style="display:inline;margin:0">'
+                    f'<input type="hidden" name="id" value="{client_id}" />'
+                    f'<input type="hidden" name="active" value="{"0" if is_active else "1"}" />'
+                    f'<input type="hidden" name="return_to" value="/clients" />'
+                    f'<button class="card-btn" type="submit">{"Desactivar" if is_active else "Activar"}</button></form>'
                     f'<form method="post" action="/delete_client" onsubmit="return confirm(\'¿Seguro que quieres eliminar este cliente?\')">'
                     f'<input type="hidden" name="id" value="{client_id}" />'
                     f'<button class="card-btn danger" type="submit">Eliminar</button></form>'
@@ -13263,7 +13282,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
             c = rows[0]
-            _, name, phone, email, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, _created_at = c
+            _, name, phone, email, birthdate, height_cm, weight_kg, objectives, plan_start_date, plan_end_date, plan_amount, plan_notes, _is_active, _created_at = c
             conn = sqlite3.connect(DB_PATH)
             cur = conn.cursor()
             cur.execute("SELECT COALESCE(client_access_code, '') FROM clients WHERE id = ?", (cid_i,))
@@ -13348,7 +13367,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            _, name, phone, email, birthdate, _height_cm, _weight_kg, objectives, _plan_start_date, _plan_end_date, _plan_amount, _plan_notes, _created_at = c
+            _, name, phone, email, birthdate, _height_cm, _weight_kg, objectives, _plan_start_date, _plan_end_date, _plan_amount, _plan_notes, _is_active, _created_at = c
             age = calculate_age(birthdate)
             active_diet = get_active_client_diet(cid_i)
             active_routine = get_active_client_routine(cid_i)
@@ -18858,7 +18877,7 @@ class Handler(BaseHTTPRequestHandler):
                 client_row = get_client_by_id(client_id_i)
 
             if client_row:
-                _, client_name_db, _phone, _email, birthdate, height_db, weight_db, _objectives, _plan_start_date, _plan_end_date, _plan_amount, _plan_notes, _created_at = client_row
+                _, client_name_db, _phone, _email, birthdate, height_db, weight_db, _objectives, _plan_start_date, _plan_end_date, _plan_amount, _plan_notes, _is_active, _created_at = client_row
                 client_name_input = client_name_input or client_name_db or ''
                 try:
                     client_age_value = int(client_age_input or calculate_age(birthdate) or 0)
@@ -20065,6 +20084,33 @@ class Handler(BaseHTTPRequestHandler):
 
             self.send_response(303)
             self.send_header('Location', return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote('Objetivo de pasos actualizado'))
+            self.end_headers()
+            return
+
+        if path == '/toggle_client_active':
+            client_id = get('id').strip()
+            return_to = get('return_to').strip() or '/clients'
+            desired_active = get('active').strip()
+            try:
+                client_id_i = int(client_id)
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                return
+
+            if desired_active not in ('0', '1'):
+                conn = sqlite3.connect(DB_PATH)
+                cur = conn.cursor()
+                cur.execute("SELECT COALESCE(is_active, 1) FROM clients WHERE id = ?", (client_id_i,))
+                row = cur.fetchone()
+                conn.close()
+                desired_active = '0' if int(row[0] or 1) == 1 else '1'
+
+            set_client_active_state(client_id_i, desired_active)
+            msg = 'Cliente activado' if desired_active == '1' else 'Cliente desactivado'
+            location = return_to + ('&' if '?' in return_to else '?') + 'msg=' + urllib.parse.quote(msg)
+            self.send_response(303)
+            self.send_header('Location', location)
             self.end_headers()
             return
 
