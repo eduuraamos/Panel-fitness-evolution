@@ -10339,13 +10339,17 @@ def build_diet_pdf(diet_id):
 
     def day_cfg(day):
         cfg = day_configs.get(day, {})
+        day_kind = str(cfg.get('day_kind') or '').strip().lower()
+        if day_kind not in ('rest', 'training', 'training_plus'):
+            day_kind = 'rest' if not bool(cfg.get('is_training', True)) else 'training'
         return {
+            'day_kind': day_kind,
             'goal_kcal': to_float(cfg.get('goal_kcal')),
             'goal_steps': to_float(cfg.get('goal_steps')),
             'goal_protein': to_float(cfg.get('goal_protein')),
             'goal_fat': to_float(cfg.get('goal_fat')),
             'goal_carbs': to_float(cfg.get('goal_carbs')),
-            'is_training': bool(cfg.get('is_training', True)),
+            'is_training': (day_kind != 'rest'),
         }
 
     shopping = {}
@@ -10592,6 +10596,7 @@ def build_diet_pdf(diet_id):
     for day_idx, day in enumerate(days):
         x = left + meal_col_w + (day_idx * day_col_w)
         cfg = day_cfg(day)
+        day_kind = cfg['day_kind']
         is_training = cfg['is_training']
         goal_kcal = cfg['goal_kcal']
         goal_steps = cfg['goal_steps']
@@ -10601,10 +10606,16 @@ def build_diet_pdf(diet_id):
 
         badge_bg = colors.HexColor('#dcfce7') if is_training else colors.HexColor('#e2e8f0')
         badge_fg = colors.HexColor('#15803d') if is_training else colors.HexColor('#64748b')
-        badge_text = 'Entreno' if is_training else 'Descanso'
+        if day_kind == 'training_plus':
+            badge_text = 'Entreno +'
+        elif day_kind == 'rest':
+            badge_text = 'Descanso'
+        else:
+            badge_text = 'Entreno'
+        badge_w = 52 if day_kind == 'training_plus' else 46
 
         pdf.setFillColor(badge_bg)
-        pdf.roundRect(x + 6, table_top - 17, 46, 11, 3, stroke=0, fill=1)
+        pdf.roundRect(x + 6, table_top - 17, badge_w, 11, 3, stroke=0, fill=1)
         pdf.setFillColor(badge_fg)
         pdf.setFont('Helvetica-Bold', 6.8)
         pdf.drawString(x + 10, table_top - 13.4, badge_text)
