@@ -11800,7 +11800,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             c = client_rows[0]
-            _cid, name, phone, email, birthdate, height_cm, weight_kg, objectives, _psd, _ped, _pa, _pn, _created = c
+            _cid, name, phone, email, birthdate, height_cm, weight_kg, objectives, _psd, _ped, _pa, _pn, _created, _is_active = c
             msg = q.get('msg', [''])[0] if 'msg' in q else ''
             page = f'''
 <!doctype html>
@@ -11967,7 +11967,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             c = client_rows[0]
-            _cid, client_name, _phone, client_email, _birthdate, _height_cm, _weight_kg, _objectives, plan_start_date, plan_end_date, _pa, _pn, _created = c
+            _cid, client_name, _phone, client_email, _birthdate, _height_cm, _weight_kg, _objectives, plan_start_date, plan_end_date, _pa, _pn, _created, _is_active = c
             active_diet = get_active_client_diet(client_id)
             active_routine = get_active_client_routine(client_id)
 
